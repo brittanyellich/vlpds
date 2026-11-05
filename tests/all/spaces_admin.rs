@@ -303,6 +303,7 @@ fn star(commit: &vlpds::space::commit::Commit, records: &[(String, Vec<u8>)]) ->
     for (p, r) in records {
         vlpds::space::star::write_pair(&mut out, p.as_bytes(), r);
     }
+    out.push(0);
     out
 }
 
@@ -477,4 +478,62 @@ async fn rows_left_by_a_stopped_import_are_cleared_by_the_first_write() {
     assert_eq!(chk.ok()["ok"], json!(true), "{}", chk.json);
     assert_eq!(chk.json["records"]["count"], json!(1));
     m.create_record(&space, COLL, Some("y"), rec("another")).await.ok();
+}
+
+/// November 5 alpha: suspended authority reads stop, while its own exports remain possible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn november_authority_suspension_and_exports() {
+    let s = spawn().await;
+    let owner = SpaceClient::new(&s, "novowner", OWNER).await;
+    let member = SpaceClient::new(&s, "novmember", MEMBER).await;
+    let space = owner.create_space(TYPE, "main").await;
+    put_member(&owner, &space, &member.did).await;
+    owner.create_record(&space, COLL, Some("exported"), rec("owner data")).await.ok();
+    let cred = member.credential(&space).await;
+    let auth = Auth::Bearer(owner.session_jwt.clone());
+    let q = [("space", space.as_str())];
+    s.xrpc.post("com.atproto.server.deactivateAccount", &json!({}), &auth).await.ok();
+    member.try_credential_at(&s.url, &space, None).await.err(400, "RepoDeactivated");
+    member.signed_get(&s.url, "com.atproto.space.listRepos", &q, &cred, &owner.did).await.err(400, "RepoDeactivated");
+    s.xrpc.post("com.atproto.space.deleteSpace", &json!({"space": space}), &auth).await.err(401, "AccountDeactivated");
+    s.xrpc.post("com.atproto.server.activateAccount", &json!({}), &auth).await.ok();
+    set_status(&s, json!({"$type": "com.atproto.admin.defs#repoRef", "did": owner.did}), true).await;
+    member.signed_get(&s.url, "com.atproto.space.listRepos", &q, &cred, &owner.did).await.err(400, "RepoTakendown");
+    for method in ["createSpace", "updateSpace", "deleteSpace", "removeWriter"] {
+        let policy = json!({"$type": "com.atproto.memberspace.policy"});
+        let body = match method {
+            "createSpace" => json!({"spaceType": TYPE, "policy": policy}),
+            "updateSpace" => json!({"space": space, "policy": policy}),
+            "removeWriter" => json!({"space": space, "did": member.did}),
+            _ => json!({"space": space}),
+        };
+        s.xrpc.post(&format!("com.atproto.space.{method}"), &body, &auth).await.err(401, "AccountTakedown");
+    }
+    for method in ["putMember", "removeMember"] {
+        s.xrpc
+            .post(
+                &format!("com.atproto.memberspace.{method}"),
+                &json!({"space": space, "did": member.did, "read": true, "write": true}),
+                &auth,
+            )
+            .await
+            .err(401, "AccountTakedown");
+    }
+    let login = s
+        .xrpc
+        .post(
+            "com.atproto.server.createSession",
+            &json!({
+                "identifier": owner.did, "password": crate::oauth::PASSWORD, "allowTakendown": true
+            }),
+            &Auth::None,
+        )
+        .await
+        .ok();
+    let export_auth = Auth::Bearer(login["accessJwt"].as_str().unwrap().into());
+    s.xrpc.get("com.atproto.space.listSpaces", &[], &export_auth).await.ok();
+    s.xrpc.get("com.atproto.space.exportSpaceMeta", &q, &export_auth).await.ok();
+    let repo_q = [("space", space.as_str()), ("repo", owner.did.as_str())];
+    s.xrpc.get("com.atproto.space.getRepo", &repo_q, &export_auth).await.ok();
+    s.xrpc.get("com.atproto.space.listBlobs", &repo_q, &export_auth).await.ok();
 }

@@ -254,16 +254,20 @@ fn swap_last_two_pairs(b: &[u8]) -> Vec<u8> {
     };
     frame(&mut pos);
     let mut pairs = Vec::new();
-    while pos < b.len() {
-        let k = frame(&mut pos);
+    while b[pos] == 1 {
+        let start = pos;
+        pos += 1;
+        frame(&mut pos);
         let v = frame(&mut pos);
-        pairs.push(k.start..v.end);
+        pairs.push(start..v.end);
     }
+    assert_eq!(&b[pos..], &[0]);
     let n = pairs.len();
     pairs.swap(n - 1, n - 2);
     let mut out = b[..pairs.iter().map(|r| r.start).min().unwrap()].to_vec();
     for r in pairs {
         out.extend_from_slice(&b[r]);
     }
+    out.push(0);
     out
 }

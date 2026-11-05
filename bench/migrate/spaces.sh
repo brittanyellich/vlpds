@@ -51,7 +51,7 @@ cleanup() {
     echo "KEEP=1: left running (vlpds pids ${pids[*]}); stop with: kill ${pids[*]}; docker compose -p $project down -v"
     return
   fi
-  for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
+  for p in ${pids[@]+"${pids[@]}"}; do kill "$p" 2>/dev/null || true; done
   docker compose -p "$project" down -v --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT

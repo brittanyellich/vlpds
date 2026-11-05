@@ -10,3 +10,11 @@ testdata/
 tests/
 accounts.json
 *.car
+
+# Deployment tools and local credentials never belong in image build context.
+deploy/cloudflare/node_modules
+deploy/cloudflare/.wrangler
+deploy/cloudflare/.dev.vars*
+deploy/cloudflare/.env*
+
+.git

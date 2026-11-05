@@ -117,6 +117,7 @@ async fn a_huge_frame_is_refused_cheaply() {
     let as_path = |sc: &SpaceClient| {
         let mut header = Vec::new();
         vlpds::space::star::write_header(&mut header, &RepoBuilder::new(&o.space, &sc.did, &rev).build().commit);
+        header.push(1);
         bytes::Bytes::from(framed(&header, (32 << 20) - 64))
     };
     let as_meta = bytes::Bytes::from(framed(&vlpds::space::star::MAGIC, (32 << 20) - 64));
@@ -202,7 +203,7 @@ async fn a_grant_without_space_write_is_refused_before_the_body() {
     assert!(waited.is_err(), "a write grant got an answer without a body: {:?}", waited.unwrap());
 }
 
-/// Metadata over 4 KiB, a record over 1 MiB and more records than the cap
+/// Metadata over 64 KiB, a record over 1 MiB and more records than the cap
 /// are each refused, naming what, and nothing is written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn oversize_frames_are_refused() {
@@ -210,8 +211,8 @@ async fn oversize_frames_are_refused() {
     let rev = rev_ago(Duration::from_secs(60));
     let built = records(RepoBuilder::new(&o.space, &o.bob.did, &rev), 2).build();
 
-    // metadata padded past 4 KiB
-    let meta = framed(&vlpds::space::star::MAGIC, 5000);
+    // metadata padded past 64 KiB
+    let meta = framed(&vlpds::space::star::MAGIC, 65537);
     refused_mentioning(&import_repo(&o.bob, &o.space, &meta).await, &["the metadata is over"]);
 
     // over the record count, counted as the records come

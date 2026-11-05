@@ -1,7 +1,7 @@
 // Spaces migration e2e (README.md "Spaces"): accounts with space repos move
 // to a local vlpds through /migrate in headless Chromium, the Spaces step's
 // OAuth sign-ins included, then every moved repo is checked on vlpds with
-// the reference library (@atproto/space verifyRepoCarFull).
+// the reference library (@atproto/space readRepoStar).
 //
 //   alice: reference PDS (Spaces alpha) -> vlpds, simple mode
 //   erin:  another vlpds -> vlpds, advanced mode
@@ -12,7 +12,7 @@ import { chromium } from 'playwright'
 import { createHash, randomBytes } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { verifyRepoCarFull } from '@atproto/space'
+import { readRepoStar } from '@atproto/space'
 import { hostUrl, oauthLogin } from './lib/oauth.mjs'
 
 const REF = process.env.REF_SPACES ?? 'http://localhost:2786'
@@ -130,10 +130,9 @@ const sha = (b) => createHash('sha256').update(b).digest('hex')
 
 const RUN = randomBytes(2).toString('hex')
 const spaceUri = (authority, skey) => `at://${authority}/space/${TYPE}/${skey}`
-const MEMBERS = { $type: 'com.atproto.simplespace.defs#memberListPolicy' }
-const OPEN = { $type: 'com.atproto.simplespace.defs#open' }
+const MEMBERS = { $type: 'com.atproto.memberspace.policy' }
 // what the seed's apps ask of a vlpds: spaces of the test type, managed and written, and blobs
-const SEED_SCOPE = `atproto space:${TYPE}?authority=*&collection=*&action=read&action=create&manage=create&manage=update blob:*/*`
+const SEED_SCOPE = `atproto space:${TYPE}?authority=*&collection=*&action=read&action=read_self&action=create&manage=create&manage=update blob:*/*`
 
 /** An account and the client its space calls go through: a password session on the reference, OAuth on vlpds. */
 async function account(base, name, domain, { oauth }) {
@@ -152,7 +151,7 @@ async function account(base, name, domain, { oauth }) {
 }
 
 async function createSpace(a, skey) {
-  const out = await a.call('com.atproto.simplespace.createSpace', { body: { spaceType: TYPE, skey, readPolicy: MEMBERS, writePolicy: MEMBERS, appAccess: OPEN } })
+  const out = await a.call('com.atproto.space.createSpace', { body: { spaceType: TYPE, skey, policy: MEMBERS } })
   return out.uri
 }
 
@@ -174,10 +173,19 @@ const signingKey = async (did) => {
   return d.verificationMethods.atproto
 }
 
-/** The repo as its host serves it, verified with the reference library. */
-async function verifiedRepo(car, space, did, didKey) {
-  const v = await verifyRepoCarFull([new Uint8Array(car)], { space, author: did, didKey })
-  return { rev: v.commit.rev, records: v.records.map((r) => `${r.collection}/${r.rkey} ${r.cid.toString()}`).sort() }
+/** Authenticated own-account export: fully drain STAR to verify its record digest.
+ * These exports have no MAC. Identity is checked against the requested repo;
+ * public signing-key rotation is checked separately through PLC below. */
+async function verifiedRepo(archive, space, did) {
+  const v = await readRepoStar([new Uint8Array(archive)])
+  try {
+    if (v.commit.space !== space || v.commit.repo !== did) throw new Error('unexpected space/repo in STAR')
+    const records = []
+    for await (const r of v.records) records.push(`${r.collection}/${r.rkey} ${r.cid.toString()}`)
+    return { rev: v.commit.rev, records: records.sort() }
+  } finally {
+    await v[Symbol.asyncDispose]()
+  }
 }
 
 async function seed() {
@@ -194,7 +202,7 @@ async function seed() {
   ]) {
     member.blobs = {}
     const club = await createSpace(gov, 'club')
-    await gov.call('com.atproto.simplespace.putMember', { body: { space: club, did: member.did, read: true, write: true } })
+    await gov.call('com.atproto.memberspace.putMember', { body: { space: club, did: member.did, read: true, write: true } })
     const notes = await createSpace(member, 'notes')
     await writeRecords(member, club, 3, false)
     await writeRecords(member, notes, 4, true)
@@ -208,7 +216,7 @@ async function seed() {
     member.before = {}
     for (const s of member.spaces) {
       const car = await member.call('com.atproto.space.getRepo', { params: { space: s, repo: member.did }, raw: true })
-      member.before[s] = await verifiedRepo(car, s, member.did, member.oldKey)
+      member.before[s] = await verifiedRepo(car, s, member.did)
     }
     log(`  ${member.handle}: ${member.spaces.length} spaces, ${Object.values(member.before).reduce((n, r) => n + r.records.length, 0)} records, ${Object.keys(member.blobs).length} blob`)
   }
@@ -415,12 +423,12 @@ async function verify(a) {
   })
   for (const space of a.spaces) {
     const car = await s.xrpc('com.atproto.space.getRepo', { params: { space, repo: a.did }, raw: true })
-    // vlpds signs each served commit afresh, with the key the DID names now
-    const got = await verifiedRepo(car, space, a.did, newKey)
+    // The reference reader verifies the full STAR record digest.
+    const got = await verifiedRepo(car, space, a.did)
     const want = a.before[space]
     check(got.rev === want.rev && JSON.stringify(got.records) === JSON.stringify(want.records), `${a.name}: ${space.split('/').pop()} verifies with the same ${want.records.length} records at rev ${want.rev}`)
     // a re-run of the import is a no-op: same rev, same records, same head
-    const again = await s.xrpc('vlpds.space.importRepo', { params: { space }, bytes: car, type: 'application/vnd.ipld.car' }).catch((e) => ({ error: e.message }))
+    const again = await s.xrpc('vlpds.space.importRepo', { params: { space }, bytes: car, type: 'application/octet-stream' }).catch((e) => ({ error: e.message }))
     check(again.rev === want.rev && again.records === want.records.length, `${a.name}: re-importing ${space.split('/').pop()} is idempotent`, JSON.stringify(again))
   }
   for (const [cid, hash] of Object.entries(a.blobs)) {
@@ -428,12 +436,12 @@ async function verify(a) {
     const bytes = await s.xrpc('com.atproto.space.getBlob', { params: { space, repo: a.did, cid }, raw: true }).catch((e) => Buffer.from(e.message))
     check(sha(bytes) === hash, `${a.name}: space blob ${cid.slice(0, 12)}… has the same bytes`)
   }
-  // a new write on vlpds goes on from the imported head, signed with vlpds's key
+  // A new write on vlpds goes on from the imported head.
   const notes = a.spaces[1]
   await s.xrpc('com.atproto.space.createRecord', { body: { space: notes, repo: a.did, collection: COLL, record: { $type: COLL, text: 'after the move', createdAt: new Date().toISOString() } } })
   const car = await s.xrpc('com.atproto.space.getRepo', { params: { space: notes, repo: a.did }, raw: true })
-  const after = await verifiedRepo(car, notes, a.did, newKey).catch((e) => ({ error: e.message }))
-  check(after.records?.length === a.before[notes].records.length + 1 && after.rev > a.before[notes].rev, `${a.name}: a write after the move verifies with the new key`, JSON.stringify(after).slice(0, 200))
+  const after = await verifiedRepo(car, notes, a.did).catch((e) => ({ error: e.message }))
+  check(after.records?.length === a.before[notes].records.length + 1 && after.rev > a.before[notes].rev, `${a.name}: a write after the move verifies against the new commit digest`, JSON.stringify(after).slice(0, 200))
   const old = await xrpc(a.base, 'com.atproto.server.checkAccountStatus', {
     auth: (await xrpc(a.base, 'com.atproto.server.createSession', { body: { identifier: a.did, password: a.password } })).accessJwt,
   })

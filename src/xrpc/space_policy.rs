@@ -215,6 +215,7 @@ fn req_bool(v: &J, k: &str) -> XResult<bool> {
 /// fresh.
 async fn create_space(State(app): AppState, Auth(creds): Auth, Json(inp): Json<J>) -> XResult<Json<J>> {
     spaces(&app)?;
+    app.ensure_active(creds.user_did()?).await?;
     let did = creds.user_did()?.to_string();
     let space_type = inp.get("spaceType").and_then(|t| t.as_str()).unwrap_or("");
     if !vlatproto::syntax::valid_nsid(space_type) {
@@ -271,6 +272,7 @@ async fn get_space(State(app): AppState, Auth(creds): Auth, Query(q): Query<Spac
 /// (a member list), and doesn't re-evaluate the writer set.
 async fn update_space(State(app): AppState, Auth(creds): Auth, Json(inp): Json<J>) -> XResult<StatusCode> {
     spaces(&app)?;
+    app.ensure_active(creds.user_did()?).await?;
     let space = req_space(&inp)?;
     let did = assert_owner(&creds, &space, SpaceAccess::Manage("update"))?;
     let policy = policy_from_lex(inp.get("policy").unwrap_or(&J::Null))?;
@@ -310,6 +312,7 @@ async fn all_members(app: &App, space: &Space) -> XResult<Vec<(String, MemberRow
 /// finishes its sweep and is a no-op.
 async fn delete_space(State(app): AppState, Auth(creds): Auth, Json(inp): Json<J>) -> XResult<StatusCode> {
     spaces(&app)?;
+    app.ensure_active(creds.user_did()?).await?;
     let space = req_space(&inp)?;
     let did = assert_owner(&creds, &space, SpaceAccess::Manage("delete"))?;
     assert_space_host(&app, &space).await?;
@@ -391,6 +394,7 @@ pub(super) async fn delete_space_rows(app: &App, space: &Space) -> XResult<()> {
 /// another policy governs.
 async fn put_member(State(app): AppState, Auth(creds): Auth, Json(inp): Json<J>) -> XResult<StatusCode> {
     spaces(&app)?;
+    app.ensure_active(creds.user_did()?).await?;
     let space = req_space(&inp)?;
     let member = req_did(&inp, "did")?.to_string();
     let access = MemberRow { read: req_bool(&inp, "read")?, write: req_bool(&inp, "write")? };
@@ -404,6 +408,7 @@ async fn put_member(State(app): AppState, Auth(creds): Auth, Json(inp): Json<J>)
 /// too (listRepos stops naming it; its records stay on its host).
 async fn remove_member(State(app): AppState, Auth(creds): Auth, Json(inp): Json<J>) -> XResult<StatusCode> {
     spaces(&app)?;
+    app.ensure_active(creds.user_did()?).await?;
     let space = req_space(&inp)?;
     let member = req_did(&inp, "did")?.to_string();
     let did = assert_owner(&creds, &space, SpaceAccess::Manage("update"))?;
@@ -417,6 +422,7 @@ async fn remove_member(State(app): AppState, Auth(creds): Auth, Json(inp): Json<
 /// allows.
 async fn remove_writer(State(app): AppState, Auth(creds): Auth, Json(inp): Json<J>) -> XResult<StatusCode> {
     spaces(&app)?;
+    app.ensure_active(creds.user_did()?).await?;
     let space = req_space(&inp)?;
     let writer = req_did(&inp, "did")?.to_string();
     let did = assert_owner(&creds, &space, SpaceAccess::Manage("update"))?;

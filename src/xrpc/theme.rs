@@ -37,7 +37,7 @@ pub fn internal_routes() -> Router<Arc<App>> {
 
 /// Idempotent.
 pub fn start(app: &Arc<App>) {
-    th::spawn_refresher(&app.theme, app.store.clone());
+    th::spawn_refresher(&app.theme, app.store.clone(), app.config.dev_mode);
 }
 
 fn node_id(app: &App) -> String {
@@ -248,7 +248,7 @@ async fn nudge_peers(app: &Arc<App>) -> Vec<J> {
 
 async fn internal_reload(State(app): AppState, headers: HeaderMap) -> XResult<Json<J>> {
     super::internal::check(&app, &headers)?;
-    th::refresh(&app.theme, &app.store).await.map_err(|e| XrpcError {
+    th::refresh(&app.theme, &app.store, app.config.dev_mode).await.map_err(|e| XrpcError {
         status: StatusCode::BAD_GATEWAY,
         error: "UpstreamFailure".into(),
         message: format!("{e:#}"),

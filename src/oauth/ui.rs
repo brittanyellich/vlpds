@@ -1524,7 +1524,13 @@ fn methods_block(csrf: &str, did: &str, m: &Methods, anchor: bool) -> String {
 
 /// `notice`: (message, an error). `anchor`: the account whose sign-in
 /// methods a step-up sign-in lands on (else the first shown).
-pub fn account_page(br: &Brand, csrf: &str, accounts: &[AccountRow], notice: Option<(&str, bool)>, anchor: Option<&str>) -> String {
+pub fn account_page(
+    br: &Brand,
+    csrf: &str,
+    accounts: &[AccountRow],
+    notice: Option<(&str, bool)>,
+    anchor: Option<&str>,
+) -> String {
     let anchor = anchor.or_else(|| accounts.iter().find(|a| a.methods.is_some()).map(|a| a.did.as_str()));
     let mut b = String::from("<h1>Connected apps</h1><p class=\"muted\">Apps you have authorized with OAuth. Revoking access signs the app out immediately.</p>");
     if let Some((m, error)) = notice {

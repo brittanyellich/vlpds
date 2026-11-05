@@ -98,6 +98,11 @@ pub const TAKENDOWN_METHODS: &[&str] = &[
     "com.atproto.sync.getBlob",
     "com.atproto.sync.getRepo",
     "com.atproto.sync.listBlobs",
+    "com.atproto.space.listSpaces",
+    "com.atproto.space.exportSpaceMeta",
+    "com.atproto.space.getRepo",
+    "com.atproto.space.listBlobs",
+    "com.atproto.space.getBlob",
     "tools.ozone.inbox.appealActionedSubject",
 ];
 
@@ -219,6 +224,7 @@ impl Credentials {
     pub fn allows_space(&self, t: &SpaceTarget, access: SpaceAccess) -> bool {
         match self {
             Credentials::OAuth { scopes, .. } => scopes.allows_space(t, access),
+            Credentials::Takendown { .. } => matches!(access, SpaceAccess::ReadSelf),
             _ => false,
         }
     }
@@ -342,6 +348,17 @@ pub async fn authenticate(app: &App, parts: &Parts) -> XResult<Credentials> {
         }
         let creds = super::server::verify_bearer(app, tok).await?;
         if matches!(creds, Credentials::Takendown { .. }) && !TAKENDOWN_METHODS.contains(&nsid) {
+            if matches!(
+                nsid,
+                "com.atproto.space.createSpace"
+                    | "com.atproto.space.updateSpace"
+                    | "com.atproto.space.deleteSpace"
+                    | "com.atproto.space.removeWriter"
+                    | "com.atproto.memberspace.putMember"
+                    | "com.atproto.memberspace.removeMember"
+            ) {
+                return Err(super::takedown_error());
+            }
             return Err(XrpcError::bad("InvalidToken", "Bad token scope"));
         }
         return Ok(creds);

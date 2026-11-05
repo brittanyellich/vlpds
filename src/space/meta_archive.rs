@@ -14,7 +14,7 @@
 //! reference's doesn't): what the policy and its state mean is the
 //! importer's to check.
 
-use super::star::{read_varint, write_varint, StarError, MAGIC, MAX_KEY_LENGTH, MAX_META_LENGTH};
+use super::star::{write_varint, Reader, StarError, MAGIC, MAX_KEY_LENGTH, MAX_META_LENGTH};
 use vlatproto::cbor::{key_cmp, Value};
 use vlatproto::tid::Tid;
 
@@ -62,6 +62,7 @@ fn writer_value(w: &MetaWriter) -> Value {
 }
 
 fn pair(out: &mut Vec<u8>, key: &[u8], value: &[u8]) {
+    out.push(1);
     write_varint(out, key.len() as u64);
     out.extend_from_slice(key);
     write_varint(out, value.len() as u64);
@@ -92,6 +93,7 @@ pub fn serialize(a: &SpaceMeta) -> Vec<u8> {
     for (k, v) in writers {
         pair(&mut out, k.as_bytes(), &v.to_cbor());
     }
+    out.push(0);
     out
 }
 
@@ -154,30 +156,15 @@ fn parse_meta(b: &[u8]) -> Result<String, StarError> {
 /// DRISL map (a writer: a valid DID key, TIDs and bytes).
 pub fn parse(b: &[u8]) -> Result<SpaceMeta, StarError> {
     let rest = b.strip_prefix(&MAGIC[..]).ok_or_else(|| fail("invalid magic bytes"))?;
-    let mut pos = 0;
-    let mut frame = |max: u64, at_eof_ok: bool| -> Result<Option<&[u8]>, StarError> {
-        if pos == rest.len() && at_eof_ok {
-            return Ok(None);
-        }
-        let (len, n) = read_varint(&rest[pos..])?.ok_or_else(|| fail("unexpected end of archive"))?;
-        if len > max {
-            return Err(fail(format!("length {len} exceeds limit of {max}")));
-        }
-        let start = pos + n;
-        let end = start
-            .checked_add(len as usize)
-            .filter(|e| *e <= rest.len())
-            .ok_or_else(|| fail("unexpected end of archive"))?;
-        pos = end;
-        Ok(Some(&rest[start..end]))
-    };
-    let meta = frame(MAX_META_LENGTH, false)?.ok_or_else(|| fail("missing metadata"))?;
+    let mut reader = Reader { rest, pos: 0 };
+    let meta = reader.frame(MAX_META_LENGTH)?;
     let space = parse_meta(meta)?;
     let (mut policy, mut policy_state, mut writers) = (None, Vec::new(), Vec::new());
     let mut section: Option<Section> = None;
     let mut prev: Option<Vec<u8>> = None;
-    while let Some(kb) = frame(MAX_KEY_LENGTH, true)? {
-        let vb = frame(MAX_VALUE, false)?.ok_or_else(|| fail("missing value for key"))?;
+    while reader.pair()? {
+        let kb = reader.frame(MAX_KEY_LENGTH)?;
+        let vb = reader.frame(MAX_VALUE)?;
         let key = std::str::from_utf8(kb).map_err(|_| fail("a key isn't UTF-8"))?;
         let s = section_of(key);
         if section != Some(s) {
@@ -277,6 +264,7 @@ mod tests {
         for (k, v) in pairs {
             pair(&mut out, k.as_bytes(), v);
         }
+        out.push(0);
         out
     }
 
@@ -315,6 +303,19 @@ mod tests {
         // an empty state and writer set
         let bare = SpaceMeta { policy_state: vec![], writers: vec![], ..a };
         assert_eq!(parse(&serialize(&bare)).unwrap(), bare);
+    }
+
+    #[test]
+    fn november_control_bytes() {
+        let b = serialize(&sample());
+        assert_eq!(b.last(), Some(&0));
+        assert!(parse(&b[..b.len() - 1]).unwrap_err().0.contains("unexpected end"));
+        let mut bad = b.clone();
+        *bad.last_mut().unwrap() = 3;
+        assert!(parse(&bad).unwrap_err().0.contains("invalid control"));
+        let mut trailing = b;
+        trailing.push(1);
+        assert!(parse(&trailing).unwrap_err().0.contains("unexpected bytes"));
     }
 
     #[test]

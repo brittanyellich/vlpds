@@ -256,7 +256,7 @@ async fn remove_member_drops_the_member_from_the_writer_set() {
     let (alice, dan) = (net.actor("alice", 0).await, net.actor("dan", 0).await);
     let space = space_with(&alice, memberspace(json!({})), &[&dan]).await;
     write(&dan, &space, W::new().text("from a member")).await.ok();
-    assert_eq!(net.await_writer(&alice, &space, &dan.did).await, [dan.did.clone()]);
+    assert_eq!(net.await_writer(&alice, &space, &dan.did).await, std::slice::from_ref(&dan.did));
     remove_member(&alice, &space, &dan).await.ok();
     assert!(net.writer_dids(&alice, &space).await.is_empty());
 }
@@ -271,7 +271,7 @@ async fn put_member_drops_the_member_from_the_writer_set_when_it_revokes_write()
     write(&dan, &space, W::new().text("from a member")).await.ok();
     net.await_writer(&alice, &space, &dan.did).await;
     put_member(&alice, &space, &dan, true, true).await.ok();
-    assert_eq!(net.writer_dids(&alice, &space).await, [dan.did.clone()]);
+    assert_eq!(net.writer_dids(&alice, &space).await, std::slice::from_ref(&dan.did));
     put_member(&alice, &space, &dan, true, false).await.ok();
     assert!(net.writer_dids(&alice, &space).await.is_empty());
 }
@@ -308,9 +308,12 @@ async fn fills_in_the_defaults_of_an_omitted_configuration() {
 async fn replaces_the_policy_wholesale_on_update() {
     let net = Net::new(0).await;
     let alice = net.actor("alice", 0).await;
-    let space =
-        space_with(&alice, memberspace(json!({"publicRead": true, "allowedApps": ["app:x"], "publishMembers": true})), &[])
-            .await;
+    let space = space_with(
+        &alice,
+        memberspace(json!({"publicRead": true, "allowedApps": ["app:x"], "publishMembers": true})),
+        &[],
+    )
+    .await;
     update_space(&alice, &space, memberspace(json!({"publicWrite": true}))).await.ok();
     assert_eq!(
         get_space(&alice, &space).await.ok()["policy"],
@@ -325,7 +328,7 @@ async fn keeps_the_member_list_across_a_configuration_change() {
     let (alice, bob) = (net.actor("alice", 0).await, net.actor("bob", 1).await);
     let space = space_with(&alice, memberspace(json!({})), &[&bob]).await;
     update_space(&alice, &space, memberspace(json!({"publicRead": true}))).await.ok();
-    assert_eq!(member_dids(&list_members(&alice, &space).await.ok()), [bob.did.clone()]);
+    assert_eq!(member_dids(&list_members(&alice, &space).await.ok()), std::slice::from_ref(&bob.did));
 }
 
 /// policy: "refuses an update from a non-owner" (bob's token, presented to
@@ -510,8 +513,7 @@ async fn withdraws_the_published_member_list_on_migration() {
 async fn keeps_the_published_records_when_the_authority_clears_its_repo() {
     let net = Net::new(1).await;
     let (alice, bob) = (net.actor("alice", 0).await, net.actor("bob", 1).await);
-    let space =
-        space_with(&alice, memberspace(json!({"publishPolicy": true, "publishMembers": true})), &[&bob]).await;
+    let space = space_with(&alice, memberspace(json!({"publishPolicy": true, "publishMembers": true})), &[&bob]).await;
     write(&alice, &space, W::new().rkey("own")).await.ok();
     let clear = || alice.post("com.atproto.space.clearRecords", json!({"space": space, "repo": alice.did}));
     clear().await.ok();
@@ -532,7 +534,7 @@ async fn notifies_the_space_of_what_it_publishes() {
     let net = Net::new(0).await;
     let alice = net.actor("alice", 0).await;
     let space = space_with(&alice, memberspace(json!({"publishPolicy": true})), &[]).await;
-    assert_eq!(net.await_writer(&alice, &space, &alice.did).await, [alice.did.clone()]);
+    assert_eq!(net.await_writer(&alice, &space, &alice.did).await, std::slice::from_ref(&alice.did));
 }
 
 /// publishing to readers: "refuses direct writes of published records"
@@ -544,10 +546,17 @@ async fn refuses_direct_writes_of_published_records() {
     let rec = json!({"$type": POLICY, "policy": {"$type": PERSONALSPACE}});
     let refused = ["cannot be written directly"];
     // In any repo, not only the authority's.
-    refused_mentioning(&put(&alice, &space, W::new().collection(POLICY).rkey("self").record(rec.clone())).await, &refused);
+    refused_mentioning(
+        &put(&alice, &space, W::new().collection(POLICY).rkey("self").record(rec.clone())).await,
+        &refused,
+    );
     let member = json!({"$type": MEMBER, "read": true, "write": true});
-    refused_mentioning(&write(&bob, &space, W::new().collection(MEMBER).rkey(&carol.did).record(member)).await, &refused);
-    let writes = json!([{"$type": "com.atproto.space.applyWrites#create", "collection": POLICY, "rkey": "self", "value": rec}]);
+    refused_mentioning(
+        &write(&bob, &space, W::new().collection(MEMBER).rkey(&carol.did).record(member)).await,
+        &refused,
+    );
+    let writes =
+        json!([{"$type": "com.atproto.space.applyWrites#create", "collection": POLICY, "rkey": "self", "value": rec}]);
     let r = bob.post("com.atproto.space.applyWrites", json!({"space": space, "repo": bob.did, "writes": writes})).await;
     refused_mentioning(&r, &refused);
     // Turning validation off doesn't open a way around it.
@@ -585,7 +594,7 @@ async fn personalspace_tracks_no_writer_but_the_authority() {
     write(&bob, &space, W::new().text("not tracked")).await.ok();
     net.await_writer(&alice, &space, &alice.did).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(net.writer_dids(&alice, &space).await, [alice.did.clone()]);
+    assert_eq!(net.writer_dids(&alice, &space).await, std::slice::from_ref(&alice.did));
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ellich-pds",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-05",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "pds.ellich.at/*", "zone_name": "ellich.at" },
+    { "pattern": "*.pds.ellich.at/*", "zone_name": "ellich.at" }
+  ],
+  "containers": [{
+    "class_name": "Pds",
+    "scheduling_policy": "durable_object",
+    "images": { "pds": { "dockerfile": "../../Dockerfile", "build_context": "../.." } }
+  }],
+  "durable_objects": { "bindings": [{ "name": "PDS", "class_name": "Pds" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Pds"] }],
+  "vars": {
+    "PUBLIC_HOST": "pds.ellich.at",
+    "S3_BUCKET": "ellich-pds",
+    "S3_PREFIX": "ellich",
+    "ENABLED": "false"
+  },
+  "observability": { "enabled": true }
+}

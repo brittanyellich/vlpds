@@ -213,9 +213,7 @@ async fn stub(fragment: &str) -> Stub {
             s.lock().push(Seen { path: path.clone(), query, body, auth });
             match (path.as_str(), *a.lock()) {
                 (CHECK, Answer::Authorized(ok)) => json(200, json!({"authorized": ok})),
-                (CHECK, Answer::Status(st)) => {
-                    json(st, json!({"error": "InternalServerError"}))
-                }
+                (CHECK, Answer::Status(st)) => json(st, json!({"error": "InternalServerError"})),
                 _ => json(200, json!({})),
             }
         }
@@ -250,7 +248,10 @@ async fn space_lifecycle_and_policies() {
     }
     let r = owner.post("com.atproto.space.createSpace", json!({"spaceType": "nope", "policy": ml()})).await;
     r.err(400, "InvalidRequest");
-    owner.post("com.atproto.space.createSpace", json!({"spaceType": TYPE, "skey": "np"})).await.err(400, "InvalidRequest");
+    owner
+        .post("com.atproto.space.createSpace", json!({"spaceType": TYPE, "skey": "np"}))
+        .await
+        .err(400, "InvalidRequest");
     // an unknown policy is refused, not stored; so is a managing app that
     // isn't a DID
     create(&owner, "x1", json!({"$type": "com.example.somePolicy"})).await.err(400, "UnsupportedPolicy");
@@ -261,7 +262,12 @@ async fn space_lifecycle_and_policies() {
     assert_eq!(get_space(&owner, &space).await.ok(), json!({"uri": space, "policy": ml()}));
     let p = created(&owner, "p", json!({"$type": "com.atproto.personalspace.policy", "extra": 1})).await;
     assert_eq!(get_space(&owner, &p).await.ok()["policy"], personal());
-    let m = created(&owner, "mg", json!({"$type": "com.atproto.managedspace.policy", "managingApp": "did:web:a.example#x"})).await;
+    let m = created(
+        &owner,
+        "mg",
+        json!({"$type": "com.atproto.managedspace.policy", "managingApp": "did:web:a.example#x"}),
+    )
+    .await;
     assert_eq!(get_space(&owner, &m).await.ok()["policy"], managed("did:web:a.example#x"));
     get_space(&other, &space).await.err(400, "NotSpaceOwner");
 
@@ -312,7 +318,8 @@ async fn member_list() {
     remove_member(&other, &space, &member.did).await.err(400, "NotSpaceOwner");
     members(&other, &space, &[]).await.err(400, "NotSpaceOwner");
     put_member(&owner, &space, "not-a-did", true, true).await.err(400, "InvalidRequest");
-    let r = owner.post("com.atproto.memberspace.putMember", json!({"space": space, "did": member.did, "read": true})).await;
+    let r =
+        owner.post("com.atproto.memberspace.putMember", json!({"space": space, "did": member.did, "read": true})).await;
     r.err(400, "InvalidRequest");
     let none = format!("at://{}/space/{TYPE}/none", owner.did);
     put_member(&owner, &none, &member.did, true, true).await.err(400, "SpaceNotFound");
@@ -442,7 +449,8 @@ async fn published_policy_and_members() {
     assert_eq!(own_record(&owner, &space, POLICY_REC, "self").await.unwrap()["policy"], mp);
     // an unchanged policy writes nothing new
     let head = || async {
-        owner.get("com.atproto.space.getLatestCommit", &[("space", &space), ("repo", &owner.did)]).await.ok()["rev"].clone()
+        owner.get("com.atproto.space.getLatestCommit", &[("space", &space), ("repo", &owner.did)]).await.ok()["rev"]
+            .clone()
     };
     let before = head().await;
     update(&owner, &space, mp.clone()).await.ok();
@@ -529,7 +537,10 @@ async fn the_writer_set() {
     remove(&owner, "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa").await.ok();
     remove(&owner, &format!("at://{}/space/{TYPE}/none", owner.did)).await.err(400, "InvalidRequest");
     owner
-        .post("com.atproto.space.removeWriter", json!({"space": format!("at://{}/space/{TYPE}/none", owner.did), "did": member.did}))
+        .post(
+            "com.atproto.space.removeWriter",
+            json!({"space": format!("at://{}/space/{TYPE}/none", owner.did), "did": member.did}),
+        )
         .await
         .err(400, "SpaceNotFound");
     // the member's records stay on its host
@@ -624,9 +635,12 @@ async fn allow_list_takes_client_attestations() {
     let unlisted =
         oauth::serve_metadata(|id| oauth::confidential_metadata(id, "https://app.example.com/callback", &other_jwk))
             .await;
-    let space =
-        created(&owner, "apps", members_policy(json!({"publicRead": true, "publicWrite": true, "allowedApps": [client]})))
-            .await;
+    let space = created(
+        &owner,
+        "apps",
+        members_policy(json!({"publicRead": true, "publicWrite": true, "allowedApps": [client]})),
+    )
+    .await;
     let aud = format!("{}#atproto_pds", owner.did);
     let now = chrono::Utc::now().timestamp();
     user.try_credential_at(&s.url, &space, None).await.err(400, "AppNotAuthorized");

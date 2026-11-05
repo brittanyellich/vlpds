@@ -79,3 +79,46 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run build
       - run: npm run check-docs
+
+  cloudflare:
+    name: Cloudflare Worker
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: deploy/cloudflare
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "26.12.1"
+          cache: npm
+          cache-dependency-path: deploy/cloudflare/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run dry-run
+
+  container:
+    name: Linux container smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "26.12.1"
+      - name: Build the production image (no publish)
+        run: docker build --build-arg CARGO_PROFILE=release -t vlpds:ci .
+      - name: Check memory plan and start with Spaces
+        run: |
+          node deploy/cloudflare/check-memory.mjs --docker vlpds:ci
+          docker run -d --name vlpds-ci -p 127.0.0.1:2583:2583 vlpds:ci --memory --dev-mode --spaces --public-url http://127.0.0.1:2583
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:2583/xrpc/com.atproto.server.describeServer; then exit 0; fi
+            sleep 2
+          done
+          docker logs vlpds-ci
+          exit 1
+      - name: Stop test container
+        if: always()
+        run: docker rm -f vlpds-ci || true

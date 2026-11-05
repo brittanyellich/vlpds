@@ -647,6 +647,17 @@ async fn refuses_a_tampered_archive() {
         ("a record repeated", built.star_with(|p| p.insert(1, p[0].clone()))),
         ("not a STAR archive", b"not an archive at all".to_vec()),
         ("cut short", full[..full.len() - 5].to_vec()),
+        ("missing end byte", full[..full.len() - 1].to_vec()),
+        ("bad control byte", {
+            let mut b = full.clone();
+            *b.last_mut().unwrap() = 2;
+            b
+        }),
+        ("trailing bytes", {
+            let mut b = full.clone();
+            b.push(0);
+            b
+        }),
         ("no body", Vec::new()),
     ];
     for (what, star) in &cases {
@@ -892,8 +903,7 @@ async fn a_repo_from_before_the_space_was_made_again_is_refused_across_a_cluster
     let bob = SpaceClient::new(&n2, &unique_name("imrb"), FULL_SCOPE).await;
     let make = || async {
         let body = json!({"spaceType": TEST_SPACE_TYPE, "skey": "again", "policy": {"$type": "com.atproto.memberspace.policy"}});
-        let space =
-            alice.post("com.atproto.space.createSpace", body).await.ok()["uri"].as_str().unwrap().to_string();
+        let space = alice.post("com.atproto.space.createSpace", body).await.ok()["uri"].as_str().unwrap().to_string();
         put_member(&alice, &space, &bob, true, true).await.ok();
         space
     };

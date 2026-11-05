@@ -47,9 +47,9 @@ pub fn routes() -> Router<Arc<App>> {
 const BATCH_ROWS: usize = 1000;
 const BATCH_BYTES: usize = 4 << 20;
 /// The metadata, a commit (~200 bytes) with its `$type`.
-const MAX_META: usize = 4 << 10;
+const MAX_META: usize = star::MAX_META_LENGTH as usize;
 /// A record path: an NSID and a record key.
-const MAX_PATH: usize = 1 << 10;
+const MAX_PATH: usize = star::MAX_KEY_LENGTH as usize;
 /// What an import holds besides its frames: tasks, the reader, the claim.
 const FIXED: u64 = 256 << 10;
 
@@ -118,6 +118,24 @@ impl StarReader {
         }
         self.pos += star::MAGIC.len();
         Ok(())
+    }
+
+    async fn pair(&mut self) -> XResult<bool> {
+        if !self.fill(1).await? {
+            return Err(invalid("invalid STAR archive: unexpected end of archive"));
+        }
+        let control = self.buf[self.pos];
+        self.pos += 1;
+        match control {
+            1 => Ok(true),
+            0 => {
+                if self.fill(1).await? {
+                    return Err(invalid("invalid STAR archive: unexpected bytes after end of archive"));
+                }
+                Ok(false)
+            }
+            _ => Err(invalid("invalid STAR archive: invalid control byte")),
+        }
     }
 
     /// The next length-prefixed frame, None at the end (which only a pair
@@ -447,7 +465,11 @@ async fn stage(
     let mut collections: std::collections::BTreeSet<String> = Default::default();
     let mut muts = Vec::new();
     let mut bytes = 0;
-    while let Some(key) = star.frame(MAX_PATH, "record path").await? {
+    while star.pair().await? {
+        let key = star
+            .frame(MAX_PATH, "record path")
+            .await?
+            .ok_or_else(|| invalid("invalid STAR archive: unexpected end of archive"))?;
         let b = star
             .frame(star::MAX_RECORD_SIZE, "record")
             .await?

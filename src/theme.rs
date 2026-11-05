@@ -783,7 +783,7 @@ async fn fetch(store: &Store, etag: Option<String>) -> object_store::Result<Opti
 }
 
 /// Returns whether the theme was replaced.
-pub async fn refresh(d: &Themes, store: &Store) -> anyhow::Result<bool> {
+pub async fn refresh(d: &Themes, store: &Store, dev_mode: bool) -> anyhow::Result<bool> {
     let _io = d.io.lock().await;
     let seen = d.seen_etag.lock().clone();
     let got = match fetch(store, seen.clone()).await {
@@ -799,7 +799,12 @@ pub async fn refresh(d: &Themes, store: &Store) -> anyhow::Result<bool> {
         return Ok(true);
     };
     match serde_json::from_slice::<Doc>(&bytes) {
-        Ok(doc) => {
+        Ok(mut doc) => {
+            if let Err(e) = normalize(&mut doc.theme, dev_mode) {
+                *d.seen_etag.lock() = etag;
+                tracing::warn!("theme.json failed validation (keeping the last good theme): {e}");
+                return Ok(false);
+            }
             let v = doc.version;
             d.install(doc, etag);
             tracing::info!(version = v, "theme loaded");
@@ -813,7 +818,7 @@ pub async fn refresh(d: &Themes, store: &Store) -> anyhow::Result<bool> {
     }
 }
 
-pub fn spawn_refresher(d: &Arc<Themes>, store: Store) {
+pub fn spawn_refresher(d: &Arc<Themes>, store: Store, dev_mode: bool) {
     if d.started.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -821,7 +826,7 @@ pub fn spawn_refresher(d: &Arc<Themes>, store: Store) {
     tokio::spawn(async move {
         loop {
             let Some(d) = weak.upgrade() else { return };
-            if let Err(e) = refresh(&d, &store).await {
+            if let Err(e) = refresh(&d, &store, dev_mode).await {
                 tracing::warn!("theme refresh failed (retrying): {e:#}");
             }
             tokio::select! {
@@ -1104,7 +1109,7 @@ mod tests {
     async fn put_conflict_and_peers_pick_it_up() {
         let store = Store::memory(None);
         let (a, b) = (Themes::default(), Themes::default());
-        assert!(!refresh(&b, &store).await.unwrap());
+        assert!(!refresh(&b, &store, false).await.unwrap());
         let (old, doc) = update(&a, &store, Some(0), "admin", |t| {
             *t = sample();
             Ok(())
@@ -1114,7 +1119,7 @@ mod tests {
         assert_eq!((old.version, doc.version), (0, 1));
         assert_eq!(a.current().brand.display_name(), "cavu");
         assert_eq!(b.current().brand.display_name(), "vlpds");
-        assert!(refresh(&b, &store).await.unwrap());
+        assert!(refresh(&b, &store, false).await.unwrap());
         assert_eq!(b.current().brand.display_name(), "cavu");
         assert_eq!(b.current().doc.updated_by.as_deref(), Some("admin"));
         assert!(matches!(update(&b, &store, Some(0), "x", |_| Ok(())).await, Err(SaveError::Conflict(1))));
@@ -1125,10 +1130,16 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(doc.version, 2);
-        assert!(refresh(&a, &store).await.unwrap());
+        assert!(refresh(&a, &store, false).await.unwrap());
         assert_eq!(a.current().brand.display_name(), "vlpds");
+        let mut poisoned = doc.clone();
+        poisoned.theme = sample();
+        poisoned.theme.colors.light.primary = Some("red;}body{display:none".into());
+        store.raw.put(&config_path(&store), PutPayload::from(serde_json::to_vec(&poisoned).unwrap())).await.unwrap();
+        assert!(!refresh(&a, &store, false).await.unwrap());
+        assert_eq!(a.current().doc.version, 2, "invalid CSS keeps the last good theme");
         store.raw.put(&config_path(&store), PutPayload::from_static(b"{{")).await.unwrap();
-        assert!(!refresh(&a, &store).await.unwrap());
+        assert!(!refresh(&a, &store, false).await.unwrap());
         assert_eq!(a.current().doc.version, 2, "garbage keeps the last good theme");
     }
 }

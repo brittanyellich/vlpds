@@ -1,4 +1,4 @@
-# pds.ellich.at on Cloudflare Containers
+# pds.crate.social on Cloudflare Containers
 
 This deployment targets one always-running PDS with Spaces enabled, backed by R2.
 It is experimental until the live acceptance checks below pass. `ENABLED=false`
@@ -6,7 +6,7 @@ keeps the deployment from starting a container before preflight is complete.
 
 ## Design
 
-All requests use the Durable Object named `ellich-pds-single`. Never change that
+All requests use the Durable Object named `crate-pds-single`. Never change that
 name, the Worker name, or its binding/migration to deploy an upgrade against the
 same R2 prefix. The `durable_object` scheduling policy gives that object lifecycle
 control; it does not support `max_instances`. A five-minute alarm maintains a
@@ -30,13 +30,13 @@ setting `VLPDS_TRUSTED_PROXIES`, otherwise rate limits may group clients togethe
 - Account ID; Workers Paid, Containers, and R2 enabled.
 - Wrangler login (`npx wrangler login` here), or a locally stored API token with
   the permissions Wrangler reports for Workers, Containers/registry, Durable
-  Objects, and the ellich.at zone. Do not put credentials in tracked files.
-- R2 bucket `ellich-pds`, prefix `ellich`; abort incomplete multipart uploads
+  Objects, and the crate.social zone. Do not put credentials in tracked files.
+- R2 bucket `crate-pds`, prefix `crate`; abort incomplete multipart uploads
   after one day. Bucket-scoped S3 object read/write credentials, not an R2 binding:
   vlpds needs the S3 conditional-write semantics tested by its bucket probe.
-- Proxied DNS records for `pds.ellich.at` and `*.pds.ellich.at`, with Worker routes
+- Proxied DNS records for `pds.crate.social` and `*.pds.crate.social`, with Worker routes
   in wrangler.jsonc. Unlike the VPS instructions these must reach the Worker.
-  Verify edge TLS covers `*.pds.ellich.at`; an ordinary `*.ellich.at` certificate
+  Verify edge TLS covers `*.pds.crate.social`; an ordinary `*.crate.social` certificate
   does not cover it. Configure explicit certificate coverage before signup.
 - A verified sender and Cloudflare Email Sending API token/URL. This version
   requires mail settings before startup; an SMTP adapter can replace them.

@@ -1,5 +1,5 @@
 {
-  "name": "ellich-pds-cloudflare",
+  "name": "crate-pds-cloudflare",
   "private": true,
   "type": "module",
   "scripts": {

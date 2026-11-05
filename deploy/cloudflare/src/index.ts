@@ -23,7 +23,7 @@ interface Env {
 }
 
 // Never change this name for an existing bucket/prefix: all traffic owns one instance.
-const INSTANCE = "ellich-pds-single";
+const INSTANCE = "crate-pds-single";
 const INACTIVITY_MS = 60 * 60 * 1000;
 const HEARTBEAT_MS = 5 * 60 * 1000;
 

@@ -27,3 +27,10 @@ export function forwarded(request: Request): Request {
   headers.set("host", new URL(request.url).hostname);
   return new Request(request, { headers });
 }
+
+/** The private container transport accepts HTTP; public URLs remain HTTPS. */
+export function containerRequest(request: Request): Request {
+  const url = new URL(request.url);
+  url.protocol = "http:";
+  return new Request(url, request);
+}

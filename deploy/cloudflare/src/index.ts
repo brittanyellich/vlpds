@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { permitted, forwarded } from "./routing.ts";
+import { permitted, forwarded, containerRequest } from "./routing.ts";
 import { runtimeArgs } from "./runtime.ts";
 
 interface Env {
@@ -100,7 +100,7 @@ export class Pds extends DurableObject<Env> {
       return new Response("PDS starting", { status: 503, headers: { "Retry-After": "5" } });
     }
     // Preserve streams and WebSocket upgrades; never buffer archives or blobs in the Worker.
-    return port.fetch(request);
+    return port.fetch(containerRequest(request));
   }
 }
 

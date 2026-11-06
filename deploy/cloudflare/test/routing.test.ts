@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { permitted, forwarded } from '../src/routing.ts';
+import { permitted, forwarded, containerRequest } from '../src/routing.ts';
 const host = 'pds.crate.social';
 const allowed = (path: string) => permitted(new URL(`https://${host}${path}`), host, 'crate.social');
 test('public protocols and account pages remain reachable', () => {
@@ -30,4 +30,16 @@ test('proxy headers are replaced while auth and WebSocket headers survive', () =
   assert.equal(r.headers.get('cf-access-jwt-assertion'), null);
   assert.equal(r.headers.get('authorization'), 'Bearer session');
   assert.equal(r.headers.get('upgrade'), 'websocket');
+});
+
+test('container transport uses HTTP while retaining host, proxy scheme and streamed body', async () => {
+  const request = forwarded(new Request('https://pds.crate.social/xrpc/com.atproto.repo.uploadBlob?x=1', {
+    method: 'POST', body: 'blob bytes', headers: { 'content-type': 'application/octet-stream' },
+  }));
+  const internal = containerRequest(request);
+  assert.equal(internal.url, 'http://pds.crate.social/xrpc/com.atproto.repo.uploadBlob?x=1');
+  assert.equal(internal.headers.get('host'), 'pds.crate.social');
+  assert.equal(internal.headers.get('x-forwarded-proto'), 'https');
+  assert.equal(internal.method, 'POST');
+  assert.equal(await internal.text(), 'blob bytes');
 });

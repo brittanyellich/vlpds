@@ -4,6 +4,24 @@ This deployment targets one always-running PDS with Spaces enabled, backed by R2
 It is experimental until the live acceptance checks below pass. `ENABLED=false`
 keeps the deployment from starting a container before preflight is complete.
 
+## Current deployment (November 6, 2026)
+
+The live deployment uses the Git-ignored `.wrangler/deployment.json`, with
+`ENABLED=true`, an operator SSH public key, and the CI-tested image pinned to:
+
+`registry.cloudflare.com/adf874842159d9b3330e115c709d28fd/vlpds@sha256:5a7f2728d0304ff391276ad7c43fa1a16fd92bf59d31eec18ed9c1bc0deda63b`
+
+The image was exported by CI run `42261323694` from commit `719a52e`.
+For Worker-only changes, deploy with
+`npx wrangler deploy --config .wrangler/deployment.json` from this directory.
+The default `wrangler.jsonc` remains a disabled build-from-source template;
+using it directly would disable the live service and omit operator SSH access.
+Never upload `.dev.vars` wholesale: it includes the local-only DNS token.
+The recovery private key is in the separate private backup and never uploaded.
+
+The private container hop uses HTTP as required by Cloudflare's container API;
+public requests use HTTPS, with the original host and forwarded scheme retained.
+
 ## Design
 
 All requests use the Durable Object named `crate-pds-single`. Never change that

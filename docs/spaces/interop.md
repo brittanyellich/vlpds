@@ -11,14 +11,14 @@ diagram:
   caption: "vlpds speaks the reference's wire in every role, and the interop harness runs it both ways: ref-ref, vlpds-authority, ref-authority and vlpds-only, plus a three-node vlpds cluster on MinIO."
   nodes:
     - { id: v, label: vlpds, sub: "repo host · space host", at: [0, 3], size: [12, 3], tone: accent }
-    - { id: r, label: Reference PDS, sub: "atproto `5b95b2f2`", at: [26, 3], size: [12, 3], tone: muted }
+    - { id: r, label: Reference PDS, sub: "atproto `1cc3186d`", at: [26, 3], size: [12, 3], tone: muted }
     - { id: s, label: Syncer, sub: "`@atproto/space` consumer", at: [13, 10], size: [12, 3], tone: blue }
   edges:
     - "v <-> r: notifyWrite · credential reads"
     - { from: s.t25, to: v.b, label: listRepoOps, tone: blue }
     - { from: s.t75, to: r.b, label: listRepoOps, tone: blue }
 facts:
-  - { value: "5b95b2f2", label: reference pin, note: "bluesky-social/atproto PR #5187, Oct 1 wire" }
+  - { value: "1cc3186d", label: reference pin, note: "November 5, 2026 alpha wire" }
   - { value: "211", unit: cases, label: of the reference's space suites mapped, note: "196 ported · 7 divergent · 8 N/A", tone: accent }
   - { value: in order, label: fan-out per syncer, note: "the reference's unordered sends leave ~3–5 gaps per ~80", tone: violet }
   - { value: OAuth, label: only, note: "the biggest divergence", tone: rust }
@@ -43,9 +43,25 @@ The lexicons are vendored unmodified in `lexicons/spaces-alpha`; the fixtures in
 The migration endpoints include `com.atproto.space.importSpaceMeta` and
 `com.atproto.space.importRepo`; `vlpds.space.importRepo` remains an extension.
 
-Where the spec is silent and vlpds copies the reference: a removed member stays in `listRepos` at its
-last `repoRev`, `listRepoOps` leaves out values for superseded ops, and `listSpaces` treats its
+Removing a member prunes its writer entry. Re-adding the member permits later write
+notifications to restore that entry asynchronously. `listRepoOps` leaves out values
+for superseded ops, and `listSpaces` treats its
 filters as the scope target, so an unfiltered listing needs a wildcard grant.
+
+## Release review (November 6, 2026)
+
+Checked against the [alpha release thread](https://discourse.atmosphere.community/t/atproto-spaces-alpha-updates/1129/9)
+and its October 22, October 29 and November 5 migration checklists. The implemented
+surface includes KEM/shared-secret commits, public credentials, deletion retries,
+policy-based spaces, writer removal, record clearing, account migration, and the
+November STAR/status changes. Regression coverage lives in `ref_october22`,
+`ref_policy`, `space_migration`, `spaces_clear`, `spaces_host` and `spaces_admin`,
+plus the STAR/KEM unit tests. The announced lexicon and SDK refactors (upstream
+PRs #5800 and #5812) were still open when checked; they are not this release target.
+
+The standalone `bench/spaces/e2e.mjs` matrix still requires a sibling `boards`
+checkout. Its absence limits full external interoperability validation; the
+reference-PDS browser migration tests were run successfully during setup.
 
 ## Where vlpds differs
 
@@ -67,7 +83,7 @@ filters as the scope target, so an unfiltered listing needs a wildcard grant.
 | Backlinks | a like of a space URI is recorded as a backlink | public URIs only |
 | `sync.getBlob` with Spaces on | serves only publicly referenced blobs | the same. Without `--spaces`, vlpds still serves an upload before any record names it |
 | Space takedown | none | a vlpds extension: no credentials, no `listRepos` or registrations, notifies dropped |
-| Credentials for taken-down accounts | issued | refused for a taken-down member or authority |
+| Credentials from suspended authorities | refused with `RepoTakendown` or `RepoDeactivated` | the same; existing credentials remain usable for unaffected member repos until expiry |
 
 ## Upstream gaps
 
@@ -76,6 +92,4 @@ filters as the scope target, so an unfiltered listing needs a wildcard grant.
   body: "A request signature covers only `authorization` and `atproto-space-audience`, with no method or URL. So a captured request can be replayed against any read of the same repo while its credential lives. vlpds requires the audience to be a DID and the target repo, checks the credential's space against the request, and checks revocation on every request."
 - title: Takedowns and the LtHash (Q11)
   body: "The spec has no record takedown for space data, and a hidden record still counts in the repo's data. vlpds serves a takedown-adjusted view: every read builds (and MACs) a commit over the set without the hidden records. It keeps every view verifiable, so upstream could adopt it as is."
-- title: No import endpoint
-  body: "Nothing upstream moves a space repo into a new host. vlpds has `vlpds.space.importRepo`, which takes the STAR archive that `space.getRepo` serves and checks its records against its commit for the importing account, and it'll follow the upstream contract once there is one."
 ```

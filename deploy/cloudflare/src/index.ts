@@ -5,6 +5,7 @@ import { runtimeArgs } from "./runtime.ts";
 interface Env {
   PDS: DurableObjectNamespace<Pds>;
   PUBLIC_HOST: string;
+  HANDLE_DOMAIN: string;
   S3_BUCKET: string;
   S3_PREFIX: string;
   ENABLED: string;
@@ -51,7 +52,7 @@ export class Pds extends DurableObject<Env> {
     const e = this.env;
     const values: Record<string, string> = {
       VLPDS_PUBLIC_URL: `https://${e.PUBLIC_HOST}`,
-      VLPDS_HANDLE_DOMAIN: e.PUBLIC_HOST,
+      VLPDS_HANDLE_DOMAIN: e.HANDLE_DOMAIN,
       VLPDS_SERVICE_DID: `did:web:${e.PUBLIC_HOST}`,
       VLPDS_S3_ENDPOINT: `https://${e.CF_ACCOUNT_ID}.r2.cloudflarestorage.com`,
       VLPDS_S3_REGION: "auto", VLPDS_S3_BUCKET: e.S3_BUCKET, VLPDS_PREFIX: e.S3_PREFIX,
@@ -86,7 +87,7 @@ export class Pds extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
-    if (!permitted(new URL(request.url), this.env.PUBLIC_HOST)) return new Response("Not found", { status: 404 });
+    if (!permitted(new URL(request.url), this.env.PUBLIC_HOST, this.env.HANDLE_DOMAIN)) return new Response("Not found", { status: 404 });
     if (this.env.ENABLED !== "true") return new Response("Deployment pending preflight", { status: 503 });
     await this.ensureRunning();
     const port = this.ctx.container!.getTcpPort(2583);
@@ -105,7 +106,7 @@ export class Pds extends DurableObject<Env> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (!permitted(new URL(request.url), env.PUBLIC_HOST)) return new Response("Not found", { status: 404 });
+    if (!permitted(new URL(request.url), env.PUBLIC_HOST, env.HANDLE_DOMAIN)) return new Response("Not found", { status: 404 });
     return env.PDS.getByName(INSTANCE).fetch(forwarded(request));
   },
 } satisfies ExportedHandler<Env>;

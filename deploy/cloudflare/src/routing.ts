@@ -1,10 +1,10 @@
 /** Only public PDS surfaces are reachable through the public Worker. */
-export function permitted(url: URL, host: string): boolean {
+export function permitted(url: URL, host: string, handleDomain: string): boolean {
   if (url.protocol !== "https:" || url.port) return false;
   // Reject encodings rather than guessing how each downstream router decodes them.
   if (url.pathname.includes("%") || url.pathname.includes("\\")) return false;
   if (url.hostname !== host) {
-    const suffix = `.${host}`;
+    const suffix = `.${handleDomain}`;
     const label = url.hostname.endsWith(suffix) ? url.hostname.slice(0, -suffix.length) : "";
     return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
       && url.pathname === "/.well-known/atproto-did";

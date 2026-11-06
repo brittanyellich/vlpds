@@ -34,10 +34,11 @@ setting `VLPDS_TRUSTED_PROXIES`, otherwise rate limits may group clients togethe
 - R2 bucket `crate-pds`, prefix `crate`; abort incomplete multipart uploads
   after one day. Bucket-scoped S3 object read/write credentials, not an R2 binding:
   vlpds needs the S3 conditional-write semantics tested by its bucket probe.
-- Proxied DNS records for `pds.crate.social` and `*.pds.crate.social`, with Worker routes
+- Proxied DNS records for `pds.crate.social` and `*.crate.social`, with Worker routes
   in wrangler.jsonc. Unlike the VPS instructions these must reach the Worker.
-  Verify edge TLS covers `*.pds.crate.social`; an ordinary `*.crate.social` certificate
-  does not cover it. Configure explicit certificate coverage before signup.
+  The existing Universal SSL certificate covers `pds.crate.social` and single-label
+  handles such as `ada.crate.social`. The wildcard Worker route matches only
+  `/.well-known/atproto-did`, leaving other website and app paths unchanged.
 - A verified sender and Cloudflare Email Sending API token/URL. This version
   requires mail settings before startup; an SMTP adapter can replace them.
 - An operator access method before opening signups: separate Access-protected

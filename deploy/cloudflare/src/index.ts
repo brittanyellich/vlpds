@@ -1,10 +1,13 @@
 import { DurableObject } from "cloudflare:workers";
 import { permitted, forwarded, containerRequest } from "./routing.ts";
+import { OperatorGateway, operatorPath, secure } from "./operator.ts";
 import { runtimeArgs } from "./runtime.ts";
 
 interface Env {
   PDS: DurableObjectNamespace<Pds>;
   PUBLIC_HOST: string;
+  ADMIN_HOST?: string;
+  OPERATOR_DID?: string;
   HANDLE_DOMAIN: string;
   S3_BUCKET: string;
   S3_PREFIX: string;
@@ -76,7 +79,13 @@ export class Pds extends DurableObject<Env> {
     return values;
   }
 
+  private operator(): OperatorGateway | undefined {
+    if (!this.env.ADMIN_HOST || !this.env.OPERATOR_DID) return;
+    return new OperatorGateway(this.ctx.storage, {ADMIN_HOST:this.env.ADMIN_HOST, OPERATOR_DID:this.env.OPERATOR_DID, ADMIN_TOKEN:this.env.ADMIN_TOKEN});
+  }
+
   async alarm(): Promise<void> {
+    await this.operator()?.cleanup();
     if (this.env.ENABLED !== "true") {
       if (this.ctx.container?.running) this.ctx.container.signal(15);
       return;
@@ -87,8 +96,22 @@ export class Pds extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
+    if (this.env.ADMIN_HOST && new URL(request.url).hostname === this.env.ADMIN_HOST) {
+      try {
+        const gateway = this.operator();
+        if (!gateway || this.env.ENABLED !== "true") return new Response("Unavailable", {status:503});
+        return secure(await gateway.handle(request, r => this.proxy(r)));
+      } catch {
+        // Never log OAuth URLs, codes, tokens or SDK exception payloads.
+        return secure(new Response("Sign-in unavailable. Start again from the operator homepage.", {status:502}));
+      }
+    }
     if (!permitted(new URL(request.url), this.env.PUBLIC_HOST, this.env.HANDLE_DOMAIN)) return new Response("Not found", { status: 404 });
     if (this.env.ENABLED !== "true") return new Response("Deployment pending preflight", { status: 503 });
+    return this.proxy(request);
+  }
+
+  private async proxy(request: Request): Promise<Response> {
     await this.ensureRunning();
     const port = this.ctx.container!.getTcpPort(2583);
     // Probe separately: retrying a user's POST after a connection failure could duplicate a write.
@@ -106,7 +129,9 @@ export class Pds extends DurableObject<Env> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (!permitted(new URL(request.url), env.PUBLIC_HOST, env.HANDLE_DOMAIN)) return new Response("Not found", { status: 404 });
+    const url = new URL(request.url);
+    const admin = !!env.ADMIN_HOST && operatorPath(url, env.ADMIN_HOST);
+    if (!admin && !permitted(url, env.PUBLIC_HOST, env.HANDLE_DOMAIN)) return new Response("Not found", { status: 404 });
     return env.PDS.getByName(INSTANCE).fetch(forwarded(request));
   },
 } satisfies ExportedHandler<Env>;

@@ -146,3 +146,55 @@ created merely by adding these files.
 - https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/limitations/
 - ../../docs/operations/deploy.md
 - ../../docs/migration.md
+
+## Atmosphere operator login
+
+The optional Worker gateway serves a separate `ADMIN_HOST` (the deployment uses
+`admin.crate.social`) and permits only `OPERATOR_DID`
+(`did:plc:4hodhjl2kposuchzvpiviwps`, resolved from `brittanyellich.com`). Configure
+both variables and a route for `admin.crate.social/*`. Keep the public PDS route
+and the existing Durable Object name unchanged. No container restart is needed.
+The tracked template leaves this gateway unconfigured.
+
+The official platform-neutral AT Protocol OAuth client performs PKCE, DPoP and
+issuer/subject validation. Login always targets the configured DID, and the
+callback checks that DID again. A one-use, ten-minute browser-bound flow creates
+an opaque eight-hour session stored in Durable Object storage. Cookies are
+Secure, HttpOnly, host-only and SameSite=Lax. OAuth account access tokens are not
+retained. Visit the admin hostname's `/` page to sign out and revoke the session.
+Removing/changing OPERATOR_DID revokes access for existing sessions immediately.
+
+The gateway forwards only console assets and `vlpds.admin.*` calls. Every API
+request requires same-origin Fetch Metadata; writes also require the exact
+Origin. It removes browser cookies and supplies the existing admin token only on
+the private container hop. Public admin endpoints remain blocked. The gateway
+answers `getSession` in the existing UI's proxy format. **The underlying PDS audit
+log still records token authentication**, not verified proxy identity: this
+bridge does not enable the separate PDS admin listener. Audit actor text remains
+operator-supplied. This deployment supports one operator DID.
+
+Worker invocation logging is disabled to avoid retaining OAuth callback codes in
+request URLs. Gateway errors return generic messages and do not log SDK exception
+payloads. Do not enable request-URL logging on the callback route.
+
+`npm audit` reports the current SDK's transitive Zod 3 dependency under
+GHSA-mrhx-c7xc-m3w5 (unbounded validation of oversized collections); no compatible
+SDK upgrade is currently offered. The gateway bounds all remote OAuth JSON to
+64 KiB, 128 entries per collection, 2,048 nodes and depth 20 **before** SDK
+validation. Fetches require HTTPS, reject redirects and time out after 15 seconds.
+These are mitigations, not an upstream dependency fix. Revisit when the SDK ships
+a compatible patched validator. Login initiation is rate-limited server-wide to
+one attempt per five seconds; this can temporarily throttle legitimate logins.
+
+Validation: `npm test`, `npm run typecheck`, `npm run dry-run`, plus the bundled
+Worker in Miniflare/workerd. End-to-end acceptance requires the operator's real
+OAuth consent; do not treat mocked callback tests as that acceptance.
+
+The install hook applies one checked compatibility change to
+`@atproto-labs/fetch`: construct requests with `redirect: manual`, because workerd
+rejects `redirect: error` before calling the fetch adapter. The gateway adapter
+then rejects every 3xx response, preserving the no-redirect requirement. The
+patch fails installation if the expected upstream code changes. Run
+`npm run test:runtime` after dependency upgrades. To additionally initiate a real
+OAuth flow against the deployed metadata (without signing in), run that command
+with `OPERATOR_LIVE_TEST=1`; it asserts a 303 without printing cookies or URLs.

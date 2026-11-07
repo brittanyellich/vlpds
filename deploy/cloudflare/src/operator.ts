@@ -30,14 +30,15 @@ export function operatorPath(url: URL, host: string): boolean {
 export function secure(response: Response): Response {
   const headers = new Headers(response.headers);
   headers.set('cache-control', 'no-store');
-  headers.set('referrer-policy', 'no-referrer');
+  // Keep the origin on browser form POSTs without exposing callback paths or codes.
+  headers.set('referrer-policy', 'strict-origin');
   headers.set('x-content-type-options', 'nosniff');
   headers.set('x-frame-options', 'DENY');
   for (const key of [...headers.keys()]) if (key.startsWith('access-control-')) headers.delete(key);
   return new Response(response.body, { status: response.status, headers });
 }
 function page(message = 'Sign in to the operator console'): Response {
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>crate.social operator</title><body><main><h1>${message}</h1><p>Only the authorized Atmosphere account can administer this PDS.</p><form method="post" action="/operator/login"><button>Sign in with Atmosphere</button></form></main></body></html>`, { headers: {'content-type': 'text/html; charset=utf-8', 'content-security-policy': "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"} });
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>crate.social operator</title><body><main><h1>${message}</h1><p>Only the authorized Atmosphere account can administer this PDS.</p><form method="post" action="/operator/login"><button>Sign in with Atmosphere</button></form></main></body></html>`, { headers: {'content-type': 'text/html; charset=utf-8', 'content-security-policy': "default-src 'none'; form-action 'self' https://bsky.social; frame-ancestors 'none'; base-uri 'none'"} });
 }
 interface Expiring<T> { value: T; expires: number }
 export class OperatorGateway {

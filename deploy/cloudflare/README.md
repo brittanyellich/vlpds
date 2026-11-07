@@ -198,3 +198,9 @@ patch fails installation if the expected upstream code changes. Run
 `npm run test:runtime` after dependency upgrades. To additionally initiate a real
 OAuth flow against the deployed metadata (without signing in), run that command
 with `OPERATOR_LIVE_TEST=1`; it asserts a 303 without printing cookies or URLs.
+
+Browser forms use `Referrer-Policy: strict-origin`: `no-referrer` causes browsers
+to omit the origin required by CSRF checks. The login page CSP permits form
+redirects only to itself and `https://bsky.social`, the current operator OAuth
+authorization origin. If the operator moves to another authorization server,
+review and update this explicit origin rather than allowing all HTTPS sites.

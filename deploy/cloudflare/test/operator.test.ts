@@ -25,6 +25,8 @@ test('cookie parser rejects duplicates and malformed tokens', () => {
 });
 test('anonymous and expired sessions cannot reach upstream', async () => {
   const {gateway,records,calls,upstream,req} = fixture();
+  const landing = await gateway.handle(req('/'),upstream);
+  assert.match(landing.headers.get('content-security-policy')!, /form-action 'self' https:\/\/bsky\.social;/);
   assert.equal((await gateway.handle(req('/xrpc/vlpds.admin.getClusterStatus'),upstream)).status,401);
   records.set(`session:${session}`,{value:did,expires:0});
   assert.equal((await gateway.handle(req('/xrpc/vlpds.admin.getClusterStatus',{headers:{cookie:`__Host-crate-operator=${session}`}}),upstream)).status,401);
@@ -66,6 +68,7 @@ test('logout requires origin and revokes server-side session',async () => {
 test('responses prohibit caching and cross-origin API access', () => {
   const response=secure(new Response('x',{headers:{'access-control-allow-origin':'*'}}));
   assert.equal(response.headers.get('cache-control'),'no-store');
+  assert.equal(response.headers.get('referrer-policy'),'strict-origin');
   assert.equal(response.headers.get('access-control-allow-origin'),null);
 });
 test('OAuth JSON limits reject oversized collections and deep nesting', () => {

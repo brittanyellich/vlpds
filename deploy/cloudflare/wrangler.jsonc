@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "crate-pds",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-05",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "pds.crate.social/*", "zone_name": "crate.social" },
+    { "pattern": "*.crate.social/.well-known/atproto-did", "zone_name": "crate.social" }
+  ],
+  "containers": [{
+    "class_name": "Pds",
+    "scheduling_policy": "durable_object",
+    "images": { "pds": { "dockerfile": "../../Dockerfile", "build_context": "../.." } }
+  }],
+  "durable_objects": { "bindings": [{ "name": "PDS", "class_name": "Pds" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Pds"] }],
+  "vars": {
+    "PUBLIC_HOST": "pds.crate.social",
+    "HANDLE_DOMAIN": "crate.social",
+    "S3_BUCKET": "crate-pds",
+    "S3_PREFIX": "crate",
+    "ENABLED": "false"
+  },
+  "observability": { "enabled": true }
+}

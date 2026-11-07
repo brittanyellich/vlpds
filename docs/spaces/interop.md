@@ -10,15 +10,15 @@ summary: "Which upstream vlpds tracks, where it deliberately differs from the re
 diagram:
   caption: "vlpds speaks the reference's wire in every role, and the interop harness runs it both ways: ref-ref, vlpds-authority, ref-authority and vlpds-only, plus a three-node vlpds cluster on MinIO."
   nodes:
-    - { id: v, label: vlpds, sub: "repo host · simplespace host", at: [0, 3], size: [12, 3], tone: accent }
-    - { id: r, label: Reference PDS, sub: "atproto `5b95b2f2`", at: [26, 3], size: [12, 3], tone: muted }
+    - { id: v, label: vlpds, sub: "repo host · space host", at: [0, 3], size: [12, 3], tone: accent }
+    - { id: r, label: Reference PDS, sub: "atproto `1cc3186d`", at: [26, 3], size: [12, 3], tone: muted }
     - { id: s, label: Syncer, sub: "`@atproto/space` consumer", at: [13, 10], size: [12, 3], tone: blue }
   edges:
     - "v <-> r: notifyWrite · credential reads"
     - { from: s.t25, to: v.b, label: listRepoOps, tone: blue }
     - { from: s.t75, to: r.b, label: listRepoOps, tone: blue }
 facts:
-  - { value: "5b95b2f2", label: reference pin, note: "bluesky-social/atproto PR #5187, Oct 1 wire" }
+  - { value: "1cc3186d", label: reference pin, note: "November 5, 2026 alpha wire" }
   - { value: "211", unit: cases, label: of the reference's space suites mapped, note: "196 ported · 7 divergent · 8 N/A", tone: accent }
   - { value: in order, label: fan-out per syncer, note: "the reference's unordered sends leave ~3–5 gaps per ~80", tone: violet }
   - { value: OAuth, label: only, note: "the biggest divergence", tone: rust }
@@ -30,28 +30,44 @@ purpose, and `tests/REFERENCE_COVERAGE.md` lists each case.
 
 ## The pin
 
-The pin is bluesky-social/atproto PR #5187 (branch `permissioned-data`) at `5b95b2f2`, which has the
-Oct 1 changes: HTTP message signatures in place of DPoP, 10-minute credentials with revocation, and
-`repoRev`/`spaceRev`. The lexicons are vendored unmodified in `lexicons/spaces-alpha` and the test
-vectors in `testdata/spaces-alpha`, both generated from that commit.
+The compatibility target is the reference's November 5 alpha: bluesky-social/atproto
+branch `permissioned-data` at `1cc3186d6c77cc71d5c316e25bf7717e4896ce60`, published as
+`0.0.0-spaces-alpha-20261105160032`. It includes the October 29 policy-based space
+management and account migration methods, plus STAR control bytes and suspended
+authority handling. Both archive profiles now require a final `0x00`, prefix each
+pair with `0x01`, and limit metadata/keys/values to 64 KiB/4 KiB/1 MiB. Older
+archives must be re-exported from an updated host; they are not accepted.
 
-Open upstream changes that would move it:
+The lexicons are vendored unmodified in `lexicons/spaces-alpha`; the fixtures in
+`testdata/spaces-alpha` are generated and verified with the published release.
+The migration endpoints include `com.atproto.space.importSpaceMeta` and
+`com.atproto.space.importRepo`; `vlpds.space.importRepo` remains an extension.
 
-| Upstream | What it changes |
-|---|---|
-| proposals #114 (STAR) | replaces the 2-root CAR that `getRepo` sends. vlpds's export sits behind a `RepoEncoder` trait so STAR can be a second encoder |
-| proposals #119 | moves space management into `com.atproto.space.*` behind a policy token |
-| proposals #118 | renames `name` to `title` in space type declarations |
-
-Where the spec is silent and vlpds copies the reference: a removed member stays in `listRepos` at its
-last `repoRev`, `listRepoOps` leaves out values for superseded ops, and `listSpaces` treats its
+Removing a member prunes its writer entry. Re-adding the member permits later write
+notifications to restore that entry asynchronously. `listRepoOps` leaves out values
+for superseded ops, and `listSpaces` treats its
 filters as the scope target, so an unfiltered listing needs a wildcard grant.
+
+## Release review (November 6, 2026)
+
+Checked against the [alpha release thread](https://discourse.atmosphere.community/t/atproto-spaces-alpha-updates/1129/9)
+and its October 22, October 29 and November 5 migration checklists. The implemented
+surface includes KEM/shared-secret commits, public credentials, deletion retries,
+policy-based spaces, writer removal, record clearing, account migration, and the
+November STAR/status changes. Regression coverage lives in `ref_october22`,
+`ref_policy`, `space_migration`, `spaces_clear`, `spaces_host` and `spaces_admin`,
+plus the STAR/KEM unit tests. The announced lexicon and SDK refactors (upstream
+PRs #5800 and #5812) were still open when checked; they are not this release target.
+
+The standalone `bench/spaces/e2e.mjs` matrix still requires a sibling `boards`
+checkout. Its absence limits full external interoperability validation; the
+reference-PDS browser migration tests were run successfully during setup.
 
 ## Where vlpds differs
 
 | | Reference PDS | vlpds |
 |---|---|---|
-| Auth | legacy app passwords and password sessions can read and write the account's own space records | OAuth only (final). App passwords (scoped or not) and password sessions get no space reads, writes or delegation tokens, `getServiceAuth` tokens for space methods go only to OAuth apps whose `space:` grant covers the action (the reference checks only `rpc:`), and `vlpds.space.importRepo` is OAuth too |
+| Auth | legacy app passwords and password sessions can read and write the account's own space records | OAuth only (final). App passwords (scoped or not) and password sessions get no ordinary space reads, writes or delegation tokens; an `allowTakendown` session may export its own data, `getServiceAuth` tokens for space methods go only to OAuth apps whose `space:` grant covers the action (the reference checks only `rpc:`), and `vlpds.space.importRepo` is OAuth too |
 | Fan-out to syncers | each forward goes out as it's sequenced, unordered | one lane per (space, service), in spaceRev order, a writer's waiting forward replaced by its newer one |
 | notifyWrite delivery | a retry row written only after a send fails, so an acked write's notify can be lost in a crash | the `sP` row is in the write's own log entry |
 | Delegation tokens and client attestations | any lifetime (it mints 60 s) | refused past 300 s, since their `jti`s are held until `exp` |
@@ -67,7 +83,7 @@ filters as the scope target, so an unfiltered listing needs a wildcard grant.
 | Backlinks | a like of a space URI is recorded as a backlink | public URIs only |
 | `sync.getBlob` with Spaces on | serves only publicly referenced blobs | the same. Without `--spaces`, vlpds still serves an upload before any record names it |
 | Space takedown | none | a vlpds extension: no credentials, no `listRepos` or registrations, notifies dropped |
-| Credentials for taken-down accounts | issued | refused for a taken-down member or authority |
+| Credentials from suspended authorities | refused with `RepoTakendown` or `RepoDeactivated` | the same; existing credentials remain usable for unaffected member repos until expiry |
 
 ## Upstream gaps
 
@@ -75,9 +91,5 @@ filters as the scope target, so an unfiltered listing needs a wildcard grant.
 - title: HTTP signatures cover two headers
   body: "A request signature covers only `authorization` and `atproto-space-audience`, with no method or URL. So a captured request can be replayed against any read of the same repo while its credential lives. vlpds requires the audience to be a DID and the target repo, checks the credential's space against the request, and checks revocation on every request."
 - title: Takedowns and the LtHash (Q11)
-  body: "The spec has no record takedown for space data, and a hidden record still counts in the repo's hash. vlpds serves a takedown-adjusted view: every read signs a commit over the set without the hidden records. It keeps every view verifiable, so upstream could adopt it as is."
-- title: The getRepo format
-  body: "The 2-root CAR has one index block (~6 MB at 100k records) and needs its record blocks in canonical key order, which is why vlpds caps repos at 100k records and exports in two passes. STAR (#114) would remove both problems."
-- title: No import endpoint
-  body: "Nothing upstream moves a space repo into a new host. vlpds has `vlpds.space.importRepo`, which takes the 2-root CAR that `space.getRepo` serves and checks it against the DID's current key, and it'll follow the upstream contract once there is one."
+  body: "The spec has no record takedown for space data, and a hidden record still counts in the repo's data. vlpds serves a takedown-adjusted view: every read builds (and MACs) a commit over the set without the hidden records. It keeps every view verifiable, so upstream could adopt it as is."
 ```

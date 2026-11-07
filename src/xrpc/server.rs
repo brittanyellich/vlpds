@@ -684,7 +684,8 @@ pub(super) async fn mail_permit(
 
 pub(super) fn deliver(app: &App, permit: MailPermit, to: &str, email: crate::mail::Email<'_>) {
     debug_assert_eq!(permit.0, email.purpose());
-    let r = email.render(&app.config.email_branding, &app.public_url);
+    let branding = crate::theme::email_branding(&app.config.email_branding, &app.theme.current(), &app.public_url);
+    let r = email.render(&branding, &app.public_url);
     let mail = Mail {
         to: to.to_string(),
         subject: r.subject,
@@ -1355,11 +1356,14 @@ pub(super) async fn session_info(app: &App, a: &Account, include_email: bool) ->
 
 async fn describe_server(State(app): AppState) -> Json<J> {
     // As the reference: unset links and contact fields are omitted.
+    // The theme's links (crate::theme) take over the flags' where set.
     let mut links = serde_json::Map::new();
-    if let Some(u) = &app.config.privacy_policy_url {
+    let theme = app.theme.current();
+    let tl = &theme.doc.theme.links;
+    if let Some(u) = tl.privacy.as_ref().or(app.config.privacy_policy_url.as_ref()) {
         links.insert("privacyPolicy".into(), json!(u));
     }
-    if let Some(u) = &app.config.terms_of_service_url {
+    if let Some(u) = tl.terms.as_ref().or(app.config.terms_of_service_url.as_ref()) {
         links.insert("termsOfService".into(), json!(u));
     }
     let mut contact = serde_json::Map::new();
@@ -1374,6 +1378,10 @@ async fn describe_server(State(app): AppState) -> Json<J> {
         "links": links,
         "contact": contact,
     });
+    // the reference's flag (its October 15 alpha) that a PDS runs Spaces
+    if app.config.spaces {
+        out["spacesAlpha"] = json!(true);
+    }
     // Under a vlpds key so other clients don't read it as protocol; absent
     // without --spaces, so that response stays the reference's shape.
     if app.config.spaces {
@@ -1536,6 +1544,11 @@ async fn create_account_checked(
         }
     }
     let key = Arc::new(Keypair::generate());
+    // the account's #atproto_kem key (Spaces): in the genesis op when this
+    // mints the DID, published after the account is made otherwise
+    let kem = app.spaces.is_some().then(crate::space::kem::KemKey::generate);
+    let kem_did_key = kem.as_ref().map(|k| k.did_key());
+    let mut kem_published = false;
     let mut genesis: Option<(Arc<crate::plc::Plc>, J)> = None;
     let (did, external) = match inp.did.as_deref() {
         Some(d) => {
@@ -1556,11 +1569,17 @@ async fn create_account_checked(
             ensure_service_handle(app, &handle, false)?;
             match &app.plc {
                 Some(plc) => {
-                    let (did, op) = app.mint_plc_did(plc, &key.did_key(), &handle, recovery_key)?;
+                    let (did, op) =
+                        app.mint_plc_did(plc, &key.did_key(), &handle, recovery_key, kem_did_key.as_deref())?;
                     genesis = Some((plc.clone(), op));
+                    kem_published = true;
                     (did, false)
                 }
-                None => (app.mint_local_did()?, false),
+                None => {
+                    // the document generated here is the account's
+                    kem_published = true;
+                    (app.mint_local_did()?, false)
+                }
             }
         }
     };
@@ -1630,6 +1649,16 @@ async fn create_account_checked(
             return Err(err);
         }
     };
+    let kem_key = match kem {
+        Some(k) => match crate::space::kem_keys::wrap(app, &did, k).await {
+            Ok(row) => Some(crate::state::KemKeyRow { published: kem_published, ..row }),
+            Err(err) => {
+                release(h_ok, e_ok, claim).await;
+                return Err(err.into());
+            }
+        },
+        None => None,
+    };
     if !(h_ok && e_ok) {
         release(h_ok, e_ok, claim).await;
         if !h? {
@@ -1668,6 +1697,7 @@ async fn create_account_checked(
         handle: handle.clone(),
         wrapped_signing_key,
         signing_pubkey,
+        kem_key,
         created_at: vlatproto::events::now_rfc3339(),
         email: Some(email.clone()),
         email_confirmed: inp.email_confirmed && federated.is_some(),
@@ -1725,6 +1755,13 @@ async fn create_account_checked(
         app.changes.emit("invite", "*", super::changes::now_ms());
     }
     app.changes.account(&did);
+    // a DID minted ahead: its genesis op didn't name the KEM key (one
+    // brought in is published by its owner's migration, at activation)
+    if acct.kem_key.as_ref().is_some_and(|k| !k.published) && !external {
+        if let Err(e) = crate::space::kem_keys::ensure_published(app, &did).await {
+            tracing::info!(%did, "kem key not published yet (the backfill retries): {}", e.message);
+        }
+    }
     Ok(acct)
 }
 
@@ -2441,6 +2478,9 @@ async fn activate_account(State(app): AppState, Auth(creds): Auth) -> XResult<St
     })
     .await?;
     crate::metrics::ACCOUNT_EVENTS.with_label_values(&["reactivated"]).inc();
+    // an account that moved in lists this host's #atproto_kem key now, or
+    // this host can list it for it
+    crate::space::kem_keys::spawn_ensure(&app, &did);
     Ok(StatusCode::OK)
 }
 

@@ -7,12 +7,18 @@
     "typecheck": "tsc --noEmit",
     "dry-run": "wrangler deploy --dry-run --containers-rollout none",
     "deploy": "wrangler deploy",
-    "image-check": "wrangler deploy --dry-run"
+    "image-check": "wrangler deploy --dry-run",
+    "test:runtime": "wrangler deploy --dry-run --outdir .wrangler/runtime-test --containers-rollout none && node test/runtime.mjs",
+    "postinstall": "node scripts/patch-oauth-fetch.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261104.1",
     "@types/node": "26.6.6",
     "typescript": "7.0.2",
     "wrangler": "4.158.0"
+  },
+  "dependencies": {
+    "@atproto/jwk-jose": "0.2.4",
+    "@atproto/oauth-client": "0.9.3"
   }
 }

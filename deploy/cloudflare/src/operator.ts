@@ -20,11 +20,21 @@ export function sameOrigin(request: Request, host: string): boolean {
   return request.headers.get('origin') === `https://${host}` &&
     (!request.headers.has('sec-fetch-site') || request.headers.get('sec-fetch-site') === 'same-origin');
 }
+// Standard AT Protocol methods used by the operator console, in addition to
+// the vlpds admin namespace. These still require an operator session and CSRF checks.
+const CONSOLE_METHODS = new Set([
+  '/xrpc/com.atproto.server.createInviteCode',
+  '/xrpc/com.atproto.server.createInviteCodes',
+  '/xrpc/com.atproto.server.describeServer',
+  '/xrpc/com.atproto.identity.resolveHandle',
+  '/xrpc/com.atproto.sync.getBlob',
+]);
 export function operatorPath(url: URL, host: string): boolean {
   return url.protocol === 'https:' && !url.port && url.hostname === host &&
     !url.pathname.includes('%') && !url.pathname.includes('\\') &&
     (url.pathname === '/' || url.pathname === '/admin' || url.pathname.startsWith('/admin/') ||
      url.pathname.startsWith('/assets/') || url.pathname.startsWith('/xrpc/vlpds.admin.') ||
+     url.pathname.startsWith('/xrpc/com.atproto.admin.') || CONSOLE_METHODS.has(url.pathname) ||
      ['/favicon.svg', '/operator/login', '/operator/callback', '/operator/logout', '/operator/client-metadata.json'].includes(url.pathname));
 }
 export function secure(response: Response): Response {

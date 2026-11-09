@@ -90,3 +90,20 @@ test('OAuth fetch rejects redirects and oversized JSON before SDK parsing',async
     await assert.rejects(oauthFetch('http://example.com'),/HTTPS/);
   } finally {globalThis.fetch=original;}
 });
+
+test('standard invite API stays behind session and same-origin checks', async () => {
+  const {gateway,records,calls,upstream,req}=fixture();
+  const path='/xrpc/com.atproto.server.createInviteCodes';
+  assert(operatorPath(new URL(`https://${host}${path}`),host));
+  assert(!operatorPath(new URL(`https://${host}/xrpc/com.atproto.server.createSession`),host));
+  assert.equal((await gateway.handle(req(path,{method:'POST'}),upstream)).status,401);
+  records.set(`session:${session}`,{value:did,expires:Date.now()+10000});
+  const headers={cookie:`__Host-crate-operator=${session}`,origin:`https://${host}`,'sec-fetch-site':'cross-site','content-type':'application/json'};
+  assert.equal((await gateway.handle(req(path,{method:'POST',headers}),upstream)).status,403);
+  headers['sec-fetch-site']='same-origin';
+  const body=JSON.stringify({codeCount:1,useCount:1});
+  assert.equal((await gateway.handle(req(path,{method:'POST',headers,body}),upstream)).status,200);
+  assert.equal(calls.length,1);
+  assert.equal(await calls[0].text(),body);
+  assert(calls[0].headers.get('authorization')?.startsWith('Basic '));
+});

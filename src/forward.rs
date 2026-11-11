@@ -489,6 +489,7 @@ fn space_host_method(nsid: &str) -> bool {
             | "com.atproto.space.deleteSpace"
             | "com.atproto.space.removeWriter"
             | "com.atproto.space.exportSpaceMeta"
+            | "com.atproto.space.importSpaceMeta"
     ) || nsid.starts_with("com.atproto.memberspace.")
 }
 

@@ -1,33 +1,45 @@
-//! STAR archives (November 5, 2026) (@atproto/space `star.ts`), the `atproto-space-repo`
-//! profile getRepo serves: a header, controlled pairs, and an end byte.
+//! STAR archives (DASL `star.html`, @atproto/star): a metadata header,
+//! then key/value pairs each after a `0x01` control byte, then a `0x00`.
 //!
 //! ```text
-//! [ magic | len | meta ] [ 0x01 | len | path | len | record ] ... [ 0x00 ]
+//! [ magic | len | meta ] [ 1 | len | key | len | val ] ... [ 0 ]
 //! ```
 //!
-//! The magic is `2a 6c 01 00`, each `len` an unsigned varint in its
-//! shortest form. The metadata is the repo's commit plus `"$type":
-//! "atproto-space-repo"`, as canonical DRISL; each pair is a record path
-//! (`{collection}/{rkey}`) and the record's DRISL bytes (at most 1 MiB), in
-//! strict bytewise order of the paths. The MAC is in the response's
-//! `Atproto-Space-Mac` header, not the archive.
+//! Each `len` is an unsigned varint in its shortest form; the metadata is a
+//! canonical DRISL map with a string `$type` naming the profile. Space
+//! repos (`atproto-space-repo`: getRepo, importRepo) and space meta
+//! (`atproto-space-meta`: exportSpaceMeta, importSpaceMeta) are the two
+//! profiles here, both capping the metadata at 64 KiB, a key at 4 KiB and a
+//! value at 1 MiB.
 //!
-//! See <https://dasl.ing/star.html>.
+//! [`Reader`] parses incrementally from whatever is buffered, so a body is
+//! read as it arrives and a frame over its limit is refused from its
+//! length, before it's buffered.
 
-use super::commit::Commit;
-use super::lthash::LtHash;
+use vlatproto::cbor::Value;
 
 pub const MAGIC: [u8; 4] = [0x2a, 0x6c, 0x01, 0x00];
-pub const REPO_STAR_TYPE: &str = "atproto-space-repo";
-/// The largest record a space repo holds (the reference's `MAX_RECORD_SIZE`).
-pub const MAX_RECORD_SIZE: usize = 1 << 20;
-/// The atproto STAR profile limits.
-pub const MAX_META_LENGTH: u64 = 64 << 10;
-pub const MAX_KEY_LENGTH: u64 = 4 << 10;
-/// A varint longer than this is refused (the reference reads 6 bytes).
-pub const MAX_VARINT_BYTES: usize = 6;
+const CONTROL_PAIR: u8 = 0x01;
+const CONTROL_END: u8 = 0x00;
+const MAX_VARINT_BYTES: usize = 9;
 
-/// The reference's `StarParseError`, and the profile's checks.
+pub const REPO_TYPE: &str = "atproto-space-repo";
+pub const META_TYPE: &str = "atproto-space-meta";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub meta: usize,
+    pub key: usize,
+    pub value: usize,
+}
+
+/// Both profiles' limits (`REPO_STAR_LIMITS`, `SPACE_META_STAR_LIMITS`).
+pub const LIMITS: Limits = Limits { meta: 64 << 10, key: 4 << 10, value: 1 << 20 };
+
+/// No limits, as generic STAR sets none.
+pub const UNLIMITED: Limits = Limits { meta: usize::MAX, key: usize::MAX, value: usize::MAX };
+
+/// The reference's `StarParseError`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StarError(pub String);
 
@@ -37,193 +49,237 @@ impl std::fmt::Display for StarError {
     }
 }
 
-fn fail(m: impl Into<String>) -> StarError {
-    StarError(m.into())
+fn err<T>(m: impl Into<String>) -> Result<T, StarError> {
+    Err(StarError(m.into()))
 }
 
-pub fn write_varint(out: &mut Vec<u8>, n: u64) {
-    vlatproto::car::write_varint(out, n)
+pub fn write_varint(out: &mut Vec<u8>, mut n: u64) {
+    while n >= 0x80 {
+        out.push((n as u8 & 0x7f) | 0x80);
+        n >>= 7;
+    }
+    out.push(n as u8);
 }
 
-/// The archive's start: the magic and the commit as its metadata.
-pub fn write_header(out: &mut Vec<u8>, commit: &Commit) {
+/// The magic and the metadata (its DRISL bytes).
+pub fn write_header(out: &mut Vec<u8>, meta: &[u8]) {
     out.extend_from_slice(&MAGIC);
-    let meta = commit.to_cbor(Some(REPO_STAR_TYPE));
     write_varint(out, meta.len() as u64);
-    out.extend_from_slice(&meta);
+    out.extend_from_slice(meta);
 }
 
-/// One record's pair.
-pub fn write_pair(out: &mut Vec<u8>, path: &[u8], record: &[u8]) {
-    out.push(0x01);
-    write_varint(out, path.len() as u64);
-    out.extend_from_slice(path);
-    write_varint(out, record.len() as u64);
-    out.extend_from_slice(record);
+pub fn write_pair(out: &mut Vec<u8>, key: &[u8], value: &[u8]) {
+    out.push(CONTROL_PAIR);
+    write_varint(out, key.len() as u64);
+    out.extend_from_slice(key);
+    write_varint(out, value.len() as u64);
+    out.extend_from_slice(value);
 }
 
-/// A varint at the front of `b`: Ok(None) when `b` ends before it does.
-/// Non-minimal encodings (a final zero byte after the first) and ones past
-/// [`MAX_VARINT_BYTES`] are refused.
-pub fn read_varint(b: &[u8]) -> Result<Option<(u64, usize)>, StarError> {
-    let mut n = 0u64;
+pub fn write_end(out: &mut Vec<u8>) {
+    out.push(CONTROL_END);
+}
+
+/// What [`Reader::step`] found at the front of the buffer.
+#[derive(Debug, PartialEq)]
+pub enum Item {
+    /// The metadata map, checked canonical.
+    Meta(Value),
+    Pair {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    /// The end byte, and nothing after it (checked at EOF).
+    End,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Magic,
+    Control,
+    Ended,
+}
+
+/// An incremental reader: hand [`Reader::step`] the unread bytes.
+pub struct Reader {
+    limits: Limits,
+    stage: Stage,
+}
+
+/// A varint at the front of `buf`: Ok(None) when more bytes are needed.
+fn read_varint(buf: &[u8], eof: bool) -> Result<Option<(u64, usize)>, StarError> {
+    let mut v = 0u64;
     for i in 0..MAX_VARINT_BYTES {
-        let Some(&byte) = b.get(i) else { return Ok(None) };
-        n |= ((byte & 0x7f) as u64) << (7 * i);
-        if byte < 0x80 {
-            if byte == 0 && i > 0 {
-                return Err(fail("non-canonical varint"));
+        let Some(&b) = buf.get(i) else {
+            return if eof { err("unexpected end of archive") } else { Ok(None) };
+        };
+        v |= ((b & 0x7f) as u64) << (7 * i);
+        if b < 0x80 {
+            // a final zero byte only pads the encoding
+            if b == 0 && i > 0 {
+                return err("non-canonical varint");
             }
-            return Ok(Some((n, i + 1)));
+            return Ok(Some((v, i + 1)));
         }
     }
-    Err(fail("varint too long"))
+    err("varint too long")
 }
 
-/// The metadata as the commit it carries: a canonical DRISL map whose
-/// `$type` is this profile's.
-pub fn parse_meta(b: &[u8]) -> Result<Commit, StarError> {
-    use vlatproto::cbor::ValueRef;
-    let v = vlatproto::cbor::Value::decode(b).map_err(|e| fail(format!("invalid metadata: {e}")))?;
-    if v.to_cbor() != b {
-        return Err(fail("metadata is not canonical DRISL"));
+/// A frame at the front of `buf`: (start, end) of its bytes and the bytes
+/// consumed, Ok(None) when more are needed.
+fn read_frame(buf: &[u8], eof: bool, max: usize) -> Result<Option<(usize, usize)>, StarError> {
+    let Some((len, n)) = read_varint(buf, eof)? else { return Ok(None) };
+    if len > max as u64 {
+        return err(format!("length {len} exceeds limit of {max}"));
     }
-    let v = ValueRef::decode(b).map_err(|e| fail(format!("invalid metadata: {e}")))?;
-    if !matches!(v, ValueRef::Map(_)) || !matches!(v.get("$type"), Some(ValueRef::Text(_))) {
-        return Err(fail("metadata must be a map with a $type"));
+    let end = n + len as usize;
+    if buf.len() < end {
+        return if eof { err("unexpected end of archive") } else { Ok(None) };
     }
-    if v.get("$type").and_then(|t| t.as_str()) != Some(REPO_STAR_TYPE) {
-        return Err(fail(format!("invalid repo metadata: $type must be {REPO_STAR_TYPE}")));
+    Ok(Some((n, end)))
+}
+
+fn parse_meta(bytes: &[u8]) -> Result<Value, StarError> {
+    let meta = Value::decode(bytes).map_err(|_| StarError("invalid metadata".into()))?;
+    match &meta {
+        Value::Map(m) if m.iter().any(|(k, v)| k == "$type" && matches!(v, Value::Text(_))) => {}
+        _ => return err("metadata must be a map with a $type"),
     }
-    let text = |k: &str| match v.get(k) {
-        Some(ValueRef::Text(t)) => Ok(t.to_string()),
-        _ => Err(fail(format!("invalid repo metadata: {k} must be a string"))),
+    let mut again = Vec::with_capacity(bytes.len());
+    meta.encode(&mut again);
+    if again != bytes {
+        return err("metadata is not canonical DRISL");
+    }
+    Ok(meta)
+}
+
+impl Reader {
+    pub fn new(limits: Limits) -> Reader {
+        Reader { limits, stage: Stage::Magic }
+    }
+
+    /// The next item in `buf` (the unread bytes) and how many bytes it
+    /// took; Ok(None) when more bytes are needed. `eof`: `buf` is all that's
+    /// left. After [`Item::End`], call again with `eof` to check nothing
+    /// follows (Ok(None) then means a clean end).
+    pub fn step(&mut self, buf: &[u8], eof: bool) -> Result<Option<(Item, usize)>, StarError> {
+        match self.stage {
+            Stage::Magic => {
+                if buf.len() < MAGIC.len() {
+                    return if eof { err("invalid magic bytes") } else { Ok(None) };
+                }
+                if buf[..MAGIC.len()] != MAGIC {
+                    return err("invalid magic bytes");
+                }
+                let Some((s, e)) = read_frame(&buf[MAGIC.len()..], eof, self.limits.meta)? else { return Ok(None) };
+                let meta = parse_meta(&buf[MAGIC.len() + s..MAGIC.len() + e])?;
+                self.stage = Stage::Control;
+                Ok(Some((Item::Meta(meta), MAGIC.len() + e)))
+            }
+            Stage::Control => {
+                let Some(&control) = buf.first() else {
+                    return if eof { err("unexpected end of archive") } else { Ok(None) };
+                };
+                match control {
+                    CONTROL_END => {
+                        self.stage = Stage::Ended;
+                        Ok(Some((Item::End, 1)))
+                    }
+                    CONTROL_PAIR => {
+                        let rest = &buf[1..];
+                        let Some((ks, ke)) = read_frame(rest, eof, self.limits.key)? else { return Ok(None) };
+                        let Some((vs, ve)) = read_frame(&rest[ke..], eof, self.limits.value)? else {
+                            return Ok(None);
+                        };
+                        let item = Item::Pair { key: rest[ks..ke].to_vec(), value: rest[ke + vs..ke + ve].to_vec() };
+                        Ok(Some((item, 1 + ke + ve)))
+                    }
+                    c => err(format!("invalid control byte: {c}")),
+                }
+            }
+            Stage::Ended if buf.is_empty() => Ok(None),
+            Stage::Ended => err("unexpected bytes after end of archive"),
+        }
+    }
+}
+
+/// A whole archive in memory: its metadata and pairs.
+pub fn read_all(mut buf: &[u8], limits: Limits) -> Result<(Value, Vec<(Vec<u8>, Vec<u8>)>), StarError> {
+    let mut r = Reader::new(limits);
+    let (mut meta, mut pairs) = (None, Vec::new());
+    loop {
+        match r.step(buf, true)? {
+            Some((Item::Meta(m), n)) => {
+                meta = Some(m);
+                buf = &buf[n..];
+            }
+            Some((Item::Pair { key, value }, n)) => {
+                pairs.push((key, value));
+                buf = &buf[n..];
+            }
+            Some((Item::End, n)) => {
+                buf = &buf[n..];
+                r.step(buf, true)?;
+                return Ok((meta.expect("the metadata comes first"), pairs));
+            }
+            None => unreachable!("eof answers or fails"),
+        }
+    }
+}
+
+/// A space repo commit as STAR metadata: the commit plus `$type`, in
+/// canonical key order.
+pub fn repo_meta(c: &super::commit::Commit) -> Vec<u8> {
+    use vlatproto::cbor;
+    let mut b = Vec::with_capacity(160 + c.space.len() + c.repo.len());
+    cbor::write_map_head(&mut b, 6);
+    cbor::write_text(&mut b, "rev");
+    cbor::write_text(&mut b, &c.rev);
+    cbor::write_text(&mut b, "ver");
+    cbor::write_int(&mut b, c.ver);
+    cbor::write_text(&mut b, "data");
+    cbor::write_bytes(&mut b, &c.data);
+    cbor::write_text(&mut b, "repo");
+    cbor::write_text(&mut b, &c.repo);
+    cbor::write_text(&mut b, "$type");
+    cbor::write_text(&mut b, REPO_TYPE);
+    cbor::write_text(&mut b, "space");
+    cbor::write_text(&mut b, &c.space);
+    b
+}
+
+/// The reference's `repoStarMeta` check: the repo profile's metadata.
+pub fn parse_repo_meta(meta: &Value) -> Result<super::commit::Commit, StarError> {
+    let Value::Map(m) = meta else { return err("invalid repo metadata") };
+    let get = |k: &str| m.iter().find(|(key, _)| key == k).map(|(_, v)| v);
+    if get("$type") != Some(&Value::Text(REPO_TYPE.into())) {
+        return err("invalid repo metadata: $type must be atproto-space-repo");
+    }
+    let text = |k: &str| match get(k) {
+        Some(Value::Text(s)) => Ok(s.clone()),
+        _ => err(format!("invalid repo metadata: {k}")),
     };
-    let ver = match v.get("ver") {
-        Some(ValueRef::Int(n)) => *n,
-        _ => return Err(fail("invalid repo metadata: ver must be an integer")),
+    let ver = match get("ver") {
+        Some(Value::Int(v)) => *v,
+        _ => return err("invalid repo metadata: ver"),
     };
-    let data = match v.get("data") {
-        Some(ValueRef::Bytes(b)) => b.to_vec(),
-        _ => return Err(fail("invalid repo metadata: data must be bytes")),
+    let data = match get("data") {
+        Some(Value::Bytes(b)) => b.clone(),
+        _ => return err("invalid repo metadata: data"),
     };
-    let (repo, space) = (text("repo")?, text("space")?);
+    let repo = text("repo")?;
     if !vlatproto::syntax::valid_did(&repo) {
-        return Err(fail("invalid repo metadata: repo must be a DID"));
+        return err("invalid repo metadata: repo");
     }
-    if vlatproto::syntax::parse_space_uri(&space).is_none_or(|u| u.record.is_some()) {
-        return Err(fail("invalid repo metadata: space must be a space URI"));
+    let space = text("space")?;
+    if vlatproto::syntax::parse_space_uri(&space).is_none_or(|s| s.record.is_some()) {
+        return err("invalid repo metadata: space");
     }
-    Ok(Commit { ver, repo, space, rev: text("rev")?, data })
-}
-
-/// What a whole archive in memory holds: its commit and its records as
-/// (path, record bytes), checked as [`Archive::push`] checks them.
-#[derive(Debug)]
-pub struct Parsed {
-    pub commit: Commit,
-    pub records: Vec<(String, Vec<u8>)>,
-}
-
-/// A repo archive checked as it's read (the reference's `verifyRepoStar`
-/// past the MAC): paths in strict order, each a record path, records
-/// within [`MAX_RECORD_SIZE`] and DRISL maps, folded into a set hash that
-/// must equal the commit's `data` at the end.
-pub struct Archive {
-    pub commit: Commit,
-    pub set: LtHash,
-    prev: Option<Vec<u8>>,
-    pub records: u64,
-}
-
-impl Archive {
-    pub fn new(commit: Commit) -> Archive {
-        Archive { commit, set: LtHash::default(), prev: None, records: 0 }
+    if ver != super::commit::COMMIT_VERSION {
+        return err(format!("unsupported commit version: {ver}"));
     }
-
-    /// The pair's path (`{collection}/{rkey}`, split) and record CID.
-    pub fn push(&mut self, key: &[u8], value: &[u8]) -> Result<(String, vlatproto::cid::Cid), StarError> {
-        let path = std::str::from_utf8(key).map_err(|_| fail("a record path isn't UTF-8"))?;
-        if self.prev.as_deref().is_some_and(|p| key <= p) {
-            return Err(fail(format!("records out of order at {path}")));
-        }
-        self.prev = Some(key.to_vec());
-        let (collection, rkey) = path
-            .split_once('/')
-            .filter(|(c, r)| vlatproto::syntax::valid_nsid(c) && vlatproto::syntax::valid_rkey(r))
-            .ok_or_else(|| fail(format!("invalid record path {path}")))?;
-        if value.len() > MAX_RECORD_SIZE {
-            return Err(fail(format!("record at {path} is over {MAX_RECORD_SIZE} bytes")));
-        }
-        match vlatproto::cbor::ValueRef::decode(value) {
-            Ok(vlatproto::cbor::ValueRef::Map(_)) => {}
-            Ok(_) => return Err(fail(format!("invalid record at {path}"))),
-            Err(_) => return Err(fail(format!("invalid record cbor at {path}"))),
-        }
-        let cid = vlatproto::cid::Cid::dag_cbor(value);
-        self.set.add(&super::commit::element(collection, rkey, &cid.to_string()));
-        self.records += 1;
-        Ok((path.to_string(), cid))
-    }
-
-    /// After the end marker: the records are the repo the commit describes.
-    pub fn finish(&self) -> Result<(), StarError> {
-        match super::commit::matches(&self.set, &self.commit) {
-            true => Ok(()),
-            false => Err(fail("records do not match the commit data")),
-        }
-    }
-}
-
-/// Shared framing for the two atproto STAR profiles.
-pub(super) struct Reader<'a> {
-    pub rest: &'a [u8],
-    pub pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    pub fn frame(&mut self, max: u64) -> Result<&'a [u8], StarError> {
-        let (len, n) = read_varint(&self.rest[self.pos..])?.ok_or_else(|| fail("unexpected end of archive"))?;
-        if len > max {
-            return Err(fail(format!("length {len} exceeds limit of {max}")));
-        }
-        let start = self.pos + n;
-        let end = start
-            .checked_add(len as usize)
-            .filter(|e| *e <= self.rest.len())
-            .ok_or_else(|| fail("unexpected end of archive"))?;
-        self.pos = end;
-        Ok(&self.rest[start..end])
-    }
-
-    pub fn pair(&mut self) -> Result<bool, StarError> {
-        let control = *self.rest.get(self.pos).ok_or_else(|| fail("unexpected end of archive"))?;
-        self.pos += 1;
-        match control {
-            1 => Ok(true),
-            0 if self.pos == self.rest.len() => Ok(false),
-            0 => Err(fail("unexpected bytes after end of archive")),
-            _ => Err(fail("invalid control byte")),
-        }
-    }
-}
-
-/// A whole archive: the header, pairs, end marker, and digest. Its commit's
-/// MAC (and repo and space) are the caller's to check.
-pub fn parse(b: &[u8]) -> Result<Parsed, StarError> {
-    let rest = b.strip_prefix(&MAGIC[..]).ok_or_else(|| fail("invalid magic bytes"))?;
-    let mut reader = Reader { rest, pos: 0 };
-    let meta = reader.frame(MAX_META_LENGTH)?;
-    let mut a = Archive::new(parse_meta(meta)?);
-    let mut records = Vec::new();
-    while reader.pair()? {
-        let key = reader.frame(MAX_KEY_LENGTH)?;
-        let value = reader.frame(MAX_RECORD_SIZE as u64)?;
-        let (path, _) = a.push(key, value)?;
-        records.push((path, value.to_vec()));
-    }
-    a.finish()?;
-    Ok(Parsed { commit: a.commit, records })
+    let data: [u8; 32] = data.try_into().map_err(|_| StarError("invalid repo metadata: data".into()))?;
+    Ok(super::commit::Commit { ver, repo, space, rev: text("rev")?, data })
 }
 
 #[cfg(test)]
@@ -231,134 +287,128 @@ mod tests {
     use super::*;
     use crate::space::vectors::VECTORS;
 
-    fn rec(text: &str) -> Vec<u8> {
-        vlatproto::cbor::Value::from_json(&serde_json::json!({"$type": "a.b.c", "text": text})).unwrap().to_cbor()
+    fn fixtures(name: &str) -> serde_json::Value {
+        let path = format!("{}/testdata/spaces-alpha/star-interop/{name}", env!("CARGO_MANIFEST_DIR"));
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
-    fn archive(commit: &Commit, records: &[(&str, Vec<u8>)]) -> Vec<u8> {
-        let mut out = Vec::new();
-        write_header(&mut out, commit);
-        for (p, r) in records {
-            write_pair(&mut out, p.as_bytes(), r);
+    fn hex_of(v: &serde_json::Value) -> Vec<u8> {
+        hex::decode(v.as_str().unwrap()).unwrap()
+    }
+
+    /// The DASL interop fixtures (testdata/spaces-alpha/star-interop),
+    /// whole and fed one byte at a time.
+    #[test]
+    fn interop_fixtures() {
+        for f in fixtures("valid-star-fixtures.json").as_array().unwrap() {
+            let bytes = hex_of(&f["star_hex"]);
+            let (_, pairs) = read_all(&bytes, UNLIMITED).unwrap_or_else(|e| panic!("{}: {e}", f["comment"]));
+            let want: Vec<(Vec<u8>, Vec<u8>)> = f["decoded"]["pairs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| (hex_of(&p["key_hex"]), hex_of(&p["value_hex"])))
+                .collect();
+            assert_eq!(pairs, want, "{}", f["comment"]);
+            assert_eq!(trickle(&bytes).unwrap().1, want, "{}", f["comment"]);
         }
-        out.push(0);
-        out
-    }
-
-    fn commit_over(records: &[(&str, Vec<u8>)]) -> Commit {
-        let mut set = LtHash::default();
-        for (p, r) in records {
-            let (c, k) = p.split_once('/').unwrap();
-            set.add(&crate::space::commit::element(c, k, &vlatproto::cid::Cid::dag_cbor(r).to_string()));
+        for f in fixtures("invalid-star-fixtures.json").as_array().unwrap() {
+            let bytes = hex_of(&f["star_hex"]);
+            assert!(read_all(&bytes, UNLIMITED).is_err(), "{}", f["comment"]);
+            assert!(trickle(&bytes).is_err(), "{}", f["comment"]);
         }
-        Commit::of(&set, "at://did:example:space/space/a.b.c/k", "did:example:alice", "3kbcq3p7ad400")
     }
 
-    /// testdata/spaces-alpha/vectors.json `star`: archives the reference's
-    /// `serializeRepo` wrote, byte for byte what this writes.
+    /// Reads `bytes` handing the reader one more byte each time it asks.
+    fn trickle(bytes: &[u8]) -> Result<(Value, Vec<(Vec<u8>, Vec<u8>)>), StarError> {
+        let mut r = Reader::new(UNLIMITED);
+        let (mut pos, mut have) = (0, 0);
+        let (mut meta, mut pairs) = (None, Vec::new());
+        loop {
+            let eof = have == bytes.len();
+            match r.step(&bytes[pos..have], eof)? {
+                None if eof => return Ok((meta.ok_or(StarError("no end".into()))?, pairs)),
+                None => have += 1,
+                Some((item, n)) => {
+                    pos += n;
+                    match item {
+                        Item::Meta(m) => meta = Some(m),
+                        Item::Pair { key, value } => pairs.push((key, value)),
+                        Item::End => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// testdata/spaces-alpha/vectors.json `star`: archives the reference
+    /// wrote (serializeRepo, serializeSpaceMeta).
     #[test]
     fn generated_vectors() {
-        let cases = VECTORS["star"].as_array().unwrap();
-        assert!(!cases.is_empty());
-        for c in cases {
-            let bytes = hex::decode(c["archive"].as_str().unwrap()).unwrap();
-            let p = parse(&bytes).unwrap();
-            assert_eq!(p.commit, Commit::from_json(&c["commit"]).unwrap());
-            let mut out = Vec::new();
-            write_header(&mut out, &p.commit);
-            for (path, r) in &p.records {
-                write_pair(&mut out, path.as_bytes(), r);
+        for s in VECTORS["star"].as_array().unwrap() {
+            let bytes = hex_of(&s["star"]);
+            let (meta, pairs) = read_all(&bytes, LIMITS).unwrap();
+            if s["profile"] != REPO_TYPE {
+                continue;
             }
-            out.push(0);
+            let ctx = &s["ctx"];
+            let c = parse_repo_meta(&meta).unwrap();
+            assert_eq!(
+                (c.space.as_str(), c.repo.as_str(), c.rev.as_str()),
+                (ctx["space"].as_str().unwrap(), ctx["repo"].as_str().unwrap(), ctx["rev"].as_str().unwrap())
+            );
+            assert_eq!(hex::encode(c.data), s["data"].as_str().unwrap());
+            // and writing the same commit and records gives the same bytes
+            let mut out = Vec::new();
+            write_header(&mut out, &repo_meta(&c));
+            let records = s["records"].as_array().unwrap();
+            assert_eq!(records.len(), pairs.len());
+            for r in records {
+                write_pair(&mut out, r["path"].as_str().unwrap().as_bytes(), &hex_of(&r["bytes"]));
+            }
+            write_end(&mut out);
             assert_eq!(out, bytes);
-            assert_eq!(p.records.len() as u64, c["records"].as_u64().unwrap());
         }
     }
 
     #[test]
-    fn round_trip_and_refusals() {
-        let records = vec![("a.b.c/1", rec("one")), ("a.b.c/2", rec("two")), ("a.b.d/1", rec("three"))];
-        let commit = commit_over(&records);
-        let b = archive(&commit, &records);
-        let p = parse(&b).unwrap();
-        assert_eq!(p.commit, commit);
-        assert_eq!(p.records.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["a.b.c/1", "a.b.c/2", "a.b.d/1"]);
-
-        // an empty repo has no pairs
-        let empty = commit_over(&[]);
-        assert!(parse(&archive(&empty, &[])).unwrap().records.is_empty());
-
-        // out of order, a duplicate
-        let mut swapped = records.clone();
-        swapped.swap(0, 1);
-        assert!(parse(&archive(&commit, &swapped)).unwrap_err().0.contains("out of order"));
-        let dup = vec![records[0].clone(), records[0].clone()];
-        assert!(parse(&archive(&commit_over(&dup[..1]), &dup)).unwrap_err().0.contains("out of order"));
-        // a record missing, or one too many
-        assert!(parse(&archive(&commit, &records[..2])).unwrap_err().0.contains("commit data"));
-        // truncated anywhere past the header
-        for cut in 1..8 {
-            assert!(parse(&b[..b.len() - cut]).is_err(), "{cut}");
+    fn limits_and_framing() {
+        let c = crate::space::commit::Commit {
+            ver: 1,
+            repo: "did:plc:x".into(),
+            space: "at://did:plc:x/space/com.example.group/self".into(),
+            rev: "3kbcq3p7ad401".into(),
+            data: [0; 32],
+        };
+        let mut out = Vec::new();
+        write_header(&mut out, &repo_meta(&c));
+        write_pair(&mut out, b"a.b.c/1", &vec![0; LIMITS.value + 1]);
+        write_end(&mut out);
+        assert!(read_all(&out, LIMITS).unwrap_err().0.contains("exceeds limit"));
+        // refused from the length, before the value arrives
+        let mut r = Reader::new(LIMITS);
+        let (_, n) = r.step(&out, false).unwrap().unwrap();
+        assert!(r.step(&out[n..n + 16], false).unwrap_err().0.contains("exceeds limit"));
+        // truncated: no end byte
+        let mut t = Vec::new();
+        write_header(&mut t, &repo_meta(&c));
+        write_pair(&mut t, b"a.b.c/1", b"\xa0");
+        assert!(read_all(&t, LIMITS).unwrap_err().0.contains("unexpected end"));
+        // an unknown commit version
+        let mut m = repo_meta(&crate::space::commit::Commit { ver: 2, ..c.clone() });
+        let (meta, _) = {
+            let mut b = Vec::new();
+            write_header(&mut b, &m);
+            write_end(&mut b);
+            read_all(&b, LIMITS).unwrap()
+        };
+        assert_eq!(parse_repo_meta(&meta).unwrap_err().0, "unsupported commit version: 2");
+        m.clear();
+        // a varint
+        for n in [0u64, 127, 128, 300, 1 << 40] {
+            let mut v = Vec::new();
+            write_varint(&mut v, n);
+            assert_eq!(read_varint(&v, true).unwrap(), Some((n, v.len())));
         }
-        // oversized
-        let big = vlatproto::cbor::Value::from_json(&serde_json::json!({"t": "x".repeat(MAX_RECORD_SIZE)}))
-            .unwrap()
-            .to_cbor();
-        let e = parse(&archive(&commit_over(&[("a.b.c/1", big.clone())]), &[("a.b.c/1", big)])).unwrap_err();
-        assert!(e.0.contains("exceeds limit"), "{e}");
-        // bad magic, a bad path, a record that isn't a map
-        assert!(parse(&b[1..]).is_err());
-        assert!(parse(&archive(&commit, &[("no-slash", rec("x"))])).unwrap_err().0.contains("record path"));
-        let five = vlatproto::cbor::Value::Int(5).to_cbor();
-        assert!(parse(&archive(&commit, &[("a.b.c/1", five)])).unwrap_err().0.contains("invalid record"));
-        // the metadata's $type
-        let mut other = Vec::new();
-        other.extend_from_slice(&MAGIC);
-        let meta = commit.to_cbor(Some("other"));
-        write_varint(&mut other, meta.len() as u64);
-        other.extend_from_slice(&meta);
-        assert!(parse(&other).unwrap_err().0.contains("$type"));
-        let mut none = Vec::new();
-        none.extend_from_slice(&MAGIC);
-        let meta = commit.to_cbor(None);
-        write_varint(&mut none, meta.len() as u64);
-        none.extend_from_slice(&meta);
-        assert!(parse(&none).is_err());
-    }
-
-    #[test]
-    fn november_framing_and_limits() {
-        let empty = archive(&commit_over(&[]), &[]);
-        assert_eq!(empty.last(), Some(&0));
-        assert!(parse(&empty[..empty.len() - 1]).unwrap_err().0.contains("unexpected end"));
-        let mut bad = empty.clone();
-        *bad.last_mut().unwrap() = 2;
-        assert!(parse(&bad).unwrap_err().0.contains("invalid control"));
-        bad = empty.clone();
-        bad.push(0);
-        assert!(parse(&bad).unwrap_err().0.contains("unexpected bytes"));
-        for limit in [MAX_META_LENGTH, MAX_KEY_LENGTH, MAX_RECORD_SIZE as u64] {
-            let mut bytes = Vec::new();
-            write_varint(&mut bytes, limit + 1);
-            let mut reader = Reader { rest: &bytes, pos: 0 };
-            assert!(reader.frame(limit).unwrap_err().0.contains("exceeds limit"));
-            bytes.clear();
-            write_varint(&mut bytes, limit);
-            bytes.resize(bytes.len() + limit as usize, 0);
-            let mut reader = Reader { rest: &bytes, pos: 0 };
-            assert_eq!(reader.frame(limit).unwrap().len(), limit as usize);
-        }
-    }
-
-    #[test]
-    fn varints() {
-        assert_eq!(read_varint(&[0]), Ok(Some((0, 1))));
-        assert_eq!(read_varint(&[0x80, 0x01]), Ok(Some((128, 2))));
-        assert_eq!(read_varint(&[0x80]), Ok(None));
-        assert!(read_varint(&[0x81, 0x00]).is_err(), "a padding zero");
-        assert!(read_varint(&[0xff; 7]).is_err());
-        let mut b = Vec::new();
-        write_varint(&mut b, MAX_RECORD_SIZE as u64);
-        assert_eq!(read_varint(&b), Ok(Some((MAX_RECORD_SIZE as u64, b.len()))));
     }
 }

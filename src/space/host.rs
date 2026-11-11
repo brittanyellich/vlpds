@@ -1,10 +1,10 @@
-//! The space host's calls out (reference `simplespace/manager.ts` and
+//! The space host's calls out (reference `space-policy/manager.ts` and
 //! `api/com/atproto/space/util.ts`): resolving a service identifier,
-//! asking a managing app whether a user may read or write, and forwarding
-//! a sequenced write to a registered service (notifySpaceDeleted is
-//! [`super::deletions`]'s). Every call goes through the SSRF-guarded
-//! client with service auth from the authority (`aud` = the service
-//! identifier as published), a 10 s timeout and a small response cap.
+//! asking a managing app whether a user may read or write, forwarding a
+//! sequenced write to a registered service, and telling registered services
+//! a space is gone. Every call goes through the SSRF-guarded client with
+//! service auth from the authority (`aud` = the service identifier as
+//! published), a 10 s timeout and a small response cap.
 
 use super::rows::NotifyRow;
 use crate::state::{self, SpaceId};
@@ -107,7 +107,8 @@ pub async fn check_user_access(
         return false;
     };
     let mut q = vec![("space", space), ("user", user), ("access", access)];
-    if let Some(c) = client_id {
+    // the attested client is the managing app's to judge, on reads only
+    if let Some(c) = client_id.filter(|_| access == "read") {
         q.push(("clientId", c));
     }
     let client = vlatproto::http::guarded(app.config.dev_mode);
@@ -234,12 +235,10 @@ pub async fn forward(app: &App, f: &Forward, prev: Option<Tid>) -> &'static str 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Ok when `writer`'s host serves `hash` at `rev` in `space` now: its
-/// getLatestCommit, read as a syncer reads it, with a credential
-/// `authority` issues itself and a MAC against `writer`'s `#atproto_kem`
-/// key. A commit's data is the author's host's claim only under a MAC its
-/// response carried, which is what this checks. A MAC that fails is asked
-/// for once more after the writer's document is refetched (its KEM key may
-/// have rotated).
+/// getLatestCommit, read as a syncer reads it with a credential `authority`
+/// issues itself, its MAC keyed against `writer`'s `#atproto_kem` key. A
+/// commit's hash is the author's claim only when it comes from the author's
+/// host, MACed for this request, which is what this asks for.
 pub async fn check_served_hash(
     app: &App,
     space: &str,
@@ -250,48 +249,44 @@ pub async fn check_served_hash(
 ) -> Result<(), String> {
     let doc = app.did_resolver.resolve(writer).await.map_err(|e| format!("could not resolve the writer: {e:?}"))?;
     match served_commit(app, &doc, space, authority, writer).await {
-        Err(Checked::Mac(_)) if app.did_resolver.refresh(writer) => {
+        Err(e) if e == MAC_MISMATCH => {
+            // the KEM key may have rotated since the document was cached
+            if !app.did_resolver.refresh(writer) {
+                return Err(e);
+            }
             let doc =
                 app.did_resolver.resolve(writer).await.map_err(|e| format!("could not resolve the writer: {e:?}"))?;
-            served_commit(app, &doc, space, authority, writer).await
+            check_commit(served_commit(app, &doc, space, authority, writer).await?, rev, hash)
         }
-        r => r,
+        r => check_commit(r?, rev, hash),
     }
-    .map_err(|e| match e {
-        Checked::Mac(m) | Checked::Other(m) => m,
-    })
-    .and_then(|c| {
-        if c.rev != rev.to_string() {
-            return Err(format!("the writer's host is at {}", c.rev));
-        }
-        if c.data[..] != hash[..] {
-            return Err("the writer's host serves another hash".into());
-        }
-        Ok(())
-    })
 }
 
-enum Checked {
-    /// The MAC didn't verify (or the writer has no usable KEM key).
-    Mac(String),
-    Other(String),
+const MAC_MISMATCH: &str = "the commit's MAC doesn't verify against the writer's KEM key";
+
+fn check_commit(c: super::commit::Commit, rev: Tid, hash: &[u8; 32]) -> Result<(), String> {
+    if c.rev != rev.to_string() {
+        return Err(format!("the writer's host is at {}", c.rev));
+    }
+    if c.data != *hash {
+        return Err("the writer's host serves another hash".into());
+    }
+    Ok(())
 }
 
-/// One getLatestCommit at the writer's host, its MAC verified.
+/// The writer's getLatestCommit, its MAC verified.
 async fn served_commit(
     app: &App,
     doc: &J,
     space: &str,
     authority: &str,
     writer: &str,
-) -> Result<super::commit::Commit, Checked> {
+) -> Result<super::commit::Commit, String> {
     use p256::ecdsa::signature::Signer;
-    let other = Checked::Other;
-    let endpoint = vlatproto::did_resolver::service_endpoint(doc, "atproto_pds")
-        .ok_or_else(|| other("the writer names no PDS".into()))?;
-    let kem_key =
-        super::kem::kem_key_of(doc).ok_or_else(|| Checked::Mac("the writer has no #atproto_kem key".into()))?;
-    let (key, _) = crate::xrpc::proxy::account_key_status(app, authority).await.map_err(|e| other(e.message))?;
+    let endpoint = vlatproto::did_resolver::service_endpoint(doc, "atproto_pds").ok_or("the writer names no PDS")?;
+    let kem = super::mac::kem_key_of(doc).ok_or("the writer publishes no KEM key")?;
+    let (share, secret) = super::mac::encapsulate(&kem).map_err(|e| e.0.to_string())?;
+    let (key, _) = crate::xrpc::proxy::account_key_status(app, authority).await.map_err(|e| e.message)?;
     let holder = <p256::ecdsa::SigningKey as p256::elliptic_curve::Generate>::generate();
     let mut mk = vec![0x80, 0x24];
     mk.extend_from_slice(holder.verifying_key().to_sec1_point(true).as_bytes());
@@ -308,40 +303,36 @@ async fn served_commit(
     let cred = super::token::encode(super::token::TokenType::Credential, &mint, "ES256K", now, &jti, |b| {
         Ok::<_, std::convert::Infallible>(key.sign(b))
     })
-    .map_err(|e| other(format!("credential: {e:?}")))?;
-    let (share, secret) = super::kem::encapsulate(&kem_key).map_err(|e| Checked::Mac(e.to_string()))?;
-    let url = format!("{}/xrpc/com.atproto.space.getLatestCommit", endpoint.trim_end_matches('/'));
-    let mut rb = vlatproto::http::guarded(app.config.dev_mode)
-        .request(reqwest::Method::GET, &url)
-        .map_err(other)?
-        .query(&[("space", space), ("repo", writer)])
-        .header(super::mac::WANT_MAC_HEADER, super::mac::format_want_mac(super::mac::COMMIT_MAC_TYPE, &share))
-        .timeout(CHECK_TIMEOUT);
-    let signed = super::httpsig::sign_headers(&cred, writer, |b| {
+    .map_err(|e| format!("credential: {e:?}"))?;
+    let signed = super::httpsig::headers(&cred, writer, |b| {
         let sig: p256::ecdsa::Signature = holder.sign(b);
         sig.to_bytes().into()
     });
+    let url = format!("{}/xrpc/com.atproto.space.getLatestCommit", endpoint.trim_end_matches('/'));
+    let mut req = vlatproto::http::guarded(app.config.dev_mode)
+        .request(reqwest::Method::GET, &url)?
+        .query(&[("space", space), ("repo", writer)])
+        .header(super::mac::WANT_MAC_HEADER, super::mac::format_want_mac(super::mac::MacType::Repo, &share));
     for (k, v) in signed {
-        rb = rb.header(k, v);
+        req = req.header(k, v);
     }
-    let mut r = rb.send().await.map_err(|e| other(http_error("getLatestCommit", e)))?;
+    let mut r = req.timeout(CHECK_TIMEOUT).send().await.map_err(|e| http_error("getLatestCommit", e))?;
     if !r.status().is_success() {
-        return Err(other(format!("getLatestCommit: {}", r.status())));
+        return Err(format!("getLatestCommit: {}", r.status()));
     }
-    let mac_value = r.headers().get(super::mac::MAC_HEADER).and_then(|v| v.to_str().ok()).map(String::from);
+    let mac = r.headers().get(super::mac::MAC_HEADER).and_then(|v| v.to_str().ok()).map(String::from);
     let mut buf = Vec::new();
-    while let Some(c) = r.chunk().await.map_err(|e| other(http_error("getLatestCommit", e)))? {
+    while let Some(c) = r.chunk().await.map_err(|e| http_error("getLatestCommit", e))? {
         if buf.len() + c.len() > MAX_RESPONSE {
-            return Err(other("getLatestCommit: response too large".into()));
+            return Err("getLatestCommit: response too large".into());
         }
         buf.extend_from_slice(&c);
     }
-    let body: J = serde_json::from_slice(&buf).map_err(|_| other("getLatestCommit: not JSON".into()))?;
-    let commit = super::commit::Commit::from_json(&body["commit"]).map_err(other)?;
-    let mac = super::mac::parse_mac(mac_value.as_deref(), super::mac::COMMIT_MAC_TYPE)
-        .map_err(|e| Checked::Mac(format!("getLatestCommit: {e}")))?;
+    let body: J = serde_json::from_slice(&buf).map_err(|_| "getLatestCommit: not JSON")?;
+    let commit = super::commit::Commit::from_json(&body["commit"]).ok_or("getLatestCommit: malformed commit")?;
+    let mac = super::mac::parse_mac(mac.as_deref(), super::mac::MacType::Repo).map_err(|e| e.0.to_string())?;
     if !super::commit::verify(&commit, space, writer, &secret, &mac) {
-        return Err(Checked::Mac("the commit doesn't verify against its MAC".into()));
+        return Err(MAC_MISMATCH.into());
     }
     Ok(commit)
 }

@@ -1,19 +1,20 @@
 //! Spaces moderation and moving in (`--spaces`; src/xrpc/space_admin.rs,
 //! src/xrpc/space_import.rs, the space takedown in src/xrpc/space.rs):
 //! audited operator reads, space takedowns, no credentials for taken-down
-//! accounts, blobs of taken-down records, and vlpds.space.importRepo.
+//! accounts, blobs of taken-down records, and com.atproto.space.importRepo.
 
 use crate::common::spaces::SpaceClient;
 use crate::common::*;
 use std::time::Duration;
 use vlatproto::cid::Cid;
+use vlpds::space::star;
 
 const TYPE: &str = "com.example.group";
 const COLL: &str = "com.example.post";
 const OWNER: &str = "space:com.example.group?collection=com.example.post&action=read&action=create&action=update&action=delete&manage=create&manage=update&manage=delete";
 const MEMBER: &str = "space:com.example.group?authority=*&collection=com.example.post&action=read&action=create";
 const STAR: &str = "application/octet-stream";
-const IMPORT: &str = "vlpds.space.importRepo";
+const IMPORT: &str = "com.atproto.space.importRepo";
 
 fn rec(text: &str) -> J {
     json!({"$type": COLL, "text": text, "createdAt": "2026-10-01T00:00:00.000Z"})
@@ -296,21 +297,11 @@ async fn pds(plc: &str, service_did: &str) -> TestServer {
     .await
 }
 
-/// A STAR archive of `commit` and `records` as given (in their order).
-fn star(commit: &vlpds::space::commit::Commit, records: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let mut out = Vec::new();
-    vlpds::space::star::write_header(&mut out, commit);
-    for (p, r) in records {
-        vlpds::space::star::write_pair(&mut out, p.as_bytes(), r);
-    }
-    out.push(0);
-    out
-}
-
 /// Export from one PDS with space.getRepo, import into another the account
-/// moves to: the same commit at the same rev, and the same records. An
-/// archive that isn't the account's, or whose records aren't its commit's,
-/// is refused, and nothing it staged is served.
+/// moves to (once its space is there): the same data at a new rev, and the
+/// same records. An archive
+/// whose records don't fold to its commit, or that names another account,
+/// is refused before anything lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn import_repo_round_trip_and_refusals() {
     let (plc, docs) = stub_plc().await;
@@ -340,8 +331,8 @@ async fn import_repo_round_trip_and_refusals() {
         x.xrpc.get("com.atproto.identity.resolveDid", &[("did", &a.did)], &Auth::None).await.ok()["didDoc"].clone();
     docs.lock().unwrap().insert(a.did.clone(), doc);
     let rq = [("space", space.as_str()), ("repo", a.did.as_str())];
-    let (status, _, exported) = a.get_raw("com.atproto.space.getRepo", &rq).await;
-    assert_eq!(status, 200);
+    let (status, ctype, exported) = a.get_raw("com.atproto.space.getRepo", &rq).await;
+    assert_eq!((status, ctype.as_str()), (200, STAR));
     let at_x = a.get("com.atproto.space.getLatestCommit", &rq).await.ok()["commit"].clone();
     let records_x = a.get("com.atproto.space.listRecords", &rq).await.ok()["records"].clone();
 
@@ -364,79 +355,70 @@ async fn import_repo_round_trip_and_refusals() {
     let created = y.xrpc.post("com.atproto.server.createAccount", &body, &Auth::Bearer(token)).await.ok();
     let jwt = created["accessJwt"].as_str().unwrap().to_string();
     let session = Auth::Bearer(jwt.clone());
-    let path = format!("{IMPORT}?space={space}");
     let rdc = y.xrpc.get("com.atproto.identity.getRecommendedDidCredentials", &[], &session).await.ok();
-    let key = rdc["verificationMethods"]["atproto"].as_str().unwrap();
     let did = a.did.clone();
     let doc = json!({
         "@context": ["https://www.w3.org/ns/did/v1"],
         "id": did,
         "alsoKnownAs": rdc["alsoKnownAs"],
-        "verificationMethod": [{
-            "id": format!("{did}#atproto"), "type": "Multikey", "controller": did,
-            "publicKeyMultibase": key.strip_prefix("did:key:").unwrap(),
-        }],
+        "verificationMethod": crate::spaces_side::import_repo::verification_methods(&did, &rdc),
         "service": [{"id": "#atproto_pds", "type": "AtprotoPersonalDataServer", "serviceEndpoint": rdc["services"]["atproto_pds"]["endpoint"]}],
     });
     // a password session is no space access, before the move or after
-    let r = y.xrpc.post_bytes(&path, exported.clone(), STAR, &session).await;
+    let r = y.xrpc.post_bytes(IMPORT, exported.clone(), STAR, &session).await;
     assert_eq!(r.status, 403, "{}", r.text());
     docs.lock().unwrap().insert(did.clone(), doc);
     y.xrpc.post_empty("com.atproto.server.activateAccount", &session).await.ok();
-    let r = y.xrpc.post_bytes(&path, exported.clone(), STAR, &session).await;
+    let r = y.xrpc.post_bytes(IMPORT, exported.clone(), STAR, &session).await;
     r.err(403, "InsufficientScope");
     let b = SpaceClient::for_account(&y, &a.did, &handle, &jwt, OWNER).await;
-    let import = async |star: Vec<u8>| b.post_bytes(IMPORT, &[("space", space.as_str())], star, STAR).await;
+    let import = async |star: Vec<u8>| b.post_bytes(IMPORT, &[], star, STAR).await;
 
-    let parsed = vlpds::space::star::parse(&exported).unwrap();
-    let (commit, records) = (parsed.commit, parsed.records);
-    // another repo's, or another space's
-    let theirs = vlpds::space::commit::Commit { repo: "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa".into(), ..commit.clone() };
-    import(star(&theirs, &records)).await.err(400, "InvalidRequest");
-    let elsewhere = vlpds::space::commit::Commit { space: format!("{space}x"), ..commit.clone() };
-    import(star(&elsewhere, &records)).await.err(400, "InvalidRequest");
-    // a rev far ahead would hold every later notify past the authority's
-    // FutureRev window
-    let ahead = vlatproto::tid::Tid::from_parts(vlatproto::tid::now_micros() + 3_600_000_000, 0).to_string();
-    let future = vlpds::space::commit::Commit { rev: ahead, ..commit.clone() };
-    import(star(&future, &records)).await.err(400, "FutureRev");
-    // records that aren't the commit's set: one left out, or its data off
-    import(star(&commit, &records[1..])).await.err(400, "DigestMismatch");
-    let mut off = commit.clone();
-    off.data[0] ^= 1;
-    import(star(&off, &records)).await.err(400, "DigestMismatch");
-    // out of order, and cut short
-    let mut swapped = records.clone();
-    swapped.swap(0, 1);
-    import(star(&commit, &swapped)).await.err(400, "InvalidRequest");
-    import(exported[..exported.len() - 3].to_vec()).await.err(400, "InvalidRequest");
-    assert_eq!(
-        b.get("com.atproto.space.listRecords", &rq).await.ok()["records"],
-        json!([]),
-        "nothing staged is served"
-    );
+    let (meta, pairs) = star::read_all(&exported, star::LIMITS).unwrap();
+    let commit = star::parse_repo_meta(&meta).unwrap();
+    let archive = |c: &vlpds::space::commit::Commit, pairs: &[(Vec<u8>, Vec<u8>)]| {
+        let mut out = Vec::new();
+        star::write_header(&mut out, &star::repo_meta(c));
+        for (k, v) in pairs {
+            star::write_pair(&mut out, k, v);
+        }
+        star::write_end(&mut out);
+        out
+    };
+    assert_eq!(archive(&commit, &pairs), exported, "the archive re-encodes");
+    // the account governs this space: its own repo comes after the space,
+    // which it makes again here (space meta isn't moved)
+    import(exported.clone()).await.err(400, "SpaceNotFound");
+    assert_eq!(b.create_space(TYPE, "main").await, space);
+    // data that isn't the records'
+    let mut bad = commit.clone();
+    bad.data[0] ^= 1;
+    import(archive(&bad, &pairs)).await.err(400, "InvalidRequest");
+    // a record left out
+    import(archive(&commit, &pairs[1..])).await.err(400, "InvalidRequest");
+    // another account's repo
+    let theirs = vlpds::space::commit::Commit { repo: "did:plc:someoneelse2345abcdefgh".into(), ..commit.clone() };
+    import(archive(&theirs, &pairs)).await.err(400, "InvalidRequest");
     // an active account's password session is no space access
-    let r = x.xrpc.post_bytes(&path, exported.clone(), STAR, &Auth::Bearer(a.session_jwt.clone())).await;
+    let r = x.xrpc.post_bytes(IMPORT, exported.clone(), STAR, &Auth::Bearer(a.session_jwt.clone())).await;
     r.err(403, "InsufficientScope");
 
-    let r = import(exported.clone()).await.ok();
-    assert_eq!((r["rev"].clone(), r["records"].clone()), (at_x["rev"].clone(), json!(2)));
+    let r = import(exported.clone()).await;
+    assert_eq!((r.status, r.body.len()), (200, 0), "{}", r.text());
     // the imported record's blob hasn't come over yet
     let lm = y.xrpc.get("com.atproto.repo.listMissingBlobs", &[], &session).await.ok();
     assert_eq!(lm["blobs"], json!([{"cid": blob_cid, "recordUri": format!("{space}/{}/{COLL}/aa", a.did)}]), "{lm}");
-    // the same export again is a retry: answered as before, nothing written
-    let again = import(exported.clone()).await.ok();
-    assert_eq!((again["rev"].clone(), again["records"].clone()), (at_x["rev"].clone(), json!(2)));
 
     let at_y = b.get("com.atproto.space.getLatestCommit", &rq).await.ok()["commit"].clone();
-    assert_eq!(at_y, at_x, "the same commit");
+    assert_eq!(at_y["data"], at_x["data"]);
+    assert!(at_y["rev"].as_str().unwrap() > at_x["rev"].as_str().unwrap(), "a new rev: {at_y} after {at_x}");
     assert_eq!(b.get("com.atproto.space.listRecords", &rq).await.ok()["records"], records_x);
     // the oplog starts empty; the next write follows the imported rev
     let ops = b.get("com.atproto.space.listRepoOps", &rq).await.ok();
     assert_eq!(ops["ops"], json!([]), "{ops}");
     b.create_record(&space, COLL, Some("dd"), rec("four")).await.ok();
     let next = b.get("com.atproto.space.getLatestCommit", &rq).await.ok()["commit"]["rev"].clone();
-    assert!(next.as_str().unwrap() > at_x["rev"].as_str().unwrap(), "{next} after {}", at_x["rev"]);
+    assert!(next.as_str().unwrap() > at_y["rev"].as_str().unwrap(), "{next} after {}", at_y["rev"]);
     // check-space takes the imported base without its ops
     let chk =
         y.xrpc.get("vlpds.admin.checkSpace", &[("did", a.did.as_str()), ("space", space.as_str())], &Auth::Admin).await;
@@ -478,62 +460,4 @@ async fn rows_left_by_a_stopped_import_are_cleared_by_the_first_write() {
     assert_eq!(chk.ok()["ok"], json!(true), "{}", chk.json);
     assert_eq!(chk.json["records"]["count"], json!(1));
     m.create_record(&space, COLL, Some("y"), rec("another")).await.ok();
-}
-
-/// November 5 alpha: suspended authority reads stop, while its own exports remain possible.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn november_authority_suspension_and_exports() {
-    let s = spawn().await;
-    let owner = SpaceClient::new(&s, "novowner", OWNER).await;
-    let member = SpaceClient::new(&s, "novmember", MEMBER).await;
-    let space = owner.create_space(TYPE, "main").await;
-    put_member(&owner, &space, &member.did).await;
-    owner.create_record(&space, COLL, Some("exported"), rec("owner data")).await.ok();
-    let cred = member.credential(&space).await;
-    let auth = Auth::Bearer(owner.session_jwt.clone());
-    let q = [("space", space.as_str())];
-    s.xrpc.post("com.atproto.server.deactivateAccount", &json!({}), &auth).await.ok();
-    member.try_credential_at(&s.url, &space, None).await.err(400, "RepoDeactivated");
-    member.signed_get(&s.url, "com.atproto.space.listRepos", &q, &cred, &owner.did).await.err(400, "RepoDeactivated");
-    s.xrpc.post("com.atproto.space.deleteSpace", &json!({"space": space}), &auth).await.err(401, "AccountDeactivated");
-    s.xrpc.post("com.atproto.server.activateAccount", &json!({}), &auth).await.ok();
-    set_status(&s, json!({"$type": "com.atproto.admin.defs#repoRef", "did": owner.did}), true).await;
-    member.signed_get(&s.url, "com.atproto.space.listRepos", &q, &cred, &owner.did).await.err(400, "RepoTakendown");
-    for method in ["createSpace", "updateSpace", "deleteSpace", "removeWriter"] {
-        let policy = json!({"$type": "com.atproto.memberspace.policy"});
-        let body = match method {
-            "createSpace" => json!({"spaceType": TYPE, "policy": policy}),
-            "updateSpace" => json!({"space": space, "policy": policy}),
-            "removeWriter" => json!({"space": space, "did": member.did}),
-            _ => json!({"space": space}),
-        };
-        s.xrpc.post(&format!("com.atproto.space.{method}"), &body, &auth).await.err(401, "AccountTakedown");
-    }
-    for method in ["putMember", "removeMember"] {
-        s.xrpc
-            .post(
-                &format!("com.atproto.memberspace.{method}"),
-                &json!({"space": space, "did": member.did, "read": true, "write": true}),
-                &auth,
-            )
-            .await
-            .err(401, "AccountTakedown");
-    }
-    let login = s
-        .xrpc
-        .post(
-            "com.atproto.server.createSession",
-            &json!({
-                "identifier": owner.did, "password": crate::oauth::PASSWORD, "allowTakendown": true
-            }),
-            &Auth::None,
-        )
-        .await
-        .ok();
-    let export_auth = Auth::Bearer(login["accessJwt"].as_str().unwrap().into());
-    s.xrpc.get("com.atproto.space.listSpaces", &[], &export_auth).await.ok();
-    s.xrpc.get("com.atproto.space.exportSpaceMeta", &q, &export_auth).await.ok();
-    let repo_q = [("space", space.as_str()), ("repo", owner.did.as_str())];
-    s.xrpc.get("com.atproto.space.getRepo", &repo_q, &export_auth).await.ok();
-    s.xrpc.get("com.atproto.space.listBlobs", &repo_q, &export_auth).await.ok();
 }

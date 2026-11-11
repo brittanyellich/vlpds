@@ -11,7 +11,7 @@ use super::admin::require_admin;
 use super::moderation::{audit, ClientIp, SubjectRef, Who};
 use super::space::{space_takedown_name, takedown_name, Space};
 use super::*;
-use crate::space::rows::{HeadRow, MemberRow, SeqRow, SpacePolicy, SpaceRow, WriterRow};
+use crate::space::rows::{HeadRow, MemberRow, Policy, SeqRow, SpaceRow, WriterRow};
 use std::collections::HashMap;
 use vlatproto::tid::Tid;
 
@@ -69,35 +69,22 @@ fn tid_json(t: Tid) -> J {
     }
 }
 
-/// The policy in a few words: its kind, who reads and writes, and what
-/// it publishes.
-fn policy_text(p: &SpacePolicy) -> String {
-    let published = |policy: bool, members: bool| match (policy, members) {
-        (false, false) => "",
-        (true, false) => ", policy published",
-        (false, true) => ", members published",
-        (true, true) => ", policy and members published",
-    };
+/// The policy for the console: its kind, then who reads, who writes and
+/// which apps, as short text.
+fn policy_view(p: &Policy) -> (&'static str, String, String, String) {
+    let who = |public: bool| if public { "public" } else { "members" }.to_string();
     match p {
-        SpacePolicy::Personal => "personal".into(),
-        SpacePolicy::Member { public_read, public_write, publish_policy, publish_members, .. } => format!(
-            "members (read: {}, write: {}{})",
-            if *public_read { "anyone" } else { "members" },
-            if *public_write { "anyone" } else { "members" },
-            published(*publish_policy, *publish_members)
+        Policy::Personal => ("personalspace", "owner".into(), "owner".into(), "any".into()),
+        Policy::Member { public_read, public_write, allowed_apps, .. } => (
+            "memberspace",
+            who(*public_read),
+            who(*public_write),
+            allowed_apps.as_ref().map_or("any".into(), |a| format!("allow-list ({})", a.len())),
         ),
-        SpacePolicy::Managed { managing_app, publish_policy } => {
-            format!("managed by {managing_app}{}", published(*publish_policy, false))
+        Policy::Managed { managing_app, .. } => {
+            let app = format!("managing app {managing_app}");
+            ("managedspace", app.clone(), app, "managing app".into())
         }
-    }
-}
-
-/// Which apps may read.
-fn app_access_text(p: &SpacePolicy) -> String {
-    match p {
-        SpacePolicy::Member { allowed_apps: Some(a), .. } => format!("allow-list ({})", a.len()),
-        SpacePolicy::Managed { .. } => "the managing app decides".into(),
-        _ => "any".into(),
     }
 }
 
@@ -144,6 +131,8 @@ struct SpaceSummary {
     space_type: String,
     skey: String,
     policy: String,
+    read_policy: String,
+    write_policy: String,
     app_access: String,
     created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,11 +157,16 @@ async fn summarize(app: &App, p: &Partition, row: SpaceRow) -> XResult<Option<Sp
     let wp = state::space_prefix(state::SPACE_WRITER_FAMILY, &space.authority, &space.sid);
     let (members, writers, last) =
         tokio::try_join!(count_prefix(db, &mp), count_prefix(db, &wp), last_seq(db, &space.authority, &space.sid))?;
+    // only a memberspace's list is consulted (another's is left over)
+    let members = if row.policy.is_memberspace() { members } else { 0 };
+    let (kind, read_policy, write_policy, app_access) = policy_view(&row.policy);
     let takendown = super::server::ctl(app, &space.authority).await?.has_takedown(&space_takedown_name(&space.sid));
     Ok(Some(SpaceSummary {
         handle: local_handle(app, &space.authority).await,
-        policy: policy_text(&row.policy),
-        app_access: app_access_text(&row.policy),
+        policy: kind.into(),
+        read_policy,
+        write_policy,
+        app_access,
         created_at: row.created_at,
         deleted_at: row.deleted_at,
         takendown,
@@ -370,7 +364,7 @@ async fn get_space_info(State(app): AppState, Auth(creds): Auth, Query(q): Query
         snap.scan_with_options(prefix.clone()..vlsync_store::keys::prefix_end(&prefix), &opts).await.map_err(err)?;
     let mut members = Vec::new();
     let mut more_members = false;
-    while let Some(kv) = it.next().await.map_err(err)? {
+    while let Some(kv) = it.next().await.map_err(err)?.filter(|_| row.policy.is_memberspace()) {
         if members.len() >= LIST_MAX {
             more_members = true;
             break;
@@ -441,9 +435,10 @@ async fn get_space_info(State(app): AppState, Auth(creds): Auth, Query(q): Query
             "handle": local_handle(&app, &space.authority).await,
             "spaceType": space.space_type,
             "skey": space.skey,
-            "policy": policy_text(&row.policy),
-            "policyObject": row.policy.to_json(),
-            "appAccess": app_access_text(&row.policy),
+            "policy": policy_view(&row.policy).0,
+            "readPolicy": policy_view(&row.policy).1,
+            "writePolicy": policy_view(&row.policy).2,
+            "appAccess": policy_view(&row.policy).3,
             "createdAt": row.created_at,
             "deletedAt": row.deleted_at,
             "takendown": ctl.has_takedown(&space_takedown_name(&space.sid)),

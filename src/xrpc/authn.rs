@@ -98,11 +98,6 @@ pub const TAKENDOWN_METHODS: &[&str] = &[
     "com.atproto.sync.getBlob",
     "com.atproto.sync.getRepo",
     "com.atproto.sync.listBlobs",
-    "com.atproto.space.listSpaces",
-    "com.atproto.space.exportSpaceMeta",
-    "com.atproto.space.getRepo",
-    "com.atproto.space.listBlobs",
-    "com.atproto.space.getBlob",
     "tools.ozone.inbox.appealActionedSubject",
 ];
 
@@ -224,8 +219,18 @@ impl Credentials {
     pub fn allows_space(&self, t: &SpaceTarget, access: SpaceAccess) -> bool {
         match self {
             Credentials::OAuth { scopes, .. } => scopes.allows_space(t, access),
-            Credentials::Takendown { .. } => matches!(access, SpaceAccess::ReadSelf),
             _ => false,
+        }
+    }
+
+    /// Before a request knows which space it writes (importRepo, ahead of
+    /// its archive's metadata): OAuth, the only way into space data, with a
+    /// grant that creates in some space, so no other grant gets its body read.
+    pub fn need_any_space_write(&self) -> XResult<()> {
+        match self {
+            Credentials::OAuth { scopes, .. } if scopes.creates_in_some_space() => Ok(()),
+            Credentials::OAuth { .. } => Err(scope_refused("oauth", "space:*?authority=*&collection=*&action=create")),
+            _ => self.require(false),
         }
     }
 
@@ -348,17 +353,6 @@ pub async fn authenticate(app: &App, parts: &Parts) -> XResult<Credentials> {
         }
         let creds = super::server::verify_bearer(app, tok).await?;
         if matches!(creds, Credentials::Takendown { .. }) && !TAKENDOWN_METHODS.contains(&nsid) {
-            if matches!(
-                nsid,
-                "com.atproto.space.createSpace"
-                    | "com.atproto.space.updateSpace"
-                    | "com.atproto.space.deleteSpace"
-                    | "com.atproto.space.removeWriter"
-                    | "com.atproto.memberspace.putMember"
-                    | "com.atproto.memberspace.removeMember"
-            ) {
-                return Err(super::takedown_error());
-            }
             return Err(XrpcError::bad("InvalidToken", "Bad token scope"));
         }
         return Ok(creds);
@@ -579,7 +573,7 @@ pub async fn verify_service_jwt(app: &App, token: &str, lxm: Option<&str>) -> XR
 
 /// Service auth for the space methods whose audience depends on the
 /// request (reference `serviceAuth`, `audience: null`): notifyWrite to a
-/// space host (`{authority}#atproto_space_host` or the bare authority DID)
+/// space host (`{authority}#atproto_pds` or the bare authority DID)
 /// and notifyCredentialRevoked to a repo host (a local account's DID).
 /// `lxm` must be the method. The handler checks `aud`, as the reference's
 /// do (403).
@@ -679,7 +673,8 @@ pub async fn optional_service_auth(app: &App, headers: &HeaderMap, lxm: &str) ->
 
 /// The scheme of space credentials: `Authorization: Atproto-Space-Credential <jwt>`.
 pub const SPACE_SCHEME: &str = "atproto-space-credential";
-/// The October 1 alpha's scheme, refused as an unsupported type.
+/// The October 1 scheme, which the reference now answers as an unsupported
+/// authorization type.
 const OLD_SPACE_SCHEME: &str = "atproto-space";
 
 /// (scheme, token) of the Authorization header, the scheme matched
@@ -700,7 +695,8 @@ fn is_space_credential(headers: &HeaderMap) -> XResult<bool> {
         Some((scheme, _)) if scheme.eq_ignore_ascii_case(OLD_SPACE_SCHEME) => {
             Err(XrpcError::bad("InvalidToken", "Unsupported authorization type"))
         }
-        a => Ok(a.is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case(SPACE_SCHEME))),
+        Some((scheme, _)) => Ok(scheme.eq_ignore_ascii_case(SPACE_SCHEME)),
+        None => Ok(false),
     }
 }
 
@@ -726,11 +722,11 @@ fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     }
 }
 
-/// The did:key of `iss`'s `#atproto` key, which signs its space tokens
-/// (reference PDS `resolveSpaceKey`). An account hosted here whose document
-/// is ours answers from its account. `fresh` skips the resolver's cache.
+/// The did:key of `iss`'s `#atproto` key, which signs delegation tokens
+/// and credentials (reference PDS `resolveSpaceKey`). An account hosted
+/// here whose document is ours answers from its account. `fresh` skips the
+/// resolver's cache.
 async fn space_token_key(app: &App, iss: &str, fresh: bool) -> XResult<String> {
-    let key_id = "atproto";
     if app.partition(iss).is_ok() {
         if let Ok(a) = app.account(iss).await {
             if super::identity::serves_local_doc(app, &a) {
@@ -746,7 +742,7 @@ async fn space_token_key(app: &App, iss: &str, fresh: bool) -> XResult<String> {
         .resolve(iss)
         .await
         .map_err(|_| space_auth_err("BadJwtIss", format!("could not resolve DID: {iss}")))?;
-    let (full, short) = (format!("{iss}#{key_id}"), format!("#{key_id}"));
+    let (full, short) = (format!("{iss}#atproto"), "#atproto");
     doc.get("verificationMethod")
         .and_then(|v| v.as_array())
         .and_then(|ms| {
@@ -756,7 +752,7 @@ async fn space_token_key(app: &App, iss: &str, fresh: bool) -> XResult<String> {
                     .then(|| m.get("publicKeyMultibase")?.as_str().map(|k| format!("did:key:{k}")))?
             })
         })
-        .ok_or_else(|| space_auth_err("BadJwtIss", format!("missing or bad key (#{key_id}) in did doc: {iss}")))
+        .ok_or_else(|| space_auth_err("BadJwtIss", format!("missing or bad key (#atproto) in did doc: {iss}")))
 }
 
 /// `verifySpaceToken` of a parsed token: times, then the issuer's
@@ -816,9 +812,6 @@ pub async fn verify_space_credential(app: &App, headers: &HeaderMap) -> XResult<
 async fn check_space_credential(app: &App, headers: &HeaderMap) -> XResult<Credentials> {
     let tok = match authorization(headers)? {
         Some((scheme, tok)) if scheme.eq_ignore_ascii_case(SPACE_SCHEME) => tok,
-        Some((scheme, _)) if scheme.eq_ignore_ascii_case(OLD_SPACE_SCHEME) => {
-            return Err(XrpcError::bad("InvalidToken", "Unsupported authorization type"))
-        }
         _ => return Err(space_auth_err("MissingJwt", "missing space credential")),
     };
     let Some(sp) = app.spaces.as_ref() else {
@@ -852,9 +845,6 @@ async fn check_space_credential(app: &App, headers: &HeaderMap) -> XResult<Crede
         .filter(|a| vlatproto::syntax::valid_did(a))
         .ok_or_else(|| space_auth_err("BadSpaceSignature", "missing or invalid space audience DID"))?
         .to_string();
-    if headers.get_all(header::AUTHORIZATION).iter().count() != 1 {
-        return Err(space_auth_err("BadSpaceSignature", "request requires exactly one \"authorization\" field"));
-    }
     crate::space::httpsig::verify(headers, &v.cnf_kid).map_err(sig_err)?;
     if sp.revocations.is_revoked(&v.space, &v.jti, now) {
         return Err(space_auth_err("CredentialRevoked", "space credential has been revoked"));
@@ -880,7 +870,7 @@ async fn check_space_credential(app: &App, headers: &HeaderMap) -> XResult<Crede
     })
 }
 
-/// A verified delegation token: who it delegates, and for which space.
+/// A verified delegation token: who it delegates and for which space.
 #[derive(Clone, Debug)]
 pub struct Delegation {
     pub user: String,
@@ -888,16 +878,18 @@ pub struct Delegation {
     pub authority: String,
 }
 
-/// Reference `verifyDelegationToken`, for getSpaceCredential's
-/// `delegationToken`: addressed to its space's authority, and its `jti`
-/// claimed once (at the authority's owner, durably, so a failover doesn't
-/// reopen it). It comes in the body, not as the request's authorization,
-/// so a bad one is an invalid request (`InvalidDelegationToken`), not an
-/// authentication failure.
+/// Reference `verifyDelegationToken`, for getSpaceCredential's body: a
+/// delegation token addressed to its space's authority, its `jti` claimed
+/// once (at the authority's owner, durably, so a failover doesn't reopen
+/// it). It isn't the request's authorization, so a bad one is
+/// `InvalidDelegationToken` (400).
 pub async fn verify_delegation(app: &App, tok: &str) -> XResult<Delegation> {
-    let invalid = |e: XrpcError| match e.status {
-        StatusCode::UNAUTHORIZED => XrpcError::bad("InvalidDelegationToken", e.message),
-        _ => e,
+    let invalid = |e: XrpcError| {
+        if e.status == StatusCode::UNAUTHORIZED {
+            XrpcError::bad("InvalidDelegationToken", e.message)
+        } else {
+            e
+        }
     };
     let t = token::parse(TokenType::Delegation, tok).map_err(token_err).map_err(invalid)?;
     verify_space_token(app, &t).await.map_err(invalid)?;

@@ -4,7 +4,7 @@
 //! - a record takedown hides the record from getRecord, listRecords and
 //!   listRepoOps values; its blobs (when no live record names them) from
 //!   getBlob and listBlobs; and getRepo, listRepoOps and getLatestCommit
-//!   serve a view without it that is signed afresh and verifies, so a syncer
+//!   serve a view without it that is MACed afresh and verifies, so a syncer
 //!   that held the record converges, and converges back on a reversal;
 //! - an account takedown refuses every read of the account's repos
 //!   (RepoTakendown), and credential issuance stops for a taken-down member
@@ -142,13 +142,12 @@ async fn record_takedown_hides_blobs_only_it_names() {
 }
 
 /// Option (e): during a record takedown, getLatestCommit's hash is the
-/// LtHash of the remaining records (at the same rev, signed afresh);
-/// getRepo verifies as `verifyRepoCarFull` does with the record in neither
-/// the index nor the blocks; listRepoOps replays to the same commit. A
+/// LtHash of the remaining records (at the same rev, MACed afresh);
+/// getRepo verifies as `verifyRepoStarFull` does without the record; listRepoOps replays to the same commit. A
 /// syncer that held the record converges through getRepo, follows later
 /// writes incrementally, and converges back when the takedown is reversed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn record_takedown_serves_a_consistent_view() {
+async fn record_takedown_serves_a_consistent_signed_view() {
     let t = td().await;
     let base = t.net.pds[1].url.clone();
     let (_, gone) = t.bob_writes("gone", "zqoptiontext").await;
@@ -169,13 +168,14 @@ async fn record_takedown_serves_a_consistent_view() {
     let latest = cred.get(&base, "com.atproto.space.getLatestCommit", &q).await.ok();
     let c = super::fuzz::signed_commit(&latest["commit"]);
     assert_eq!(c.rev, head_rev, "the takedown moves no rev");
-    assert_eq!(c.data, set_hash(&visible), "getLatestCommit's hash is the remaining records' LtHash");
+    assert_eq!(c.data.to_vec(), set_hash(&visible), "getLatestCommit's hash is the remaining records' LtHash");
+    assert!(c.space == t.space && c.repo == t.bob.did, "the adjusted commit names the repo");
 
     let r = cred.get(&base, "com.atproto.space.getRepo", &q).await;
     assert_eq!(r.status, 200, "{}", r.text());
     let v = verify_repo_star(&r.body, &t.space, &t.bob.did)
         .unwrap_or_else(|e| panic!("getRepo during a takedown doesn't verify: {e}"));
-    assert_eq!(v.set(), visible, "getRepo's index");
+    assert_eq!(v.set(), visible, "getRepo's records");
     assert_eq!(v.records.len(), 1);
     let gone_bytes = Cid::parse(&gone).unwrap().to_bytes();
     assert!(!r.body.windows(gone_bytes.len()).any(|w| w == gone_bytes), "the record's CID is in the archive");
@@ -189,7 +189,7 @@ async fn record_takedown_serves_a_consistent_view() {
     assert!(!ops.to_string().contains("zqoptiontext"));
     let noop = cred.get(&base, "com.atproto.space.listRepoOps", &[q[0], q[1], ("since", &head_rev)]).await.ok();
     assert_eq!(noop["ops"], json!([]));
-    assert_eq!(super::fuzz::signed_commit(&noop["commit"]).data, set_hash(&visible));
+    assert_eq!(super::fuzz::signed_commit(&noop["commit"]).data.to_vec(), set_hash(&visible));
     assert_eq!(listed(&base, &cred, &t.space, &t.bob.did).await, visible);
 
     let pulls = syncer.full_pulls;
@@ -206,7 +206,7 @@ async fn record_takedown_serves_a_consistent_view() {
     let mut restored = all.clone();
     restored.insert(path("more"), more);
     let latest = cred.get(&base, "com.atproto.space.getLatestCommit", &q).await.ok();
-    assert_eq!(super::fuzz::signed_commit(&latest["commit"]).data, set_hash(&restored));
+    assert_eq!(super::fuzz::signed_commit(&latest["commit"]).data.to_vec(), set_hash(&restored));
     let r = cred.get(&base, "com.atproto.space.getRepo", &q).await;
     assert_eq!(verify_repo_star(&r.body, &t.space, &t.bob.did).unwrap().set(), restored);
     let ops = cred.get(&base, "com.atproto.space.listRepoOps", &[q[0], q[1], ("limit", "100")]).await.ok();

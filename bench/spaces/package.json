@@ -12,7 +12,7 @@
     "@atproto/syntax": "0.0.0-spaces-alpha-20261105160032",
     "@did-plc/lib": "0.0.4"
   },
-  "//overrides": "the alpha packages depend on ^0.0.0-spaces-alpha-*, which npm resolves to a broken 0.0.0 (workspace: deps) where one was published; pin those to the release",
+  "//overrides": "the alpha packages depend on ^0.0.0-spaces-alpha-*, which npm resolves to a broken prerelease (0.0.0-stage, or a 0.0.0 with workspace: deps) where one was published; pin those to the release",
   "overrides": {
     "@atproto/lex-json": "0.0.0-spaces-alpha-20261105160032",
     "@atproto/star": "0.0.0-spaces-alpha-20261105160032"

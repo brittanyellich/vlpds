@@ -7,7 +7,7 @@ import { ACCOUNT_CALLBACK_PATH, beginSignIn, finishSignIn, forgetAll, OAuthSessi
 import { call, XrpcError } from './xrpc'
 
 export const SESSION = 'spaces'
-/** Reads the user's own space repos, and the spaces they govern (getSpace and listMembers are owner reads). */
+/** Reads the user's own space repos, and the spaces they govern (getSpace and memberspace.listMembers are owner reads). */
 export const READ_SCOPE = 'atproto space:*?authority=*&action=read_self'
 /** Members and deletion, only for spaces this account governs (`authority` defaults to `self`). */
 export const OWNER_SCOPE = 'space:*?action=read_self&manage=update&manage=delete'
@@ -159,35 +159,33 @@ export async function myRepo(s: OAuthSession, space: string): Promise<MyRepo | n
   return { records, more, rev, lastWrite: tidTime(rev) }
 }
 
-export const PERSONAL_POLICY = 'com.atproto.personalspace.policy'
-export const MEMBER_POLICY = 'com.atproto.memberspace.policy'
-export const MANAGED_POLICY = 'com.atproto.managedspace.policy'
-
-/** A space's policy, as getSpace returns it (an open union by `$type`). */
 export type Policy = {
   $type: string
   publicRead?: boolean
   publicWrite?: boolean
   allowedApps?: string[]
+  managingApp?: string
   publishPolicy?: boolean
   publishMembers?: boolean
-  managingApp?: string
 }
 export type Member = { did: string; read: boolean; write: boolean }
-export type Governance = { policy: Policy; members: Member[]; more: boolean }
+/** `members` is the member list, which only a memberspace has (`memberList`). */
+export type Governance = { policy: Policy; memberList: boolean; members: Member[]; more: boolean }
+
+export const MEMBERSPACE = 'com.atproto.memberspace.policy'
+export const MANAGEDSPACE = 'com.atproto.managedspace.policy'
+export const PERSONALSPACE = 'com.atproto.personalspace.policy'
 
 const MEMBER_PAGES = 10
 
-export const isMemberspace = (p?: Policy) => p?.$type === MEMBER_POLICY
-
-/** A space the account governs: its policy, and its members when it has a member list. */
+/** A space the account governs: its policy, and its members under a memberspace policy. */
 export async function governance(s: OAuthSession, space: string): Promise<Governance> {
   const g = await s.call('com.atproto.space.getSpace', { params: { space } })
   const policy: Policy = g.policy ?? { $type: '' }
   const members: Member[] = []
   let more = false
-  // only a member space has a member list (others answer PolicyMismatch)
-  for (let cursor: string | undefined, i = 0; isMemberspace(policy); i++) {
+  const memberList = policy.$type === MEMBERSPACE
+  for (let cursor: string | undefined, i = 0; memberList; i++) {
     if (i === MEMBER_PAGES) {
       more = true
       break
@@ -197,51 +195,31 @@ export async function governance(s: OAuthSession, space: string): Promise<Govern
     if (!r.cursor || !(r.members ?? []).length) break
     cursor = r.cursor
   }
-  return { policy, members, more }
+  return { policy, memberList, members, more }
 }
 
-/** The policy's kind: Personal, Members or Managed by an app. */
-export function policyKind(p?: Policy): string {
+/** Who can read under `p`. */
+export function readText(p?: Policy): string {
   switch (p?.$type) {
-    case PERSONAL_POLICY:
-      return 'Personal'
-    case MEMBER_POLICY:
-      return 'Members'
-    case MANAGED_POLICY:
-      return `Managed by ${p.managingApp ?? 'an app'}`
+    case MEMBERSPACE:
+      return p.publicRead ? 'anyone' : 'members'
+    case MANAGEDSPACE:
+      return 'an app decides'
+    case PERSONALSPACE:
+      return 'only you'
     default:
       return p?.$type || '—'
   }
 }
 
-/** Who can read and write besides the owner. */
-export function policySides(p?: Policy): { read: string; write: string } {
+/** Who can write under `p`. */
+export function writeText(p?: Policy): string {
   switch (p?.$type) {
-    case PERSONAL_POLICY:
-      return { read: 'only you', write: 'only you' }
-    case MEMBER_POLICY:
-      return { read: p.publicRead ? 'anyone' : 'members', write: p.publicWrite ? 'anyone' : 'members' }
-    case MANAGED_POLICY:
-      return { read: 'the app decides', write: 'the app decides' }
+    case MEMBERSPACE:
+      return p.publicWrite ? 'anyone' : 'members'
     default:
-      return { read: '—', write: '—' }
+      return readText(p)
   }
-}
-
-/** Read · write, in one line. */
-export function policyText(p?: Policy): string {
-  const { read, write } = policySides(p)
-  return `${read} · ${write}`
-}
-
-/** What the policy publishes as records in your repo in the space. */
-export function publishedText(p?: Policy): string | undefined {
-  const policy = !!p?.publishPolicy
-  const members = isMemberspace(p) && !!p?.publishMembers
-  if (policy && members) return 'The policy and member list are published in the space.'
-  if (policy) return 'The policy is published in the space.'
-  if (members) return 'The member list is published in the space.'
-  return undefined
 }
 
 /** Runs `fn` over `xs`, `n` at a time. */

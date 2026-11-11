@@ -157,7 +157,7 @@ pub(super) async fn consistent(
             fold(&mut set, op);
         }
         assert!(commit::matches(&set, &rc), "{ctx}: {} op(s) replay to another hash than the commit's", ops.len());
-        assert_eq!(rc.data, c.data, "{ctx}: listRepoOps and getLatestCommit disagree");
+        assert_eq!(rc.data.to_vec(), c.data.to_vec(), "{ctx}: listRepoOps and getLatestCommit disagree");
     }
     let q = [("did", sc.did.as_str()), ("space", space)];
     let chk = s.xrpc.get("vlpds.admin.checkSpace", &q, &Auth::Admin).await;
@@ -170,7 +170,7 @@ pub(super) async fn consistent(
 /// A space read/host call with `credential`, signed for `audience`.
 pub(super) async fn signed_post(sc: &SpaceClient, nsid: &str, body: J, credential: &str, audience: &str) -> Resp {
     let mut rb = sc.srv.http.post(format!("{}/xrpc/{nsid}", sc.srv.base));
-    for (k, v) in sc.holder.headers(credential, audience) {
+    for (k, v) in sc.holder.headers(&format!("Atproto-Space-Credential {credential}"), audience) {
         rb = rb.header(k, v);
     }
     crate::common::spaces::resp(rb.json(&body).send().await.unwrap()).await
@@ -311,7 +311,13 @@ async fn kill_around_segment_put(stage: Stage, act: Act) -> (Option<u16>, bool) 
     assert_eq!(after.len(), before.len() + if whole { 2 } else { 0 }, "{ctx}: records");
     match whole {
         true => assert!(c.rev > head.rev, "{ctx}: the batch landed but the head is still {}", head.rev),
-        false => assert_eq!((c.rev.as_str(), &c.data), (head.rev.as_str(), &head.data), "{ctx}: the head moved"),
+        false => {
+            assert_eq!(
+                (c.rev.as_str(), &c.data.to_vec()),
+                (head.rev.as_str(), &head.data.to_vec()),
+                "{ctx}: the head moved"
+            )
+        }
     }
 
     // the restarted head takes writes on from where it is
@@ -414,7 +420,7 @@ async fn outbox_survives_a_kill(resume: Resume) {
     assert_eq!(n.body["space"], json!(space));
     assert_eq!(n.body["repo"], json!(sc.did));
     assert_eq!(n.body["repoRev"], json!(head.rev), "{resume:?}: not the newest rev");
-    assert_eq!(bytes_field(&n.body["data"]), head.data, "{resume:?}: not the newest hash");
+    assert_eq!(bytes_field(&n.body["data"]), head.data.to_vec(), "{resume:?}: not the newest hash");
     assert_eq!(n.claims["iss"], json!(sc.did));
     assert_eq!(n.claims["aud"], json!(format!("{}#atproto_pds", authority.did)));
     assert_eq!(n.claims["lxm"], json!(NOTIFY));
@@ -561,7 +567,7 @@ async fn takeover_mid_burst(authority_on_victim: bool) {
         let repos = list_repos(&auth, &space, &cred).await.unwrap_or_default();
         let rows = by_did(&repos);
         let caught_up = heads.iter().all(|(did, c)| {
-            rows.get(did).is_some_and(|r| r["repoRev"] == json!(c.rev) && bytes_field(&r["data"]) == c.data)
+            rows.get(did).is_some_and(|r| r["repoRev"] == json!(c.rev) && bytes_field(&r["data"]) == c.data.to_vec())
         });
         if caught_up {
             break;
@@ -764,7 +770,7 @@ async fn the_stub_did_resolves_and_records_notifies() {
     let http = reqwest::Client::new();
     for refuse in [true, false] {
         stub.refuse(refuse);
-        let jwt = stub.service_jwt(&format!("{}#atproto_space_host", stub.did), NOTIFY);
+        let jwt = stub.service_jwt(&format!("{}#atproto_pds", stub.did), NOTIFY);
         let r = http.post(format!("{host}/xrpc/{NOTIFY}")).bearer_auth(jwt).json(&json!({"repoRev": "x"})).send();
         assert_eq!(r.await.unwrap().status().as_u16(), if refuse { 503 } else { 200 });
     }

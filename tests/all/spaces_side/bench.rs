@@ -42,7 +42,7 @@
 //! `SPACES_BENCH_M=0 SPACES_BENCH_SYNCERS=0`.
 
 use super::cluster::Plc;
-use crate::common::spaces::{xrpc_url, Holder, SpaceClient};
+use crate::common::spaces::{kem_key_at, mac_type, xrpc_url, Holder, SpaceClient};
 use crate::common::*;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap};
@@ -283,33 +283,37 @@ struct Reader {
     http: reqwest::Client,
     base: String,
     headers: reqwest::header::HeaderMap,
-    /// The repo's `#atproto_kem` key, resolved once: a commit read asks for
-    /// a MAC with a fresh key share each time, as a syncer must.
-    kem: std::sync::Arc<tokio::sync::OnceCell<Option<String>>>,
+    /// The repo's `#atproto_kem` key, resolved on the first read that needs
+    /// a MAC (each such read sends a fresh key share).
+    repo: String,
+    kem: tokio::sync::OnceCell<Option<String>>,
 }
 
 impl Reader {
     fn new(http: &reqwest::Client, base: &str, holder: &Holder, credential: &str, audience: &str) -> Reader {
         let mut headers = reqwest::header::HeaderMap::new();
-        for (k, v) in holder.headers(credential, audience) {
+        for (k, v) in holder.headers(&format!("Atproto-Space-Credential {credential}"), audience) {
             headers.insert(
                 reqwest::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
                 reqwest::header::HeaderValue::from_str(&v).unwrap(),
             );
         }
-        Reader { http: http.clone(), base: base.to_string(), headers, kem: Default::default() }
+        Reader {
+            http: http.clone(),
+            base: base.to_string(),
+            headers,
+            repo: audience.to_string(),
+            kem: tokio::sync::OnceCell::new(),
+        }
     }
 
     async fn get(&self, nsid: &str, query: &[(&str, &str)]) -> (u16, J, Duration) {
         let mut headers = self.headers.clone();
-        if let Some(ty) = crate::common::spaces::mac_type(nsid) {
-            let repo = query.iter().find(|(k, _)| *k == "repo").map(|(_, v)| *v).unwrap_or_default();
-            let kem = self.kem.get_or_init(|| crate::common::spaces::kem_key_at(&self.http, &self.base, repo)).await;
-            if let Some(kem) = kem {
-                let (share, _) = vlpds::space::kem::encapsulate(kem).unwrap();
-                let v = vlpds::space::mac::format_want_mac(ty, &share);
-                headers.insert(vlpds::space::mac::WANT_MAC_HEADER, reqwest::header::HeaderValue::from_str(&v).unwrap());
-            }
+        if let Some(ty) = mac_type(nsid) {
+            let kem = self.kem.get_or_init(|| kem_key_at(&self.http, &self.base, &self.repo)).await;
+            let (share, _) = vlpds::space::mac::encapsulate(kem.as_deref().expect("a KEM key")).unwrap();
+            let v = vlpds::space::mac::format_want_mac(ty, &share);
+            headers.insert(vlpds::space::mac::WANT_MAC_HEADER, reqwest::header::HeaderValue::from_str(&v).unwrap());
         }
         let t = Instant::now();
         let r = self.http.get(xrpc_url(&self.base, nsid, query)).headers(headers).send().await.unwrap();

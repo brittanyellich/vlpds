@@ -140,10 +140,7 @@ async fn views_are_metadata_only() {
     assert_eq!(rows.iter().map(|r| r["uri"].clone()).collect::<Vec<_>>(), [json!(big), json!(quiet)]);
     let r0 = &rows[0];
     assert_eq!((r0["records"].clone(), r0["repos"].clone(), r0["writers"].clone()), (json!(4), json!(2), json!(2)));
-    assert_eq!(
-        (r0["handle"].clone(), r0["policy"].clone(), r0["appAccess"].clone()),
-        (json!(owner.handle), json!("members (read: members, write: members)"), json!("any"))
-    );
+    assert_eq!((r0["handle"].clone(), r0["readPolicy"].clone()), (json!(owner.handle), json!("members")));
     assert!(r0["lastSpaceRev"].is_string() && rows[1]["lastSpaceRev"].is_null(), "{l}");
     let paged = s.xrpc.get("vlpds.admin.listSpaces", &[("limit", "1")], &Auth::Admin).await.ok();
     assert_eq!((paged["spaces"].as_array().unwrap().len(), paged["cursor"].clone()), (1, json!("1")));

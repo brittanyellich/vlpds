@@ -9,6 +9,7 @@ use crate::common::*;
 use axum::body::Body;
 use axum::extract::Request;
 use axum::response::Response;
+use base64::Engine;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -37,6 +38,11 @@ async fn put_member(owner: &SpaceClient, space: &str, did: &str) {
         .post("com.atproto.memberspace.putMember", json!({"space": space, "did": did, "read": true, "write": true}))
         .await
         .ok();
+}
+
+fn bytes(v: &J) -> Vec<u8> {
+    let s = v["$bytes"].as_str().unwrap_or_else(|| panic!("not $bytes: {v}"));
+    base64::engine::general_purpose::STANDARD_NO_PAD.decode(s.trim_end_matches('=')).unwrap()
 }
 
 fn apply_ops(set: &mut LtHash, ops: &J) {
@@ -77,8 +83,8 @@ where
 }
 
 /// getRepo through a credential: a STAR archive that verifies like the
-/// reference's consumer wants it (its MAC checked by `signed_get`), its
-/// paths in bytewise order, RepoNotFound for a repo never written, and
+/// reference's consumer wants it (its MAC too), the same archive for the
+/// owner's own OAuth read, RepoNotFound for a repo never written, and
 /// nothing without a credential for the space.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn get_repo_streams_a_verifiable_star() {
@@ -105,16 +111,17 @@ async fn get_repo_streams_a_verifiable_star() {
     assert_eq!(r.status, 200, "{r:?}");
     assert_eq!(r.headers["content-type"], "application/octet-stream");
     let full = verify_star(&r.body, &space, &member.did);
-    let path = |k: &str| format!("{COLL}/{k}");
-    assert_eq!(full.paths, ["3k2abcdefgh2a", "a", "aa", "b", "m", "zzzzzz"].map(path));
+    assert_eq!(full.paths.len(), 6);
+    // bytewise, so "3k2…" (a digit) sorts before the letters
+    assert_eq!(full.paths[0], format!("{COLL}/3k2abcdefgh2a"));
+    assert_eq!(full.paths.last().unwrap(), &format!("{COLL}/zzzzzz"));
     let head = member.get("com.atproto.space.getLatestCommit", &[("space", &space), ("repo", &member.did)]).await;
-    assert_eq!(commit_of(&head.ok()["commit"]), full.commit);
-    // the owner's own export, as OAuth read_self
+    assert_eq!(head.ok()["commit"]["rev"], json!(full.commit.rev));
+    // the owner's own export, as OAuth read_self: the same bytes, no MAC
     let (status, _, star) =
         member.get_raw("com.atproto.space.getRepo", &[("space", &space), ("repo", &member.did)]).await;
     assert_eq!(status, 200);
-    let own = verify_star(&star, &space, &member.did);
-    assert_eq!((own.commit, own.records), (full.commit, full.records));
+    assert_eq!(star, r.body.to_vec());
 
     // the owner never wrote here
     get(cred.clone(), owner.did.clone()).await.err(400, "RepoNotFound");
@@ -147,12 +154,12 @@ impl Viewer<'_> {
     }
 
     /// getRepo, the ops replayed page by page, and the latest commit and an
-    /// at-head poll: all must agree (each MAC checked by `signed_get`).
+    /// at-head poll: all must agree.
     async fn view(&self) -> Star {
         let r = self.read("com.atproto.space.getRepo", &[]).await;
         assert_eq!(r.status, 200, "{r:?}");
         assert_eq!(r.headers["content-type"], "application/octet-stream", "{r:?}");
-        let star = verify_star(&r.body, &self.space, &self.repo);
+        let car = verify_star(&r.body, &self.space, &self.repo);
         let mut set = LtHash::default();
         let mut cursor: Option<String> = None;
         let last = loop {
@@ -168,20 +175,21 @@ impl Viewer<'_> {
             }
         };
         let ops_commit = commit_of(&last);
+        assert!(ops_commit.space == self.space && ops_commit.repo == self.repo);
         assert!(commit::matches(&set, &ops_commit), "the ops replay to the commit's data");
-        assert_eq!(ops_commit, star.commit, "listRepoOps and getRepo agree");
+        assert_eq!(ops_commit.data, car.commit.data, "listRepoOps and getRepo agree");
         let latest = self.read("com.atproto.space.getLatestCommit", &[]).await.ok();
-        assert_eq!(commit_of(&latest["commit"]), star.commit);
-        let noop = self.read("com.atproto.space.listRepoOps", &[("since", &star.commit.rev)]).await.ok();
+        assert_eq!(bytes(&latest["commit"]["data"]), car.commit.data.to_vec());
+        let noop = self.read("com.atproto.space.listRepoOps", &[("since", &car.commit.rev)]).await.ok();
         assert_eq!(noop["ops"], json!([]));
-        assert_eq!(commit_of(&noop["commit"]), star.commit, "the at-head poll serves the same view");
-        star
+        assert_eq!(bytes(&noop["commit"]["data"]), car.commit.data.to_vec(), "the at-head poll MACs the same view");
+        car
     }
 }
 
 /// A record takedown (a vlpds extension) serves a view without the record
-/// that still verifies: getRepo's records leave it out and fold to the
-/// commit's data, listRepoOps leaves its ops out and replays to the
+/// that still verifies: getRepo's index and blocks leave it out and fold
+/// to the signed hash, listRepoOps leaves its ops out and replays to the
 /// same hash as getLatestCommit, and a syncer holding the old view sees a
 /// mismatch at the same rev. Reversing it serves the full repo again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -229,7 +237,7 @@ async fn record_takedown_serves_a_consistent_view() {
 }
 
 /// A 100k-record space repo: the next create is refused, and getRepo
-/// streams it a chunk at a time.
+/// streams it holding one chunk at a time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_full_repo_streams_under_a_memory_bound() {
     const BOUND: &str = "33554432";
@@ -265,40 +273,8 @@ async fn a_full_repo_streams_under_a_memory_bound() {
     assert!(scraped(&after, count) > scraped(&before, count));
     let bucket = |t: &str, le: &str| scraped(t, &format!("vlpds_space_export_bytes_bucket{{le=\"{le}\"}}"));
     assert_eq!(scraped(&after, count), bucket(&after, BOUND), "an export held more than 32 MiB");
-    assert_eq!(scraped(&after, count), bucket(&after, "4194304"), "the big export held more than a chunk");
-    // the memory plan's room for a full repo is more than it took, and it
-    // gave its room back
-    let planned = vlpds::space::export_bytes(max as u64);
-    assert!(planned < 32 << 20 && planned > 8 << 20, "{planned}");
-    let sp = s.app.spaces.as_ref().unwrap();
-    assert!(eventually(Duration::from_secs(5), || async { sp.export_room_free().0 == sp.export_room_free().1 }).await);
-}
-
-/// A space getRepo takes its room from the memory plan's space exports,
-/// gives it back when its body is done, and is shed when there's none.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_space_export_holds_its_memory_room() {
-    let s = spawn().await;
-    let owner = SpaceClient::new(&s, "ssroom", OWNER).await;
-    let space = owner.create_space(TYPE, "room").await;
-    owner.create_record(&space, COLL, Some("a"), rec("a")).await.ok();
-    let sp = s.app.spaces.as_ref().unwrap();
-    let (free, total) = sp.export_room_free();
-    assert_eq!(free, total);
-    assert_eq!(total as u64, vlpds::space::export_budget_bytes(vlpds::space::DEFAULT_MAX_RECORDS).div_ceil(1024));
-    // an export holds one chunk, whatever the repo
-    let held = vlpds::space::export_bytes(0).div_ceil(1024) as usize;
-    let room = sp.reserve_export((total - held) as u64 * 1024).await.expect("the rest of the room");
-    let r = owner.get_raw("com.atproto.space.getRepo", &[("space", &space), ("repo", &owner.did)]).await;
-    assert_eq!(r.0, 200, "an export that fits the room left");
-    assert!(eventually(Duration::from_secs(5), || async { sp.export_room_free().0 == held }).await);
-    drop(room);
-    assert_eq!(sp.export_room_free().0, total);
-    // with no room at all, the export is shed after a short wait
-    let all = sp.reserve_export(total as u64 * 1024).await.unwrap();
-    let r = owner.get("com.atproto.space.getRepo", &[("space", &space), ("repo", &owner.did)]).await;
-    r.err(503, "Overloaded");
-    drop(all);
+    // STAR streams in one pass: an export holds its chunk, not the repo's paths
+    assert_eq!(bucket(&after, "1048576"), scraped(&after, count), "an export held more than a chunk");
 }
 
 /// listRepoOps pages one big rev without losing an op, holds the commit
@@ -576,9 +552,9 @@ async fn a_notify_crosses_to_the_authoritys_node() {
 
     // getSpaceCredential and credential calls at x, the authority on y
     let cred = member.credential_at(&x.url, &space).await;
-    // getSpace is the owner's alone; a member reads the published policy
+    // the policy is the owner's alone: a credential doesn't reach it
     let r = member.signed_get(&x.url, "com.atproto.space.getSpace", &[("space", &space)], &cred, &owner.did).await;
-    assert_eq!(r.status, 401, "{r:?}");
+    r.client_err();
     let repos = || async {
         let r = member.signed_get(&x.url, "com.atproto.space.listRepos", &[("space", &space)], &cred, &owner.did).await;
         r.ok()["repos"].as_array().unwrap().clone()

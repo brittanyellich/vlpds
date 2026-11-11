@@ -64,7 +64,7 @@ pub(super) async fn space_backup(sc: &SpaceClient) -> BTreeMap<String, Vec<u8>> 
 /// member; all three write, with blobs, in both. Everyone's sentinels but
 /// bob's are collected.
 struct Mixed {
-    /// Held so its servers live as long as the fixture.
+    /// Holds the hosts up.
     _net: Net,
     bob: SpaceClient,
     spaces: [String; 2],
@@ -198,7 +198,7 @@ async fn backup_space_step_needs_oauth() {
 /// The backup restores on a new host: bob's account arrives there, each
 /// `spaces/<sid>/repo.star` imports into the space its `space.txt` names,
 /// the `blobs/` go up as listMissingBlobs asks, and every space repo is back
-/// as it was (head, records, blobs), check-space clean.
+/// as it was (data, records, blobs; at a new rev), check-space clean.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_restores_on_a_new_host() {
     let h = two_hosts().await;
@@ -208,7 +208,7 @@ async fn backup_restores_on_a_new_host() {
     h.bob
         .post(
             "com.atproto.space.createSpace",
-            json!({"spaceType": TEST_SPACE_TYPE, "skey": last_segment(&own), "policy": {"$type": "com.atproto.memberspace.policy"}}),
+            json!({"spaceType": TEST_SPACE_TYPE, "skey": last_segment(&own), "policy": memberspace(json!({}))}),
         )
         .await
         .ok();
@@ -223,10 +223,17 @@ async fn backup_restores_on_a_new_host() {
     let arrived = arrive(&h.b, &h.bob.did, sa).await;
     complete_move(&h.docs, &h.b, &arrived).await;
     let moved = arrived.oauth(&h.b).await;
+    // bob's own space comes first: its repo there is the authority's
+    assert_eq!(moved.create_space(TEST_SPACE_TYPE, last_segment(&own)).await, own);
     for (path, bytes) in &files {
         let Some(dir) = path.strip_suffix("/repo.star") else { continue };
         let space = String::from_utf8(files[&format!("{dir}/space.txt")].clone()).unwrap().trim().to_string();
-        import_repo(&moved, &space, bytes).await.ok();
+        assert_eq!(
+            verify_repo_star(bytes, &space, &h.bob.did).unwrap().commit.space,
+            space,
+            "the archive names its space"
+        );
+        import_repo(&moved, bytes).await.ok();
     }
     // the blobs listMissingBlobs asks for, which the backup holds
     let missing = h.b.xrpc.get("com.atproto.repo.listMissingBlobs", &[], &arrived.session).await.ok();
@@ -240,7 +247,9 @@ async fn backup_restores_on_a_new_host() {
     let missing = h.b.xrpc.get("com.atproto.repo.listMissingBlobs", &[], &arrived.session).await.ok();
     assert_eq!(missing["blobs"], json!([]));
     for (space, head) in [&h.space, &own].into_iter().zip(heads) {
-        assert_eq!(repo_state(&moved, space).await, Some(head), "{space}");
+        let (rev, data) = repo_state(&moved, space).await.unwrap();
+        assert!(rev > head.0, "{space}: at a new rev");
+        assert_eq!(data, head.1, "{space}");
         expect_set_hash_matches_store(&moved, space).await;
         let (r, out) = admin_cli(&h.b.url, &["--json", "check-space", &h.bob.did, space]).await;
         assert!(r.is_ok(), "{out}");

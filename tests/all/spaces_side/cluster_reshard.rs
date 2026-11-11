@@ -251,7 +251,7 @@ impl World {
                 let ctx = format!("{ctx}: {} in {space}", w.did);
                 let replay = space == self.local;
                 let (records, c) = consistent(&self.nodes[0], w, space, replay, &ctx).await;
-                out.insert((w.did.clone(), space.to_string()), View { records, rev: c.rev, hash: c.data });
+                out.insert((w.did.clone(), space.to_string()), View { records, rev: c.rev, hash: c.data.to_vec() });
             }
         }
         out
@@ -338,7 +338,7 @@ async fn split_and_merge_keep_every_space_row() {
             assert!(head.rev > was.rev, "{} in {space}: rev {} after {}", wr.did, head.rev, was.rev);
             if space == w.local {
                 let (rr, sr, hash) = &host[&wr.did];
-                assert_eq!((rr, hash), (&json!(head.rev), &head.data), "{}: listRepos lags", wr.did);
+                assert_eq!((rr, hash), (&json!(head.rev), &head.data.to_vec()), "{}: listRepos lags", wr.did);
                 assert!(sr.as_str() > before.host[&wr.did].1.as_str(), "{}: spaceRev didn't move", wr.did);
             }
         }

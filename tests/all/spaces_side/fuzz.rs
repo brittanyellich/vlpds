@@ -6,12 +6,12 @@
 //! write; at checkpoints each repo must agree with it four ways:
 //!
 //! - listRecords holds exactly the model's records;
-//! - the oplog replayed from empty (listRepoOps, paged) folds to the signed
-//!   commit's hash, and a delta pull from the last checkpoint folds onto
-//!   the hash kept from then; the commit verifies under the account's key;
+//! - the oplog replayed from empty (listRepoOps, paged) folds to the
+//!   commit's data, and a delta pull from the last checkpoint folds onto
+//!   the data kept from then; each commit's MAC verifies as it's served;
 //! - vlpds.admin.checkSpace finds nothing wrong;
-//! - getRepo's index folds to its commit's hash, and holds the model's
-//!   paths and CIDs, its blocks in index order (C4).
+//! - getRepo's STAR archive folds to its commit's data and holds the
+//!   model's paths and CIDs, in bytewise path order (C4).
 //!
 //! Then deleteAccount must leave no s* row of the account (C2).
 //!
@@ -307,7 +307,7 @@ pub(super) fn bytes_field(v: &J) -> Vec<u8> {
 }
 
 pub(super) fn signed_commit(j: &J) -> Commit {
-    crate::common::spaces::commit_of(j)
+    Commit::from_json(j).unwrap_or_else(|| panic!("not a commit: {j}"))
 }
 
 pub(super) fn fold(set: &mut LtHash, op: &J) {
@@ -369,17 +369,16 @@ async fn list_records(a: &Account, space: &str, ctx: &str) -> Records {
     }
 }
 
-/// getRepo's STAR archive: its records fold to the commit's data and are
-/// `want`'s, in bytewise path order.
+/// getRepo's STAR archive (its MAC checked as it's served): the records
+/// fold to the commit's data, match `want`, and come in bytewise path
+/// order, each canonical.
 async fn check_get_repo(a: &mut Account, space: &str, want: &Records, ctx: &str) {
     let r = a.read("com.atproto.space.getRepo", space, &[]).await;
     assert_eq!(r.status, 200, "{ctx}: getRepo: {}", r.text());
-    let p = vlpds::space::star::parse(&r.body).unwrap_or_else(|e| panic!("{ctx}: getRepo archive: {e}"));
-    assert_eq!((p.commit.space.as_str(), p.commit.repo.as_str()), (space, a.sc.did.as_str()), "{ctx}: getRepo commit");
-    let got: BTreeMap<String, String> =
-        p.records.iter().map(|(path, b)| (path.clone(), vlatproto::cid::Cid::dag_cbor(b).to_string())).collect();
+    let got = crate::common::spaces::verify_star(&r.body, space, &a.sc.did);
+    let got: BTreeMap<String, String> = got.records.iter().map(|(p, c, _)| (p.clone(), c.to_string())).collect();
     let want: BTreeMap<String, String> = want.iter().map(|(p, (c, _))| (p.clone(), c.clone())).collect();
-    assert_eq!(got, want, "{ctx}: getRepo records");
+    assert_eq!(got, want, "{ctx}: getRepo's records");
 }
 
 async fn checkpoint(s: &TestServer, a: &mut Account, r: usize, checks: Checks, ctx: &str) {
@@ -405,7 +404,7 @@ async fn checkpoint(s: &TestServer, a: &mut Account, r: usize, checks: Checks, c
         fold(&mut set, op);
     }
     assert!(commit::matches(&set, &c), "{ctx}: {} op(s) fold to another hash than the commit's", ops.len());
-    assert_eq!((c.space.as_str(), c.repo.as_str()), (space.as_str(), did.as_str()), "{ctx}: the commit's repo");
+    assert!(c.space == space && c.repo == did, "{ctx}: the commit names another repo");
     let mut revs: Vec<&str> = ops.iter().map(|o| o["rev"].as_str().unwrap()).collect();
     assert!(revs.is_sorted(), "{ctx}: ops out of rev order");
     revs.dedup();
@@ -424,10 +423,10 @@ async fn checkpoint(s: &TestServer, a: &mut Account, r: usize, checks: Checks, c
     let (none, nj) = pull(a, &space, Some(&c.rev), 100, &ctx).await;
     assert!(none.is_empty(), "{ctx}: ops after the head: {none:?}");
     assert_eq!(nj["rev"], json!(c.rev), "{ctx}: the no-op poll's commit");
-    assert_eq!(bytes_field(&nj["data"]), c.data, "{ctx}: the no-op poll's data");
+    assert_eq!(bytes_field(&nj["data"]), c.data.to_vec(), "{ctx}: the no-op poll's hash");
     let latest = a.read("com.atproto.space.getLatestCommit", &space, &[]).await;
     assert_eq!(latest.status, 200, "{ctx}: getLatestCommit: {}", latest.text());
-    assert_eq!(signed_commit(&latest.json["commit"]).data, c.data, "{ctx}: getLatestCommit's data");
+    assert_eq!(signed_commit(&latest.json["commit"]).data.to_vec(), c.data.to_vec(), "{ctx}: getLatestCommit's hash");
     a.repos[r].synced = Some((c.rev.clone(), set));
 
     let chk =

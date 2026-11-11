@@ -27,74 +27,37 @@ facts:
   - { value: "5", unit: alerts, label: four tickets and a page, note: "`VlpdsSpace*` in `ops/alerts.yml`", tone: blue }
 ```
 
-Spaces is an alpha that changes every week upstream, so leave it off unless you're testing against
+Spaces is an alpha that changes often upstream, so leave it off unless you're testing against
 it. With no space traffic, a node with it on makes one conditional GET of the revocations object every
 5 min and runs an oplog sweep about every 6 h, which skips repos younger than the window.
 
 ## What you get with `--spaces`
 
-A node with the flag serves every Spaces method a PDS serves in the reference's November 5 alpha
-(`5d88b414`, published as `0.0.0-spaces-alpha-20261029171913`), in both roles.
+A node with the flag serves every Spaces method a PDS serves at the `98ef3a6b` pin, in both roles.
 As a repo host it holds your accounts' space repos. As a space host it runs the spaces your
-accounts govern. Nothing is proxied to another host.
+accounts govern, under the baseline policies (`personalspace`, `memberspace`, `managedspace`).
+Nothing is proxied to another host.
 
 | Area | What's served |
 |---|---|
-| Space records | `space.createRecord`, `putRecord`, `deleteRecord`, `applyWrites`, `getRecord`, `listRecords`, `listSpaces` |
+| Space records | `space.createRecord`, `putRecord`, `deleteRecord`, `applyWrites`, `clearRecords`, `getRecord`, `listRecords`, `listSpaces` |
 | Sync | `space.getLatestCommit`, `listRepoOps`, `getRepo`, `listBlobs`, `getBlob` |
 | Credentials | `space.getDelegationToken`, `getSpaceCredential`, `notifyCredentialRevoked` |
 | Space host | `space.createSpace`, `getSpace`, `updateSpace`, `deleteSpace`, `removeWriter`, `memberspace.putMember`, `removeMember`, `listMembers`, and `space.notifyWrite`, `listRepos`, `registerNotify`, `unregisterNotify` |
-| vlpds only | `vlpds.space.importRepo`, operator reads (`vlpds.admin.getSpaceRepo`, `listSpaceRecords`, `getSpaceRecord`), `vlpds.admin.checkSpace`, space takedowns |
+| Migration | `space.importRepo`, `exportSpaceMeta`, `importSpaceMeta` |
+| vlpds only | operator reads (`vlpds.admin.getSpaceRepo`, `listSpaceRecords`, `getSpaceRecord`), `vlpds.admin.checkSpace`, space takedowns |
 
-A Spaces method that a PDS doesn't serve (`space.notifySpaceDeleted` and
+A method under `com.atproto.space.*` or a policy's namespace (`com.atproto.memberspace.*`,
+`managedspace.*`, `personalspace.*`) that a PDS doesn't serve (`notifySpaceDeleted` and
 `managedspace.checkUserAccess` go to syncers and managing apps) answers 501 here.
 
-## Policies
-
-Every space is governed by one `policy` object, an open union picked by its `$type`. vlpds implements
-the three baseline policies and refuses any other `$type` with `UnsupportedPolicy`. A policy is
-stored with its defaults filled in and unknown fields dropped, so what `getSpace` returns is what is
-enforced. Under every policy the authority's own account may read and write.
-
-| Policy | Who reads | Who writes |
-|---|---|---|
-| `com.atproto.personalspace.policy` | the authority only | the authority only |
-| `com.atproto.memberspace.policy` | anyone with `publicRead`, else members with `read` | anyone with `publicWrite`, else members with `write` |
-| `com.atproto.managedspace.policy` | whoever `managingApp` says (`checkUserAccess`, with the attested `clientId`) | whoever `managingApp` says |
-
-A member space's `allowedApps` limits reads to those attested OAuth `client_id`s; it doesn't apply to
-writes. A managed space never issues a credential without a delegation token, and an app that can't
-be reached denies.
-
-`updateSpace` replaces the policy wholesale. A policy of another `$type` migrates the space and
-deletes the member list, and migrating back doesn't restore it. `getSpace` is the owner's alone
-(OAuth with `read_self`); a space credential isn't accepted.
-
-**Published records.** With `publishPolicy` (member and managed spaces) the authority's repo in the
-space holds `com.atproto.space.policy/self` = `{ policy }`, and with `publishMembers` (member spaces)
-one `com.atproto.memberspace.member/<did>` = `{ read, write }` per member. They change in the same log
-entry as the policy or member change, so readers sync them like any record; clearing a flag withdraws
-them. Nobody writes these collections directly: `createRecord`, `putRecord`, `deleteRecord` and
-`applyWrites` refuse them in every repo with a 400.
-
-**The writer set.** `removeMember`, and `putMember` with `write: false`, take the account out of
-`listRepos`; so does `space.removeWriter` (the owner, `manage=update`, idempotent). Nothing else does:
-`updateSpace` doesn't re-evaluate it. A removed writer comes back with its next write the policy
-allows. Removal isn't announced to syncers and leaves the account's records on its host.
-
-**Spaces from before October 29.** A space's row written by an earlier build (`readPolicy`,
-`writePolicy`, `appAccess`) is read as the policy the reference's `006-space-policy` migration makes
-of it: a managing app on either side becomes a managed space (any allow list dropped), otherwise a
-member space public on the sides that were public, its allow list as `allowedApps`. Nothing is
-published. A policy the old form can say exactly (a member space that publishes nothing, a managed
-space that doesn't publish its policy) is still stored in it, byte for byte, so a rollback to an
-October 22 build reads those spaces as before. A personal space, or one that publishes its policy
-or members, is stored in the new `policy` form, which no earlier build can read: roll back only if
-there are none. A mixed
-configuration changes who has access: a managing app on one side is now asked about both, and
-one that combined a public read with a managing app no longer issues credentials without a token.
-Find them before upgrading: on the old build, `vlpds.admin.listSpaces` lists each space's
-`readPolicy` and `writePolicy`; look for `managing-app` on one side only.
+Spaces created before space policies convert to them when their row is next read, as the
+reference's migration converts them: a managing app on either side makes a `managedspace` (asked
+about reads and writes both, any app allow-list dropped), anything else a `memberspace` with
+`publicRead`/`publicWrite` where a side was public and `allowedApps` from an allow-list. Nothing is
+published until the owner turns it on. A space that becomes a `managedspace` stops consulting its
+member list, which goes when the space changes policy or is deleted. Look for spaces with a managing
+app on only one side before upgrading: those now ask the app about the other side too.
 
 Turn `--spaces` on only once every node in the cluster runs a build that knows Spaces, and don't
 roll back below that build afterwards. Space writes put private entries in the node logs and space
@@ -107,13 +70,13 @@ A few rules decide what your users and their apps can do:
 - Space data is OAuth only. An app needs a `space:` scope, and app passwords and password sessions
   get no space reads, writes or delegation tokens. `getServiceAuth` mints a token for a space
   method only to an OAuth app whose `space:` grant covers it ([Reading a space](reading.md#oauth-only)).
-- That includes `vlpds.space.importRepo`, so an account moving in imports its space repos after it's
+- That includes `space.importRepo`, so an account moving in imports its space repos after it's
   activated here, with OAuth. Syncers see none of its space data for that short gap
   ([Moving a repo in](storage.md#moving-a-repo-in)).
 - `sync.getBlob` serves a blob only once a public record names it. A blob only space records name
   is served by `space.getBlob` to a credential for that space ([Blobs](privacy.md#blobs)).
 - The oplog keeps 7 days. A syncer further behind falls back to `getRepo`, which the reference
-  consumer already does on a hash mismatch ([Retention](storage.md#retention-caps-and-deletion)).
+  consumer already does on a `data` mismatch ([Retention](storage.md#retention-caps-and-deletion)).
 - Moderators and admins can read space records for terms-of-service work, and every read is
   audited ([Operator access](privacy.md#operator-access)).
 
@@ -163,6 +126,37 @@ approves the writes on the consent screen.
 A digest mismatch only counts once `vlpds admin check-space` runs, so run it on a space or two at the
 end of the day.
 
+### KEM keys
+
+Syncers derive each MAC secret from the author's `#atproto_kem` key, a P-256 key in the DID
+document next to `#atproto`. With `--spaces`, a new account gets one in its genesis PLC op, and an
+account moving in gets its own at `createAccount`. `getRecommendedDidCredentials` carries it into
+the migration's PLC op, and `submitPlcOperation` refuses an op that names another key ("Incorrect
+KEM key"). The key is wrapped under the KEK like the signing key, so `rewrap-secrets` covers it,
+and `rotate-keys` republishes it with the signing key.
+
+Accounts made before have none. About 30 s after a node starts with `--spaces`, it backfills the
+shards it owns, once:
+
+| Account | What the node does |
+|---|---|
+| A did:plc that lists one of this server's rotation keys and names this node as its PDS | Publishes the key in one PLC op and sequences `#identity` |
+| A did:web, a did:plc without our rotation key, or one that moved to another PDS | Stores the key and logs `cannot publish kem key, account must update its did doc` with the DID |
+
+Expect one PLC op and one `#identity` per account in the first row. A shard is recorded done in
+`kem-backfill/<shard>` in the bucket once a pass over it has no failures, and no node scans it
+again. Failures, like a PLC outage, are retried after 30 s, backing off to every 10 min. The node
+logs `kem key backfill complete` once its shards are done, and
+`vlpds_kem_backfill_accounts_total{result}` counts `published`, `unpublished` and `failed`. Until
+an account's key is published, syncers can't verify its space repos.
+
+For an account in the second row, the owner adds the key to the DID document as a `Multikey`
+method with id `#atproto_kem`, using `verificationMethods.atproto_kem` from
+`getRecommendedDidCredentials`.
+
+A node without `--spaces` makes no KEM keys and deletes the `kem-backfill/` records when it starts,
+so the next start with the flag looks for accounts without a key again. Published keys stay.
+
 ### Turning it back off
 
 Set `vlpds_spaces: false` and deploy again. That's another graceful restart, and it's safe on the
@@ -171,35 +165,6 @@ reasons above. With the flag off, the space methods stop being served here, new 
 permissions, and the space data stays in the bucket. Space-only blobs stay private, since a node
 without the flag still answers `BlobNotFound` for a blob only space records name
 ([Blobs](privacy.md#blobs)).
-
-## KEM keys
-
-Syncers authenticate what a repo host serves with a MAC, keyed by a secret they derive against the
-account's `#atproto_kem` key: a P-256 key of its own (not the `#atproto` signing key) that the PDS
-holds, wrapped under the KEK like the signing key (`secrets::Purpose::KemKey`, on the account row).
-
-- A new account gets one at creation. When this PDS mints the DID it's in the PLC genesis op;
-  a DID minted ahead (a passkey or confirmed-email sign-up) gets it published right after.
-- At start each node runs a backfill over its shards: every account without a published key gets
-  one, about 4 a second. Where a server rotation key still signs the account's PLC ops and its PDS
-  is this one, the key goes to PLC and the account gets an `#identity` event. Otherwise (did:web, a
-  removed rotation key, an account that moved away) the key is kept and the log says
-  `cannot publish kem key, account must update its did doc`. Watch for `kem key backfill complete`.
-- `getRecommendedDidCredentials` lists `atproto_kem`, and `submitPlcOperation` refuses an op that
-  doesn't list this PDS's key (`Incorrect KEM key`), so a migration in carries it. An account that
-  moves in publishes it with its PLC op, or this PDS does at `activateAccount`.
-- Until an account's key is published, credential reads of its space repos that need a MAC answer
-  503 (`the account has no #atproto_kem key yet`).
-
-## Deleting a space
-
-`space.deleteSpace` owes each service registered at the time a `notifySpaceDeleted`. Each is
-recorded (`sD` rows, in the authority's shard) before the space becomes a tombstone and sent at
-once, then by a sweep every ~30 s with backoff (10 s doubling, at most 30 min) until it's delivered,
-refused with a status not worth retrying, or the registration it was owed under expires. A space
-made again since cancels them (sending one would purge the syncer's new copy), and so does deleting
-the authority's account. A deactivated or taken-down authority's wait. A syncer that missed one
-learns of the deletion when its next credential request answers `SpaceDeleted`.
 
 ## Console
 
@@ -214,7 +179,7 @@ methods behind it answer 501.
   members, writers, records or newest. Records only count space repos stored here, since a writer on
   another PDS keeps its own.
 - A space's page shows its policies, members, writers (repoRev, spaceRev and the first 8 bytes of
-  the set hash), the newest spaceRev of each writer, its notify registrations (the endpoint's host
+  the data hash), the newest spaceRev of each writer, its notify registrations (the endpoint's host
   only), its records taken down here and its audit entries. You can take the space down or restore
   it, and remove a registration with a reason. A removed service can register again with a
   credential, so take the space down to keep it out.
@@ -235,16 +200,14 @@ can't show each registration's last delivery, since fan-out keeps that in memory
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--spaces` (`VLPDS_SPACES`) | off | serves `com.atproto.space.*` and the baseline policies' `com.atproto.{member,managed,personal}space.*` here |
+| `--spaces` (`VLPDS_SPACES`) | off | serves `com.atproto.space.*` and `com.atproto.memberspace.*` here |
 | `--space-repo-max-records` | 100000 | the most records one account's repo in one space may hold. A write past it gets `InvalidRequest` |
 | `--space-oplog-retention` | `7d` | how long ops stay for `listRepoOps`. `off` keeps them all |
-| `--max-import-mb` | 1024 | the largest CAR `vlpds.space.importRepo` takes, as for `com.atproto.repo.importRepo`. Its blocks are capped besides ([Moving a repo in](storage.md#moving-a-repo-in)), and it reserves from the same import budget |
+| `--max-import-mb` | 1024 | the largest STAR archive `com.atproto.space.importRepo` takes, as for `com.atproto.repo.importRepo`. Its items are capped besides ([Moving a repo in](storage.md#moving-a-repo-in)), and it reserves from the same import budget |
 | `--max-exports`, `--export-stall-secs` | as for `sync.getRepo` | `space.getRepo` takes the same export slots and stall timeout |
 
-A `space.getRepo` holds every path and CID of the repo while it streams (~128 B a record), so it
-also takes that much room from the memory plan's space exports. The room fits 4 exports of a full
-100,000-record repo (~53 MiB). Smaller repos take less, so only a pile-up of the biggest ones waits
-(10 s, then 503 `Overloaded`).
+`space.getRepo` streams its STAR archive in one pass over a snapshot, so it holds one 1 MiB chunk
+and no per-repo state, however many records the repo has.
 
 ## Fixed limits
 
@@ -279,11 +242,12 @@ also takes that much room from the memory plan's space exports. The room fits 4 
 | `vlpds_space_credential_checks_total{result}` | `ok`, or why a read was refused: `bad_sig`, `expired`, `revoked`, `audience`, `space` |
 | `vlpds_space_credentials_issued_total{result}`, `vlpds_space_delegations_total` | credentials issued as an authority, delegation tokens minted |
 | `vlpds_space_revocations` | revoked credentials in force |
-| `vlpds_space_export_bytes`, `vlpds_space_oplog_pruned_total` | `getRepo` memory, oplog ops pruned |
-| `vlpds_space_digest_mismatch_total` | space repos whose head disagreed with the set hash recomputed from their records. Should stay 0 |
+| `vlpds_space_export_bytes`, `vlpds_space_oplog_pruned_total` | the chunk each `getRepo` fills, oplog ops pruned |
+| `vlpds_space_digest_mismatch_total` | space repos whose head disagreed with the data hash recomputed from their records. Should stay 0 |
 | `vlpds_space_repos` | space repos in this node's shards, counted by the oplog retention sweep every ~6 h |
-| `vlpds_space_imports_total{result}` | `vlpds.space.importRepo` calls: `ok`, `refused` (a bad archive, another repo's, or records that aren't its commit's), `error` |
+| `vlpds_space_imports_total{result}` | `com.atproto.space.importRepo` calls: `ok`, `refused` (a bad archive), `error` |
 | `vlpds_space_operator_reads_total{method}` | audited operator reads of space data |
+| `vlpds_kem_backfill_accounts_total{result}` | accounts the KEM key backfill gave a key: `published`, `unpublished` (the owner must publish it), `failed` (retried) |
 
 The internals dashboard has a Spaces row built from these: writes, write → notify ack, outbox rows and
 oldest row per node, notifies by hop and their failure ratio, `listRepoOps` noop vs scan and its
@@ -306,7 +270,7 @@ from you (the next retry, at most ~1 h away, delivers the newest rev). Many fail
 this node's DNS or egress.
 
 `VlpdsSpaceDigestMismatch` counts what `vlpds.admin.checkSpace` finds, so it fires only once that
-check runs (`vlpds admin check-space`). A refused `importRepo` with a bad set hash is the
+check runs (`vlpds admin check-space`). A refused `importRepo` whose records don't fold to the archive's `data` is the
 uploader's problem and counts in `vlpds_space_imports_total{result="refused"}` instead.
 
 ## What it costs
@@ -347,14 +311,13 @@ are in `bench/results/spaces-sync.md`.
 |---|---|---|---|
 | No-op `listRepoOps`, handler | 0.05 ms (mean 0.014 ms) | 0.10 ms | well under 1 ms · met |
 | No-op `listRepoOps`, client | 0.17 ms | 0.29 ms | |
-| No-op poll, signing key unwrapped first | 0.20 ms | 0.64 ms | |
 | Delta pull of 1 / 10 / 100 ops, client | 0.18 / 0.22 / 0.52 ms | 0.40 / 0.73 / 0.93 ms | a few ms · met |
 | Credential first use (full chain) / cached | 0.30 / 0.24 ms | 0.45 / 0.52 ms | |
 | Member write ack to authority ack | 52 ms | 125 ms | |
 | Syncer notified to its pull done | 1.9 ms | 5.5 ms | |
 
 - A no-op poll costs ~143 µs of process CPU more than `/xrpc/_health` on the same client. That's
-  the P-256 signature check, a fresh secp256k1 commit signature and the JSON. 100 polls at the head
+  the P-256 signature check and the JSON. 100 polls at the head
   read nothing from the bucket (`spaces_side::accept`).
 - Notify to a local authority is one more durable entry after the member's write, so it costs what a
   public commit does (52 ms against 54 ms here, both mostly the 25 ms segment PUT and the wait for

@@ -1,100 +1,67 @@
-//! Space repo commits (@atproto/space `repo-commit.ts`): which repo, in
-//! which space, at which rev, and the digest of its set hash. A commit
-//! carries no signature; the repo host authenticates it to a syncer with a
-//! MAC in a response header ([`super::mac`]), so a leaked commit proves
-//! nothing about what the author wrote to a third party.
+//! Space repo commits and their MACs (@atproto/space `repo-commit.ts`,
+//! `mac.ts`). A commit names the repo, space and rev, and carries the
+//! LtHash digest as `data`. It has no signature: the repo host
+//! authenticates it to one syncer at a time with an HMAC keyed by that
+//! request's shared secret ([`super::mac`]), sent in a response header. A
+//! leaked response proves nothing about what the author wrote to a third
+//! party.
 //!
 //! ```text
-//! { ver: 1, repo: <author DID>, space: <space URI>, rev: <TID>, data: sha256(LtHash state) }
+//! commit mac = HMAC-SHA256(secret, "atproto-space-repo-v1"
+//!     || u16be(len) || space || u16be(len) || repo || u16be(len) || rev || data)
+//! record mac = HMAC-SHA256(secret, "atproto-space-record-v1"
+//!     || u16be(len) || uri || cid bytes)
 //! ```
 
 use super::lthash::LtHash;
+use hmac::{Hmac, KeyInit, Mac};
+use serde_json::{json, Value as J};
+use sha2::Sha256;
 
 pub const COMMIT_VERSION: i64 = 1;
+pub const RECORD_MAC_VERSION: i64 = 1;
+const COMMIT_DOMAIN: &[u8] = b"atproto-space-repo-v1";
+const RECORD_DOMAIN: &[u8] = b"atproto-space-record-v1";
 
-/// The reference's `Commit` (`com.atproto.space.defs#commit`).
+/// The reference's `Commit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commit {
     pub ver: i64,
     pub repo: String,
-    /// The space URI (`at://{authority}/space/{type}/{skey}`).
     pub space: String,
     pub rev: String,
-    pub data: Vec<u8>,
+    pub data: [u8; 32],
 }
 
 impl Commit {
-    /// `RepoCommit#toCommit` of `set` at `rev`.
-    pub fn of(set: &LtHash, space: &str, repo: &str, rev: &str) -> Commit {
-        Commit {
-            ver: COMMIT_VERSION,
-            repo: repo.into(),
-            space: space.into(),
-            rev: rev.into(),
-            data: set.digest().to_vec(),
-        }
+    pub fn new(set: &LtHash, space: &str, repo: &str, rev: &str) -> Commit {
+        Commit { ver: COMMIT_VERSION, repo: repo.into(), space: space.into(), rev: rev.into(), data: set.digest() }
     }
 
-    /// The lexicon's JSON (`data` as `$bytes`).
-    pub fn to_json(&self) -> serde_json::Value {
+    /// `com.atproto.space.defs#commit` as JSON.
+    pub fn to_json(&self) -> J {
         use base64::Engine;
-        serde_json::json!({
+        json!({
             "ver": self.ver,
             "repo": self.repo,
             "space": self.space,
             "rev": self.rev,
-            "data": {"$bytes": base64::engine::general_purpose::STANDARD_NO_PAD.encode(&self.data)},
+            "data": {"$bytes": base64::engine::general_purpose::STANDARD_NO_PAD.encode(self.data)},
         })
     }
 
-    /// From the lexicon's JSON.
-    pub fn from_json(c: &serde_json::Value) -> Result<Commit, String> {
+    pub fn from_json(v: &J) -> Option<Commit> {
         use base64::Engine;
-        let s = |k: &str| c[k].as_str().map(String::from).ok_or_else(|| format!("commit.{k} isn't a string"));
-        let data = c["data"]["$bytes"].as_str().ok_or("commit.data isn't bytes")?;
-        Ok(Commit {
-            ver: c["ver"].as_i64().ok_or("commit.ver isn't an integer")?,
-            repo: s("repo")?,
-            space: s("space")?,
-            rev: s("rev")?,
-            data: base64::engine::general_purpose::STANDARD_NO_PAD
-                .decode(data.trim_end_matches('='))
-                .map_err(|_| "commit.data isn't base64")?,
+        let data = v["data"]["$bytes"].as_str()?;
+        let data = base64::engine::general_purpose::STANDARD_NO_PAD.decode(data.trim_end_matches('=')).ok()?;
+        Some(Commit {
+            ver: v["ver"].as_i64()?,
+            repo: v["repo"].as_str()?.into(),
+            space: v["space"].as_str()?.into(),
+            rev: v["rev"].as_str()?.into(),
+            data: data.try_into().ok()?,
         })
     }
-
-    /// The canonical DRISL map, with `$type` when it's a STAR archive's
-    /// metadata (`com.atproto.space.defs#repoStarMeta`).
-    pub fn to_cbor(&self, star_type: Option<&str>) -> Vec<u8> {
-        let mut b = Vec::with_capacity(256);
-        vlatproto::cbor::write_map_head(&mut b, if star_type.is_some() { 6 } else { 5 });
-        // canonical key order: by length, then bytes
-        vlatproto::cbor::write_text(&mut b, "rev");
-        vlatproto::cbor::write_text(&mut b, &self.rev);
-        vlatproto::cbor::write_text(&mut b, "ver");
-        vlatproto::cbor::write_int(&mut b, self.ver);
-        vlatproto::cbor::write_text(&mut b, "data");
-        vlatproto::cbor::write_bytes(&mut b, &self.data);
-        vlatproto::cbor::write_text(&mut b, "repo");
-        vlatproto::cbor::write_text(&mut b, &self.repo);
-        if let Some(t) = star_type {
-            vlatproto::cbor::write_text(&mut b, "$type");
-            vlatproto::cbor::write_text(&mut b, t);
-        }
-        vlatproto::cbor::write_text(&mut b, "space");
-        vlatproto::cbor::write_text(&mut b, &self.space);
-        b
-    }
-}
-
-/// The reference's `verifyCommit`: the version, the requested repo and
-/// space, then the response's MAC under the request's secret. Only then is
-/// `data` the author's host's claim about the repo.
-pub fn verify(commit: &Commit, space: &str, repo: &str, secret: &[u8], mac: &[u8]) -> bool {
-    commit.ver == COMMIT_VERSION
-        && commit.repo == repo
-        && commit.space == space
-        && super::mac::verify_commit_mac(secret, commit, mac)
 }
 
 /// The set hash element of a record. Injective without length prefixes:
@@ -105,94 +72,157 @@ pub fn element(collection: &str, rkey: &str, cid: &str) -> String {
     format!("{collection}/{rkey}/{cid}")
 }
 
+/// None when a field is longer than its u16 length prefix allows.
+fn keyed(secret: &[u8; 32], domain: &[u8], fields: &[&str]) -> Option<Hmac<Sha256>> {
+    let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(secret).expect("HMAC takes any key length");
+    m.update(domain);
+    for f in fields {
+        m.update(&u16::try_from(f.len()).ok()?.to_be_bytes());
+        m.update(f.as_bytes());
+    }
+    Some(m)
+}
+
+fn commit_state(secret: &[u8; 32], c: &Commit) -> Option<Hmac<Sha256>> {
+    let mut m = keyed(secret, COMMIT_DOMAIN, &[&c.space, &c.repo, &c.rev])?;
+    m.update(&c.data);
+    Some(m)
+}
+
+/// None when a field is longer than its u16 length prefix allows.
+pub fn commit_mac(secret: &[u8; 32], c: &Commit) -> Option<[u8; 32]> {
+    Some(commit_state(secret, c)?.finalize().into_bytes().into())
+}
+
+/// `cid`: the record's binary CID.
+pub fn record_mac(secret: &[u8; 32], uri: &str, cid: &[u8]) -> Option<[u8; 32]> {
+    let mut m = keyed(secret, RECORD_DOMAIN, &[uri])?;
+    m.update(cid);
+    Some(m.finalize().into_bytes().into())
+}
+
+/// The reference's `verifyCommit`: the commit is for the repo and space
+/// asked for, and its MAC verifies (in constant time). Only then is `data`
+/// the author's claim.
+pub fn verify(c: &Commit, space: &str, repo: &str, secret: &[u8; 32], mac: &[u8]) -> bool {
+    if c.ver != COMMIT_VERSION || c.repo != repo || c.space != space {
+        return false;
+    }
+    commit_state(secret, c).is_some_and(|m| m.verify_slice(mac).is_ok())
+}
+
+/// The reference's `verifyRecordMac`.
+pub fn verify_record(secret: &[u8; 32], uri: &str, cid: &[u8], mac: &[u8]) -> bool {
+    keyed(secret, RECORD_DOMAIN, &[uri]).is_some_and(|mut m| {
+        m.update(cid);
+        m.verify_slice(mac).is_ok()
+    })
+}
+
 /// Whether `set` is the repo `commit` describes. Verify the commit first:
 /// on its own this says nothing about authenticity.
 pub fn matches(set: &LtHash, commit: &Commit) -> bool {
-    set.digest()[..] == commit.data[..]
+    set.digest() == commit.data
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::space::vectors::VECTORS;
+    use vlatproto::cid::Cid;
 
-    /// testdata/spaces-alpha/vectors.json `commits`: the reference's
-    /// `toCommit` over a set, its JSON and its STAR metadata bytes.
+    fn h(v: &J) -> Vec<u8> {
+        hex::decode(v.as_str().unwrap()).unwrap()
+    }
+
+    fn h32(v: &J) -> [u8; 32] {
+        h(v).try_into().unwrap()
+    }
+
+    fn set_of(c: &J) -> LtHash {
+        let mut set = LtHash::default();
+        for r in c["records"].as_array().unwrap() {
+            let el =
+                element(r["collection"].as_str().unwrap(), r["rkey"].as_str().unwrap(), r["cid"].as_str().unwrap());
+            assert_eq!(el, r["element"].as_str().unwrap());
+            set.add(&el);
+        }
+        set
+    }
+
+    /// testdata/spaces-alpha/vectors.json `commits` and `recordMacs`: the
+    /// digest and MACs the reference computes for a fixed shared secret.
     #[test]
     fn generated_vectors() {
         let cases = VECTORS["commits"].as_array().unwrap();
         assert_eq!(cases.len(), 3);
         for c in cases {
-            let mut set = LtHash::default();
-            for r in c["records"].as_array().unwrap() {
-                let el =
-                    element(r["collection"].as_str().unwrap(), r["rkey"].as_str().unwrap(), r["cid"].as_str().unwrap());
-                assert_eq!(el, r["element"].as_str().unwrap());
-                set.add(&el);
-            }
-            let commit =
-                Commit::of(&set, c["space"].as_str().unwrap(), c["repo"].as_str().unwrap(), c["rev"].as_str().unwrap());
-            assert_eq!(hex::encode(&commit.data), c["data"].as_str().unwrap());
-            assert!(matches(&set, &commit));
-            assert_eq!(hex::encode(commit.to_cbor(Some("atproto-space-repo"))), c["starMeta"].as_str().unwrap());
-            assert_eq!(hex::encode(commit.to_cbor(None)), c["cbor"].as_str().unwrap());
-            assert_eq!(Commit::from_json(&commit.to_json()).unwrap(), commit);
+            let ctx = &c["ctx"];
+            let (space, repo) = (ctx["space"].as_str().unwrap(), ctx["repo"].as_str().unwrap());
+            let commit = Commit::new(&set_of(c), space, repo, ctx["rev"].as_str().unwrap());
+            assert_eq!(commit.data[..], h(&c["data"])[..]);
+            let secret = h32(&c["sharedSecret"]);
+            let mac = commit_mac(&secret, &commit).unwrap();
+            assert_eq!(mac[..], h(&c["mac"])[..]);
+            assert!(verify(&commit, space, repo, &secret, &mac));
+            assert_eq!(Commit::from_json(&commit.to_json()), Some(commit.clone()));
+        }
+        for r in VECTORS["recordMacs"].as_array().unwrap() {
+            let cid = Cid::parse(r["cid"].as_str().unwrap()).unwrap().to_bytes();
+            let (secret, uri) = (h32(&r["sharedSecret"]), r["uri"].as_str().unwrap());
+            let mac = record_mac(&secret, uri, &cid).unwrap();
+            assert_eq!(mac[..], h(&r["mac"])[..]);
+            assert!(verify_record(&secret, uri, &cid, &mac));
         }
     }
 
-    #[test]
-    fn verification() {
-        let space = "at://did:example:space/space/app.bsky.group/test";
-        let mut set = LtHash::default();
-        set.add(&element("app.bsky.feed.post", "1", "bafyreidefdycgbfy3oglcb6ism3eqhyp5llsrpzxjsuac2gsy4mtrtx244"));
-        let commit = Commit::of(&set, space, "did:example:alice", "3kbcq3p7ad400");
-        let secret = [5u8; 32];
-        let mac = crate::space::mac::commit_mac(&secret, &commit).unwrap();
-        assert!(verify(&commit, space, "did:example:alice", &secret, &mac));
-        assert!(!verify(&commit, space, "did:example:bob", &secret, &mac));
-        assert!(!verify(
-            &commit,
-            "at://did:example:space/space/app.bsky.group/other",
-            "did:example:alice",
-            &secret,
-            &mac
-        ));
-        assert!(!verify(&commit, space, "did:example:alice", &[6; 32], &mac));
-        assert!(!verify(&Commit { ver: 2, ..commit.clone() }, space, "did:example:alice", &secret, &mac));
-        let tampered = Commit { data: LtHash::default().digest().to_vec(), ..commit.clone() };
-        assert!(!verify(&tampered, space, "did:example:alice", &secret, &mac));
-        assert!(!verify(
-            &Commit { rev: "3kbcq3p7ad999".into(), ..commit.clone() },
-            space,
-            "did:example:alice",
-            &secret,
-            &mac
-        ));
-        assert!(!verify(&commit, space, "did:example:alice", &secret, &mac[..31]));
-        let mut advanced = set.clone();
-        advanced.add(&element(
-            "app.bsky.feed.post",
-            "2",
-            "bafyreidpw4cbv6gr4ukh33z23pvvrpr3wi4gnpmi4doamlsl3sa4rgri2a",
-        ));
-        assert!(!matches(&advanced, &commit));
-    }
+    // The cases below are the reference's tests/mac.test.ts.
 
-    #[test]
-    fn cbor_is_canonical() {
-        let c = Commit {
+    fn commit() -> Commit {
+        Commit {
             ver: 1,
+            space: "at://did:example:space/space/app.bsky.group/test".into(),
             repo: "did:example:alice".into(),
-            space: "at://did:example:space/space/a.b.c/k".into(),
-            rev: "3jzfcijpj2z2a".into(),
-            data: vec![1; 32],
-        };
-        for t in [None, Some("atproto-space-repo")] {
-            let b = c.to_cbor(t);
-            let v = vlatproto::cbor::Value::decode(&b).unwrap();
-            assert_eq!(v.to_cbor(), b, "decodes and re-encodes to the same bytes");
-            assert_eq!(v.get("repo").and_then(|r| r.as_str()), Some("did:example:alice"));
+            rev: "3kbcq3p7ad400".into(),
+            data: [1; 32],
         }
+    }
+
+    #[test]
+    fn commit_macs() {
+        let secret: [u8; 32] = rand::random();
+        let c = commit();
+        let mac = commit_mac(&secret, &c).unwrap();
+        assert!(verify(&c, &c.space, &c.repo, &secret, &mac));
+        assert!(!verify(&c, &c.space, &c.repo, &rand::random(), &mac));
+        // unambiguous across field boundaries
+        let a = Commit { repo: "did:example:alice".into(), rev: "3kbc".into(), ..commit() };
+        let b = Commit { repo: "did:example:alice3".into(), rev: "kbc".into(), ..commit() };
+        assert_ne!(commit_mac(&secret, &a), commit_mac(&secret, &b));
+        // covers the data digest
+        assert!(!verify(&Commit { data: [2; 32], ..commit() }, &c.space, &c.repo, &secret, &mac));
+        // the requested repo and space, and the version
+        assert!(!verify(&c, &c.space, "did:example:bob", &secret, &mac));
+        assert!(!verify(&c, "at://did:example:space/space/app.bsky.group/other", &c.repo, &secret, &mac));
+        assert!(!verify(&Commit { ver: 2, ..commit() }, &c.space, &c.repo, &secret, &mac));
+        assert!(!verify(&c, &c.space, &c.repo, &secret, &mac[..31]));
+        // a field too long for its prefix
+        assert!(commit_mac(&secret, &Commit { space: "x".repeat(65_536), ..commit() }).is_none());
+    }
+
+    #[test]
+    fn record_macs() {
+        let secret: [u8; 32] = rand::random();
+        let uri = "at://did:example:alice/space/app.bsky.group/test/app.bsky.feed.post/1";
+        let a = Cid::parse("bafyreidefdycgbfy3oglcb6ism3eqhyp5llsrpzxjsuac2gsy4mtrtx244").unwrap().to_bytes();
+        let b = Cid::parse("bafyreidpw4cbv6gr4ukh33z23pvvrpr3wi4gnpmi4doamlsl3sa4rgri2a").unwrap().to_bytes();
+        let mac = record_mac(&secret, uri, &a).unwrap();
+        assert!(verify_record(&secret, uri, &a, &mac));
+        assert!(!verify_record(&rand::random(), uri, &a, &mac));
+        assert!(!verify_record(&secret, &format!("{uri}2"), &a, &mac));
+        assert!(!verify_record(&secret, uri, &b, &mac));
+        // domain-separated from a commit MAC
+        assert_ne!(Some(mac), commit_mac(&secret, &commit()));
     }
 
     #[test]
@@ -204,6 +234,17 @@ pub(crate) mod tests {
         a.add(&element("n.c.a", "1", cid));
         b.add(&element("n.c.a", "2", cid));
         assert_ne!(a, b);
+        assert!(matches(&a, &Commit::new(&a, "s", "r", "v")));
+        assert!(!matches(&b, &Commit::new(&a, "s", "r", "v")));
+    }
+
+    /// The empty repo's digest, which clearRecords leaves.
+    #[test]
+    fn empty_digest() {
+        assert_eq!(
+            hex::encode(LtHash::default().digest()),
+            "e5a00aa9991ac8a5ee3109844d84a55583bd20572ad3ffcd42792f3c36b183ad"
+        );
     }
 
     pub(crate) fn sub_be(a: &[u8], b: &[u8]) -> Vec<u8> {

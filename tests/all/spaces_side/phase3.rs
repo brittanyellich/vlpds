@@ -1,23 +1,24 @@
 //! Shared pieces of the phase 3 tests (import_repo, backup, takedowns,
 //! operator_reads):
 //!
-//! - raw DPoP calls for archive bodies (getRepo out, `vlpds.space.importRepo`
+//! - raw DPoP calls for STAR bodies (getRepo out, `com.atproto.space.importRepo`
 //!   in), on the account's OAuth grant;
-//! - [`verify_repo_star`]: the reference's `verifyRepoStarFull` past the
-//!   MAC (packages/space/src/sync/consumer.ts), returning why an archive
+//! - [`verify_repo_star`]: the reference's `verifyRepoStarFull`
+//!   (packages/space/src/sync/consumer.ts) less the MAC, which a credential
+//!   read checks as it's served ([`Cred::get`]), returning why an archive
 //!   fails rather than panicking, so refusal tests can build bad archives
 //!   and check that the reference would refuse them too;
-//! - [`RepoBuilder`]: a space repo STAR archive as the reference's
-//!   `serializeRepo` writes it, for synthetic imports;
+//! - [`RepoBuilder`]: a space repo archive as the reference's `serializeRepo`
+//!   writes it, for synthetic imports;
 //! - takedown calls, and [`Syncer`], a client that follows one repo with
 //!   listRepoOps and falls back to getRepo on a digest mismatch, as the
 //!   spec's syncer does.
 //!
-//! `vlpds.space.importRepo` (plan §2.7, brief Q8) as these tests pin it:
-//! `POST /xrpc/vlpds.space.importRepo?space=<space URI>` with the getRepo
-//! archive (`application/octet-stream`) as the body, on the account's OAuth
-//! grant with a `space:` scope allowing `create` in that space. It answers
-//! `{rev, records}`, keeping the archive's rev.
+//! `com.atproto.space.importRepo` as these tests pin it: `POST
+//! /xrpc/com.atproto.space.importRepo` with the getRepo archive
+//! (`application/octet-stream`) as the body, on the account's OAuth grant
+//! with a `space:` scope allowing `create` in the archive's space and its
+//! collections. It answers 200 with no body.
 
 use super::ref_net::*;
 use crate::common::spaces::SpaceClient;
@@ -26,8 +27,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use vlpds::space::commit::{self, Commit};
 use vlpds::space::lthash::LtHash;
+use vlpds::space::star;
 
-pub const IMPORT_REPO: &str = "vlpds.space.importRepo";
+pub const IMPORT_REPO: &str = "com.atproto.space.importRepo";
 pub const STAR_TYPE: &str = "application/octet-stream";
 pub const UPDATE_SUBJECT_STATUS: &str = "com.atproto.admin.updateSubjectStatus";
 
@@ -71,60 +73,77 @@ pub async fn get_repo_self(sc: &SpaceClient, space: &str) -> Resp {
         .await
 }
 
-pub async fn import_repo(sc: &SpaceClient, space: &str, star: &[u8]) -> Resp {
+pub async fn import_repo(sc: &SpaceClient, star: &[u8]) -> Resp {
     let base = sc.srv.base.clone();
-    dpop_raw(sc, &base, reqwest::Method::POST, IMPORT_REPO, &[("space", space)], Some((star, STAR_TYPE))).await
+    dpop_raw(sc, &base, reqwest::Method::POST, IMPORT_REPO, &[], Some((star, STAR_TYPE))).await
 }
 
 /// importRepo with some other `Authorization` (a password session, an app
 /// password).
-pub async fn import_repo_as(base: &str, auth: &Auth, space: &str, star: &[u8]) -> Resp {
-    Xrpc::new(base)
-        .post_bytes(&format!("{IMPORT_REPO}?space={}", crate::oauth::enc(space)), star.to_vec(), STAR_TYPE, auth)
-        .await
+pub async fn import_repo_as(base: &str, auth: &Auth, star: &[u8]) -> Resp {
+    Xrpc::new(base).post_bytes(IMPORT_REPO, star.to_vec(), STAR_TYPE, auth).await
 }
 
 // ---------------------------------------------------------------------------
-// archives
+// STAR archives
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct VerifiedRepo {
     pub commit: Commit,
-    /// (path, record CID), in archive (bytewise path) order.
-    pub index: Vec<(String, Cid)>,
-    /// The records' DRISL bytes, in archive order.
-    pub records: Vec<(Cid, Vec<u8>)>,
+    /// (path, CID, bytes), in the archive's (bytewise path) order.
+    pub records: Vec<(String, Cid, Vec<u8>)>,
 }
 
 impl VerifiedRepo {
     pub fn set(&self) -> BTreeMap<String, String> {
-        self.index.iter().map(|(p, c)| (p.clone(), c.to_string())).collect()
+        self.records.iter().map(|(p, c, _)| (p.clone(), c.to_string())).collect()
     }
 }
 
-/// `verifyRepoStarFull({space, repo, ...})` past the MAC: the metadata a
-/// commit naming `repo` in `space`, paths in strict order, each record a
-/// DRISL map of at most 1 MiB, folding to the commit's data at the end.
-pub fn verify_repo_star(star: &[u8], space: &str, repo: &str) -> Result<VerifiedRepo, String> {
-    let p = vlpds::space::star::parse(star).map_err(|e| e.to_string())?;
-    if p.commit.ver != 1 || p.commit.space != space || p.commit.repo != repo {
-        return Err(format!("commit failed verification: {:?}", p.commit));
+/// `verifyRepoStarFull({space, repo})` less the MAC: repo metadata naming
+/// the space and repo asked for, keys in strict bytewise order, each value
+/// a canonical DRISL map, and the records folding to the commit's `data`
+/// once the archive has ended.
+pub fn verify_repo_star(bytes: &[u8], space: &str, repo: &str) -> Result<VerifiedRepo, String> {
+    let (meta, pairs) = star::read_all(bytes, star::LIMITS).map_err(|e| format!("invalid STAR: {e}"))?;
+    let commit = star::parse_repo_meta(&meta).map_err(|e| e.0)?;
+    if commit.repo != repo || commit.space != space {
+        return Err(format!("the archive is {} in {}", commit.repo, commit.space));
     }
-    let index = p.records.iter().map(|(path, b)| (path.clone(), Cid::dag_cbor(b))).collect();
-    let records = p.records.into_iter().map(|(_, b)| (Cid::dag_cbor(&b), b)).collect();
-    Ok(VerifiedRepo { commit: p.commit, index, records })
+    let mut set = LtHash::default();
+    let mut records: Vec<(String, Cid, Vec<u8>)> = Vec::with_capacity(pairs.len());
+    for (key, value) in pairs {
+        if records.last().is_some_and(|(p, _, _)| p.as_bytes() >= &key[..]) {
+            return Err("duplicate or out-of-order key".into());
+        }
+        let path = String::from_utf8(key).map_err(|_| "a path that isn't UTF-8".to_string())?;
+        let Some((coll, rkey)) = path.split_once('/') else { return Err(format!("bad path {path}")) };
+        let v = Value::decode(&value).map_err(|e| format!("invalid record at {path}: {e}"))?;
+        if !matches!(v, Value::Map(_)) || v.to_cbor() != value {
+            return Err(format!("record at {path} is not canonical DRISL"));
+        }
+        let cid = Cid::dag_cbor(&value);
+        set.add(&commit::element(coll, rkey, &cid.to_string()));
+        records.push((path, cid, value));
+    }
+    if !commit::matches(&set, &commit) {
+        return Err("the records do not match the commit's data".into());
+    }
+    Ok(VerifiedRepo { commit, records })
 }
 
-/// An archive of `commit` and `pairs` (path, record bytes) as given, in
-/// their order (so a test can break it).
-pub fn write_star(commit: &Commit, pairs: &[(String, Vec<u8>)]) -> Vec<u8> {
+/// An archive of `meta` (its DRISL bytes) and `pairs` as given, so a test
+/// can put them out of order; `end`: with the end byte.
+pub fn write_star(meta: &[u8], pairs: &[(Vec<u8>, Vec<u8>)], end: bool) -> Vec<u8> {
     let mut out = Vec::new();
-    vlpds::space::star::write_header(&mut out, commit);
-    for (p, b) in pairs {
-        vlpds::space::star::write_pair(&mut out, p.as_bytes(), b);
+    star::write_header(&mut out, meta);
+    for (k, v) in pairs {
+        star::write_pair(&mut out, k, v);
     }
-    out.push(0);
+    if end {
+        star::write_end(&mut out);
+    }
     out
 }
 
@@ -133,7 +152,8 @@ pub fn record_block(record: &J) -> (Cid, Vec<u8>) {
     (Cid::dag_cbor(&b), b)
 }
 
-/// A space repo to serialize: records by path, for (space, repo, rev).
+/// A space repo to serialize: records by path (a `String` map is in
+/// bytewise order, as STAR wants), for (space, repo, rev).
 pub struct RepoBuilder {
     pub space: String,
     pub author: String,
@@ -141,27 +161,31 @@ pub struct RepoBuilder {
     pub records: BTreeMap<String, (Cid, Vec<u8>)>,
 }
 
-/// The parts of a built archive, for tests that take it apart.
+/// A built archive's parts, for tests that take it apart.
 pub struct BuiltStar {
     pub commit: Commit,
-    /// In archive order.
+    /// In path order.
     pub records: Vec<(String, Cid, Vec<u8>)>,
 }
 
 impl BuiltStar {
-    fn pairs(&self) -> Vec<(String, Vec<u8>)> {
-        self.records.iter().map(|(p, _, b)| (p.clone(), b.clone())).collect()
+    pub fn meta(&self) -> Vec<u8> {
+        star::repo_meta(&self.commit)
+    }
+
+    pub fn pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.records.iter().map(|(p, _, b)| (p.as_bytes().to_vec(), b.clone())).collect()
     }
 
     pub fn star(&self) -> Vec<u8> {
-        write_star(&self.commit, &self.pairs())
+        write_star(&self.meta(), &self.pairs(), true)
     }
 
     /// The archive with `f` applied to its pairs.
-    pub fn star_with(&self, f: impl FnOnce(&mut Vec<(String, Vec<u8>)>)) -> Vec<u8> {
+    pub fn star_with(&self, f: impl FnOnce(&mut Vec<(Vec<u8>, Vec<u8>)>)) -> Vec<u8> {
         let mut pairs = self.pairs();
         f(&mut pairs);
-        write_star(&self.commit, &pairs)
+        write_star(&self.meta(), &pairs, true)
     }
 }
 
@@ -185,10 +209,9 @@ impl RepoBuilder {
         set
     }
 
-    /// A commit over `set` (normally [`Self::set`]).
+    /// With a commit over `set` (normally [`Self::set`]).
     pub fn build_with(&self, set: &LtHash) -> BuiltStar {
-        let commit = Commit::of(set, &self.space, &self.author, &self.rev);
-        // a BTreeMap of Strings iterates in bytewise order, the archive's
+        let commit = Commit::new(set, &self.space, &self.author, &self.rev);
         let records = self.records.iter().map(|(p, (c, b))| (p.clone(), *c, b.clone())).collect();
         BuiltStar { commit, records }
     }
@@ -254,7 +277,7 @@ pub async fn takedown_space(s: &TestServer, space: &str, applied: bool) -> Resp 
 
 /// Follows one member's repo in a space the way the spec's syncer does:
 /// listRepoOps from its rev, and getRepo when the replayed set doesn't
-/// match the commit (each MAC checked as `Cred` reads).
+/// match the (MACed) commit.
 pub struct Syncer {
     pub base: String,
     pub space: String,
@@ -330,8 +353,8 @@ impl Syncer {
         }
         assert!(commit.is_object(), "listRepoOps ended without a commit");
         let sc = super::fuzz::signed_commit(&commit);
-        assert_eq!((sc.space.as_str(), sc.repo.as_str()), (self.space.as_str(), self.repo.as_str()));
-        if digest(&set)[..] == sc.data[..] {
+        assert!(sc.space == self.space && sc.repo == self.repo, "listRepoOps' commit is for another repo");
+        if digest(&set) == sc.data {
             self.set = set;
             self.rev = Some(sc.rev);
             return false;

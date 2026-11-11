@@ -212,7 +212,6 @@ pub const SPACE_NOTIFY_FAMILY: &[u8] = b"sN/";
 pub const SPACE_BLOB_FAMILY: &[u8] = b"sb/";
 pub const SPACE_BLOB_CID_FAMILY: &[u8] = b"sc/";
 pub const SPACE_LIST_FAMILY: &[u8] = b"sL/";
-/// notifySpaceDeleted owed to a service (`crate::space::deletions`).
 pub const SPACE_DELETED_FAMILY: &[u8] = b"sD/";
 
 /// Every Spaces family: rows that must never reach a firehose frame.
@@ -326,6 +325,7 @@ pub fn space_notify_key(authority: &str, sid: &SpaceId, service: &str) -> Vec<u8
     keyed(authority, SPACE_NOTIFY_FAMILY, &[authority.as_bytes(), b"\0", sid, service.as_bytes()])
 }
 
+/// A notifySpaceDeleted owed to a service that a send couldn't reach.
 pub fn space_deleted_key(authority: &str, sid: &SpaceId, service: &str) -> Vec<u8> {
     keyed(authority, SPACE_DELETED_FAMILY, &[authority.as_bytes(), b"\0", sid, service.as_bytes()])
 }
@@ -637,6 +637,7 @@ pub fn record_value_rev(v: &[u8]) -> u64 {
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(remote = "Self")]
 pub struct Account {
     pub did: String,
     pub handle: String,
@@ -664,25 +665,60 @@ pub struct Account {
     /// refused meanwhile (DESIGN.md "Signing-key rotation").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_signing_key: Option<PendingSigningKey>,
-    /// The `#atproto_kem` key syncers establish Spaces MAC secrets with
-    /// (`crate::space::kem_keys`); None until it's made.
+    /// The account's P-256 `#atproto_kem` key, for Spaces MACs: wrapped like
+    /// the signing key (`secrets::Purpose::KemKey`), unwrapped through
+    /// `Secrets::account_kem_key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kem_key: Option<KemKeyRow>,
+    pub wrapped_kem_key: Option<String>,
+    /// Multibase multikey (compressed P-256, `zDn…`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kem_pubkey: Option<String>,
     #[serde(default, flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct KemKeyRow {
-    /// The P-256 scalar wrapped under the KEK (`secrets::Purpose::KemKey`,
-    /// bound to the DID).
-    pub wrapped: String,
-    /// Multibase multikey.
-    pub pubkey: String,
-    /// The DID document is known to list it (false: not yet, or not ours to
-    /// change).
-    #[serde(default)]
-    pub published: bool,
+impl<'de> serde::Deserialize<'de> for Account {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut account = Account::deserialize(deserializer)?;
+        // Crate's original Spaces build stored the same wrapped scalar and
+        // multikey together. Reuse them before the upstream backfill sees
+        // the account, so it never replaces an already published key.
+        if account.wrapped_kem_key.is_none() && account.kem_pubkey.is_none() {
+            let legacy = account.extra.get("kem_key");
+            let wrapped = legacy.and_then(|key| key["wrapped"].as_str());
+            let pubkey = legacy.and_then(|key| key["pubkey"].as_str());
+            if let (Some(wrapped), Some(pubkey)) = (wrapped, pubkey) {
+                account.wrapped_kem_key = Some(wrapped.into());
+                account.kem_pubkey = Some(pubkey.into());
+            }
+        }
+        Ok(account)
+    }
+}
+
+impl serde::Serialize for Account {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let (Some(legacy), Some(wrapped), Some(pubkey)) =
+            (self.extra.get("kem_key").and_then(serde_json::Value::as_object), &self.wrapped_kem_key, &self.kem_pubkey)
+        {
+            // Keep the legacy layout usable on rollback after a KEK rewrap.
+            if legacy.get("wrapped").and_then(serde_json::Value::as_str) != Some(wrapped)
+                || legacy.get("pubkey").and_then(serde_json::Value::as_str) != Some(pubkey)
+            {
+                let mut account = self.clone();
+                let published = legacy.get("pubkey").and_then(serde_json::Value::as_str) == Some(pubkey)
+                    && legacy.get("published").and_then(serde_json::Value::as_bool) == Some(true);
+                account.extra.insert(
+                    "kem_key".into(),
+                    serde_json::json!({
+                        "wrapped": wrapped, "pubkey": pubkey, "published": published,
+                    }),
+                );
+                return Account::serialize(&account, serializer);
+            }
+        }
+        Account::serialize(self, serializer)
+    }
 }
 
 fn is_zero(v: &u64) -> bool {

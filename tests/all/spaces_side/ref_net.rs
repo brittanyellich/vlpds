@@ -1,5 +1,5 @@
 //! The reference's `tests/_space.ts` for the ported space suites
-//! (`ref_space_*`, `ref_policy`, `ref_client_attestation`), over XRPC:
+//! (`ref_space_*`, `ref_space_policy`, `ref_client_attestation`), over XRPC:
 //!
 //! - [`Net`]: the reference's `TestNetworkNoAppView` with `extraPdses`, as
 //!   `--spaces` PDSes registering DIDs with one in-process PLC directory, so
@@ -39,16 +39,27 @@ pub const SPACE_TYPE_COLLECTIONS: [&str; 2] = ["com.example.groupNote", "com.exa
 /// public repo writes and blob uploads.
 pub const FULL_SCOPE: &str = "transition:generic space:*?authority=*&collection=*&action=read&action=create&action=update&action=delete&manage=create&manage=update&manage=delete";
 
-pub const MEMBER_LIST: &str = "com.atproto.simplespace.defs#memberListPolicy";
-pub const PUBLIC: &str = "com.atproto.simplespace.defs#publicPolicy";
-pub const ALLOW_LIST: &str = "com.atproto.simplespace.defs#allowList";
+pub const PERSONALSPACE: &str = "com.atproto.personalspace.policy";
+pub const MEMBERSPACE: &str = "com.atproto.memberspace.policy";
+pub const MANAGEDSPACE: &str = "com.atproto.managedspace.policy";
 
-pub fn public() -> J {
-    json!({"$type": PUBLIC})
+/// `personalspace.policy.$build({})`.
+pub fn personalspace() -> J {
+    json!({"$type": PERSONALSPACE})
 }
 
-pub fn allow_list(allowed: &[&str]) -> J {
-    json!({"$type": ALLOW_LIST, "allowed": allowed})
+/// `memberspace.policy.$build(config)`: `config`'s fields over the type.
+pub fn memberspace(config: J) -> J {
+    let mut p = json!({"$type": MEMBERSPACE});
+    if let J::Object(c) = config {
+        p.as_object_mut().unwrap().extend(c);
+    }
+    p
+}
+
+/// `managedspace.policy.$build({managingApp})`.
+pub fn managedspace(app: &str) -> J {
+    json!({"$type": MANAGEDSPACE, "managingApp": app})
 }
 
 /// `record()`: a minimal record body for a test collection.
@@ -172,7 +183,7 @@ impl Net {
                     json!({
                         "spaceType": space_type,
                         "skey": skey,
-                        "policy": policy_of(o.read_policy, o.write_policy, o.app_access),
+                        "policy": o.policy.unwrap_or_else(|| memberspace(json!({}))),
                     }),
                 )
                 .await;
@@ -202,8 +213,21 @@ impl Net {
         (exchange(&reqwest::Client::new(), &holder, &host, space, token, attestation).await, holder)
     }
 
+    /// `sc.publicCredential(space, {clientAttestation})`: getSpaceCredential
+    /// at the authority with no delegation token.
+    pub async fn public_credential(&self, space: &str, attestation: Option<&str>) -> (Resp, Holder) {
+        let holder = Holder::new();
+        let host = self.host_of(authority_of(space));
+        let mut body = json!({"space": space, "credentialKid": holder.did});
+        if let Some(a) = attestation {
+            body["clientAttestation"] = json!(a);
+        }
+        let rb = reqwest::Client::new().post(format!("{host}/xrpc/com.atproto.space.getSpaceCredential"));
+        (resp(rb.json(&body).send().await.unwrap()).await, holder)
+    }
+
     /// The authority's writer set as its storage holds it (`sW`), as the
-    /// reference's `writerDids` reads it: no credential, so an allowList
+    /// reference's `writerDids` reads it: no credential, so an allowedApps
     /// space's app perimeter doesn't stand in the way. `owner` is the
     /// authority's account.
     pub async fn writer_dids(&self, owner: &SpaceClient, space: &str) -> Vec<String> {
@@ -235,33 +259,13 @@ impl Net {
     }
 }
 
-/// The October 29 policy for an October 22 style configuration (the
-/// reference's `006-space-policy` conversion).
-pub fn policy_of(read: Option<J>, write: Option<J>, apps: Option<J>) -> J {
-    let ty = |p: &Option<J>| p.as_ref().and_then(|p| p["$type"].as_str()).unwrap_or(MEMBER_LIST).to_string();
-    let app = |p: &Option<J>| p.as_ref().and_then(|p| p["managingApp"].as_str()).map(String::from);
-    if let Some(m) = app(&read).or_else(|| app(&write)) {
-        return json!({"$type": "com.atproto.managedspace.policy", "managingApp": m});
-    }
-    let mut p = json!({
-        "$type": "com.atproto.memberspace.policy",
-        "publicRead": ty(&read) == PUBLIC,
-        "publicWrite": ty(&write) == PUBLIC,
-    });
-    if let Some(a) = apps.filter(|a| a["$type"] == json!(ALLOW_LIST)) {
-        p["allowedApps"] = a["allowed"].clone();
-    }
-    p
-}
-
 #[derive(Default)]
 pub struct SpaceOpts<'a> {
     pub skey: Option<&'a str>,
     pub space_type: Option<&'a str>,
     pub members: &'a [&'a SpaceClient],
-    pub read_policy: Option<J>,
-    pub write_policy: Option<J>,
-    pub app_access: Option<J>,
+    /// Default: a memberspace with every flag off.
+    pub policy: Option<J>,
     /// Skip createSpace, leaving the space ungoverned.
     pub ungoverned: bool,
 }
@@ -277,6 +281,16 @@ pub async fn put_member(owner: &SpaceClient, space: &str, member: &SpaceClient, 
 
 pub async fn remove_member(owner: &SpaceClient, space: &str, member: &SpaceClient) -> Resp {
     owner.post("com.atproto.memberspace.removeMember", json!({"space": space, "did": member.did})).await
+}
+
+/// `sc.clear`: clearRecords of the actor's own repo.
+pub async fn clear(actor: &SpaceClient, space: &str) -> Resp {
+    actor.post("com.atproto.space.clearRecords", json!({"space": space, "repo": actor.did})).await
+}
+
+/// `sc.removeWriter`.
+pub async fn remove_writer(owner: &SpaceClient, space: &str, writer: &SpaceClient) -> Resp {
+    owner.post("com.atproto.space.removeWriter", json!({"space": space, "did": writer.did})).await
 }
 
 pub async fn delegation_token(actor: &SpaceClient, space: &str) -> String {
@@ -296,7 +310,8 @@ pub async fn exchange(
     if let Some(a) = attestation {
         body["clientAttestation"] = json!(a);
     }
-    crate::common::spaces::get_space_credential(http, host, body).await
+    let rb = http.post(format!("{host}/xrpc/com.atproto.space.getSpaceCredential"));
+    resp(rb.json(&body).send().await.unwrap()).await
 }
 
 /// One write's options (the reference's `WriteOptions`).
@@ -534,7 +549,7 @@ impl Cred {
     pub async fn post(&self, base: &str, nsid: &str, body: J) -> Resp {
         let aud = body["repo"].as_str().unwrap_or_else(|| authority_of(body["space"].as_str().unwrap())).to_string();
         let mut rb = self.http.post(format!("{base}/xrpc/{nsid}"));
-        for (k, v) in self.holder.headers(&self.credential, &aud) {
+        for (k, v) in self.holder.credential_headers(&self.credential, &aud) {
             rb = rb.header(k, v);
         }
         resp(rb.json(&body).send().await.unwrap()).await
@@ -542,24 +557,15 @@ impl Cred {
 
     /// The signed headers for `aud` (`createSpaceSigHeaders`).
     pub fn headers(&self, aud: &str) -> Vec<(String, String)> {
-        self.holder.headers(&self.credential, aud)
+        self.holder.credential_headers(&self.credential, aud)
     }
 }
 
-/// A GET at `base` with these headers, and a fresh `Atproto-Space-Want-Mac`
-/// when it's a credential read that returns a MAC and they name none.
+/// A GET at `base` with exactly these headers.
 pub async fn raw_get(base: &str, nsid: &str, query: &[(&str, &str)], headers: &[(String, String)]) -> Resp {
-    let http = reqwest::Client::new();
-    let mut rb = http.get(xrpc_url(base, nsid, query));
+    let mut rb = reqwest::Client::new().get(xrpc_url(base, nsid, query));
     for (k, v) in headers {
         rb = rb.header(k, v);
-    }
-    let credential = headers.iter().any(|(k, v)| k == "authorization" && v.starts_with("Atproto-Space-Credential "));
-    let named = headers.iter().any(|(k, _)| k == vlpds::space::mac::WANT_MAC_HEADER);
-    if let (Some(ty), true, false) = (crate::common::spaces::mac_type(nsid), credential, named) {
-        let repo = query.iter().find(|(k, _)| *k == "repo").map(|(_, v)| *v).unwrap_or_default();
-        let (want, _) = crate::common::spaces::want_mac(&http, base, repo, ty).await;
-        rb = rb.header(vlpds::space::mac::WANT_MAC_HEADER, want);
     }
     resp(rb.send().await.unwrap()).await
 }
@@ -685,9 +691,9 @@ impl MockService {
         }
     }
 
-    /// A remote space host: the authority's PDS (`#atproto_pds`).
+    /// A remote space host (`#atproto_space_host`, `#atproto_pds`).
     pub async fn space_host() -> MockService {
-        Self::spawn(&[("atproto_pds", "AtprotoPersonalDataServer")]).await
+        Self::spawn(&[("atproto_space_host", "AtprotoSpaceHost"), ("atproto_pds", "AtprotoPersonalDataServer")]).await
     }
 
     /// A syncing service (`#atproto_space_syncer`).
@@ -897,7 +903,7 @@ async fn ref_harness_self_check() {
     let md: J = http.get(&app.client_id).send().await.unwrap().json().await.unwrap();
     assert_eq!(md["client_id"], json!(app.client_id));
     let jwks: J = http.get(md["jwks_uri"].as_str().unwrap()).send().await.unwrap().json().await.unwrap();
-    let att = app.attest("did:plc:x#atproto_pds", Attest::default());
+    let att = app.attest("did:plc:x#atproto_space_host", Attest::default());
     let parts: Vec<&str> = att.split('.').collect();
     let jwk = &jwks["keys"][0];
     let dec = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).unwrap();
@@ -909,7 +915,10 @@ async fn ref_harness_self_check() {
     use p256::ecdsa::signature::Verifier;
     vk.verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &sig).expect("attestation signed by the published key");
     let claims = jwt_claims(&att);
-    assert_eq!((claims["iss"].clone(), claims["aud"].clone()), (json!(app.client_id), json!("did:plc:x#atproto_pds")));
+    assert_eq!(
+        (claims["iss"].clone(), claims["aud"].clone()),
+        (json!(app.client_id), json!("did:plc:x#atproto_space_host"))
+    );
     assert!(claims["jti"].is_string());
     assert!(jwt_claims(&app.attest("a", Attest { jti: Some(None), ..Default::default() }))["jti"].is_null());
     app.set_keys(Keys::UriMissing);

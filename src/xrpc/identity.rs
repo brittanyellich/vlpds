@@ -105,27 +105,28 @@ async fn well_known_atproto_did(State(app): AppState, headers: HeaderMap) -> Res
 }
 
 pub(super) fn did_doc(app: &App, acct: &Account) -> J {
-    let mut methods = vec![json!({
-        "id": format!("{}#atproto", acct.did),
-        "type": "Multikey",
-        "controller": acct.did,
-        "publicKeyMultibase": acct.signing_pubkey,
-    })];
-    if let Some(k) = &acct.kem_key {
-        methods.push(json!({
-            "id": format!("{}#atproto_kem", acct.did),
-            "type": "Multikey",
-            "controller": acct.did,
-            "publicKeyMultibase": k.pubkey,
-        }));
-    }
-    json!({
+    let mut doc = json!({
         "@context": ["https://www.w3.org/ns/did/v1", "https://w3id.org/security/multikey/v1", "https://w3id.org/security/suites/secp256k1-2019/v1"],
         "id": acct.did,
         "alsoKnownAs": [format!("at://{}", acct.handle)],
-        "verificationMethod": methods,
+        "verificationMethod": [{
+            "id": format!("{}#atproto", acct.did),
+            "type": "Multikey",
+            "controller": acct.did,
+            "publicKeyMultibase": acct.signing_pubkey,
+        }],
         "service": [{"id": "#atproto_pds", "type": "AtprotoPersonalDataServer", "serviceEndpoint": app.public_url}],
-    })
+    });
+    if let Some(kem) = &acct.kem_pubkey {
+        doc["@context"].as_array_mut().expect("an array").push(json!("https://w3id.org/security/suites/ecdsa-2019/v1"));
+        doc["verificationMethod"].as_array_mut().expect("an array").push(json!({
+            "id": format!("{}#{}", acct.did, crate::plc::KEM_METHOD),
+            "type": "Multikey",
+            "controller": acct.did,
+            "publicKeyMultibase": kem,
+        }));
+    }
+    doc
 }
 
 /// Whether the document generated here is the account's current one. It is
@@ -727,15 +728,10 @@ async fn update_did_doc_handle(app: &App, did: &str, handle: &str) -> XResult<()
 }
 
 async fn get_recommended_did_credentials(State(app): AppState, Auth(creds): Auth) -> XResult<Json<J>> {
-    let did = creds.user_did()?;
-    // a migration in carries this host's own #atproto_kem key (Spaces)
-    if app.spaces.is_some() {
-        crate::space::kem_keys::ensure_key(&app, did).await?;
-    }
-    let acct = app.account(did).await?;
+    let acct = app.account(creds.user_did()?).await?;
     let mut methods = json!({"atproto": format!("did:key:{}", acct.signing_pubkey)});
-    if let Some(k) = &acct.kem_key {
-        methods["atproto_kem"] = json!(format!("did:key:{}", k.pubkey));
+    if let Some(kem) = &acct.kem_pubkey {
+        methods[crate::plc::KEM_METHOD] = json!(format!("did:key:{kem}"));
     }
     Ok(Json(json!({
         "alsoKnownAs": [format!("at://{}", acct.handle)],
@@ -947,9 +943,10 @@ async fn submit_plc_operation(
     if op["verificationMethods"]["atproto"] != format!("did:key:{}", acct.signing_pubkey).as_str() {
         return Err(bad("Incorrect signing key"));
     }
-    let kem = acct.kem_key.as_ref().map(|k| k.pubkey.clone());
-    if kem.as_ref().is_some_and(|k| op["verificationMethods"]["atproto_kem"] != format!("did:key:{k}").as_str()) {
-        return Err(bad("Incorrect KEM key"));
+    if let Some(kem) = &acct.kem_pubkey {
+        if op["verificationMethods"][crate::plc::KEM_METHOD] != format!("did:key:{kem}").as_str() {
+            return Err(bad("Incorrect KEM key"));
+        }
     }
     if !acct.handle.is_empty() && op["alsoKnownAs"].get(0) != Some(&J::String(format!("at://{}", acct.handle))) {
         return Err(bad("Incorrect handle in alsoKnownAs"));
@@ -964,15 +961,8 @@ async fn submit_plc_operation(
     if foreign_keys {
         mark_plc_external(&app, &did).await?;
     }
-    // #identity only (writes nothing but the KEM key's now being listed);
-    // not for a taken-down account
-    app.mutate_account(&did, true, false, false, move |a| {
-        if let Some(k) = a.kem_key.as_mut().filter(|k| kem.as_ref() == Some(&k.pubkey)) {
-            k.published = true;
-        }
-        Ok(a.status.as_deref() != Some("takendown"))
-    })
-    .await?;
+    // #identity only (writes nothing); not for a taken-down account
+    app.mutate_account(&did, true, false, false, |a| Ok(a.status.as_deref() != Some("takendown"))).await?;
     Ok(StatusCode::OK)
 }
 

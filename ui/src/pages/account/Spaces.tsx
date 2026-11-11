@@ -11,13 +11,7 @@ import {
   listSpaces,
   myRepo,
   OWNER_SCOPE,
-  policyText,
-  policyKind,
-  policySides,
-  publishedText,
-  isMemberspace,
-  MANAGED_POLICY,
-  PERSONAL_POLICY,
+  readText,
   pool,
   READ_SCOPE,
   resolveMember,
@@ -28,6 +22,7 @@ import {
   type Governance,
   type MyRepo,
   type SpaceRef,
+  writeText,
 } from '../../lib/spaces'
 import { Nsid, preview } from './Repo'
 
@@ -244,13 +239,13 @@ function Overview({ sess }: { sess: OAuthSession }) {
                       </Link>
                       {r.gov && (
                         <span className="sm-meta small muted">
-                          {policyKind(r.gov.policy)} · read: {policySides(r.gov.policy).read} · write: {policySides(r.gov.policy).write}
+                          Read: {readText(r.gov.policy)} · write: {writeText(r.gov.policy)}
                         </span>
                       )}
                     </td>
-                    <td className="num">{r.gov && isMemberspace(r.gov.policy) ? `${fmtNum(r.gov.members.length)}${r.gov.more ? '+' : ''}` : '—'}</td>
+                    <td className="num">{r.gov?.memberList ? `${fmtNum(r.gov.members.length)}${r.gov.more ? '+' : ''}` : '—'}</td>
                     <td className="num">{r.gov ? writers(r.gov) : '—'}</td>
-                    <td className="hide-sm">{r.gov ? `${policyKind(r.gov.policy)}: ${policyText(r.gov.policy)}` : '—'}</td>
+                    <td className="hide-sm">{r.gov ? `${readText(r.gov.policy)} · ${writeText(r.gov.policy)}` : '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -262,12 +257,10 @@ function Overview({ sess }: { sess: OAuthSession }) {
   )
 }
 
-/** Who can write besides the owner: members with write, anyone under public write, or the managing app's say. */
+/** Who can write besides the owner: members with write, everyone (publicWrite), an app, or no one. */
 function writers(g: Governance): string {
-  const p = g.policy
-  if (p.$type === MANAGED_POLICY) return 'app'
-  if (!isMemberspace(p)) return '—'
-  if (p.publicWrite) return 'anyone'
+  if (!g.memberList) return g.policy.managingApp ? 'app' : '—'
+  if (g.policy.publicWrite) return 'anyone'
   return `${fmtNum(g.members.filter((m) => m.write).length)}${g.more ? '+' : ''}`
 }
 
@@ -445,15 +438,11 @@ function Governed({ sess, s, gov, reload }: { sess: OAuthSession; s: SpaceRef; g
     reload()
   })
   const controls = manage && granted
-  const member = isMemberspace(gov.policy)
-  const sides = policySides(gov.policy)
-  const published = publishedText(gov.policy)
-  const apps = gov.policy.allowedApps
   return (
     <>
       <Panel
-        title={member ? 'Members' : 'Policy'}
-        desc={`${policyKind(gov.policy)}${member ? ` · ${fmtNum(gov.members.length)}${gov.more ? '+' : ''} ${gov.members.length === 1 ? 'member' : 'members'}` : ''}. Read: ${sides.read}. Write: ${sides.write}.`}
+        title="Members"
+        desc={`${gov.memberList ? `${fmtNum(gov.members.length)}${gov.more ? '+' : ''} ${gov.members.length === 1 ? 'member' : 'members'}. ` : ''}Read: ${readText(gov.policy)}. Write: ${writeText(gov.policy)}.`}
         actions={
           !manage && (
             <button type="button" className="btn sm" name="spaces-manage" onClick={() => setManage(true)}>
@@ -464,14 +453,10 @@ function Governed({ sess, s, gov, reload }: { sess: OAuthSession; s: SpaceRef; g
         flush
         id="space-members"
       >
-        {!member ? (
-          <p className="small muted panel-foot">
-            {gov.policy.$type === MANAGED_POLICY
-              ? `${gov.policy.managingApp} decides who may read and write.`
-              : gov.policy.$type === PERSONAL_POLICY
-                ? 'Only you can read and write in this space.'
-                : 'This space has no member list.'}
-          </p>
+        {!gov.memberList ? (
+          <Empty title={gov.policy.managingApp ? 'An app decides who is in this space' : 'No member list'}>
+            {gov.policy.managingApp ? <span className="mono break">{gov.policy.managingApp}</span> : 'Only you can read and write here.'}
+          </Empty>
         ) : gov.members.length === 0 ? (
           <Empty title="No members yet" />
         ) : (
@@ -510,8 +495,7 @@ function Governed({ sess, s, gov, reload }: { sess: OAuthSession; s: SpaceRef; g
             </table>
           </div>
         )}
-        {member && apps && <p className="small muted panel-foot">Apps allowed: {apps.join(', ') || 'none'}</p>}
-        {published && <p className="small muted panel-foot">{published}</p>}
+        {gov.policy.allowedApps && <p className="small muted panel-foot">Apps allowed: {gov.policy.allowedApps.join(', ') || 'none'}</p>}
       </Panel>
       {manage && !granted && (
         <Panel title="Manage this space" id="space-grant">
@@ -535,7 +519,7 @@ function Governed({ sess, s, gov, reload }: { sess: OAuthSession; s: SpaceRef; g
           </div>
         </Panel>
       )}
-      {controls && member && <AddMember sess={sess} s={s} reload={reload} />}
+      {controls && gov.memberList && <AddMember sess={sess} s={s} reload={reload} />}
       {controls && <DeleteSpace sess={sess} s={s} />}
       <Confirm
         open={!!removing}

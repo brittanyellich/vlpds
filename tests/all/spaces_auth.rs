@@ -174,7 +174,7 @@ async fn credential_cache_hits_still_check_signatures() {
     r.err(401, "BadSpaceSignature");
     // cached, signed for one audience and sent with another
     let mut rb = a.srv.http.get(&get);
-    for (k, v) in a.holder.headers(&cred, &a.did) {
+    for (k, v) in a.holder.headers(&format!("Atproto-Space-Credential {cred}"), &a.did) {
         let v = if k == "atproto-space-audience" { "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa".to_string() } else { v };
         rb = rb.header(k, v);
     }
@@ -248,7 +248,7 @@ async fn revocation_is_durable_scoped_and_authorized() {
     revoke(&first, &stub.service_jwt("did:plc:aaaaaaaaaaaaaaaaaaaaaaaa", REVOKE), &sp1, &["j1"])
         .await
         .err(403, "Forbidden");
-    let frag = format!("{}#atproto_pds", m.did);
+    let frag = format!("{}#atproto_space_host", m.did);
     revoke(&first, &stub.service_jwt(&frag, REVOKE), &sp1, &["j1"]).await.err(403, "Forbidden");
     let wrong_lxm = stub.service_jwt(&m.did, "com.atproto.space.notifyWrite");
     revoke(&first, &wrong_lxm, &sp1, &["j1"]).await.err(401, "BadJwtLexiconMethod");

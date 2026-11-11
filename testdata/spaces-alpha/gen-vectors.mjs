@@ -1,8 +1,9 @@
 // Generates vectors.json from the reference implementation (@atproto/space).
-// Run in a directory with the release in SOURCE installed:
-//   npm install --save-exact @atproto/space@<version> @atproto/crypto@<version> \
-//     @atproto/lex-data@<version> @atproto/lex-cbor@<version>
-//   node gen-vectors.mjs > vectors.json
+// Run in packages/space of a built bluesky-social/atproto checkout at the
+// commit in SOURCE, e.g. in the harness's reference image (bench/spaces/refpds.sh):
+//   docker run --rm --entrypoint node -w /app/packages/space \
+//     -v "$PWD/gen-vectors.mjs:/app/packages/space/gen-vectors.mjs:ro" \
+//     vlpds-spaces-refpds:<pin> gen-vectors.mjs > vectors.json
 // Keys are fixed and both curves sign with RFC 6979, so the output is
 // deterministic; Date.now is pinned for the tokens (jti stays random).
 import { P256Keypair, Secp256k1Keypair, sha256 } from '@atproto/crypto'
@@ -12,35 +13,41 @@ import {
   COMMIT_MAC_TYPE,
   LtHash,
   RECORD_MAC_TYPE,
-  REPO_STAR_TYPE,
   RepoCommit,
   computeCommitMac,
   computeRecordMac,
   createSpaceSigHeaders,
   createSpaceToken,
   decapsulate,
-  encapsulate,
   formatMacHeader,
   formatSetHashElement,
   formatWantMacHeader,
+  parseMacHeader,
+  parseWantMacHeader,
+  readSpaceMetaStar,
   serializeRecord,
   serializeRepo,
+  serializeSpaceMeta,
   verifyCommit,
   verifyCredentialSig,
-  verifyRepoStarFull,
+  verifyRecordMac,
   verifySpaceToken,
-} from '@atproto/space'
+} from './dist/index.js'
 
 const hex = (b) => Buffer.from(b).toString('hex')
 const seed = async (label) => sha256(new TextEncoder().encode(label))
-const p256 = async (label) => P256Keypair.import(await seed(label), { exportable: true })
+const concat = async (gen) => {
+  const parts = []
+  for await (const p of gen) parts.push(p)
+  return Buffer.concat(parts)
+}
 
 const NOW_SEC = 1790000000
 Date.now = () => NOW_SEC * 1000
 
 const out = { now: NOW_SEC }
 
-// LtHash (unchanged since the October 1 release)
+// LtHash
 const lthash = []
 const seq = (ops) => {
   const h = new LtHash()
@@ -63,16 +70,30 @@ for (const ops of [
 }
 out.lthash = lthash
 
-// Commits: element, toCommit, the commit's DRISL and its STAR metadata
+// KEM: the repo host's side (decapsulate) for fixed keys. The syncer's side
+// derives the same secret from the other private key.
+const kem = []
+for (const label of ['a', 'b']) {
+  const authorSeed = await seed(`vlpds spaces kem author ${label}`)
+  const syncerSeed = await seed(`vlpds spaces kem syncer ${label}`)
+  const author = await P256Keypair.import(authorSeed)
+  const syncer = await P256Keypair.import(syncerSeed)
+  kem.push({
+    authorPrivate: hex(authorSeed),
+    authorKey: author.did(),
+    syncerPrivate: hex(syncerSeed),
+    keyShare: syncer.did(),
+    sharedSecret: hex(decapsulate(author, syncer.did())),
+  })
+}
+out.kem = kem
+
+// Commits and their MACs, with a fixed shared secret
 const CID_A = parseCid('bafyreidefdycgbfy3oglcb6ism3eqhyp5llsrpzxjsuac2gsy4mtrtx244')
 const CID_B = parseCid('bafyreidpw4cbv6gr4ukh33z23pvvrpr3wi4gnpmi4doamlsl3sa4rgri2a')
 const commits = []
-const commitObjs = []
 for (const [ctx, records] of [
-  [
-    { space: 'at://did:example:space/space/app.bsky.group/test', repo: 'did:example:alice', rev: '3kbcq3p7ad400' },
-    [['app.bsky.feed.post', '1', CID_A]],
-  ],
+  [{ space: 'at://did:example:space/space/app.bsky.group/test', repo: 'did:example:alice', rev: '3kbcq3p7ad400' }, [['app.bsky.feed.post', '1', CID_A]]],
   [
     { space: 'at://did:plc:asdf123/space/com.example.group/default', repo: 'did:plc:user1', rev: '3lzzzzzzzzz22' },
     [['n.c.a', '1', CID_A], ['n.c.b', '2', CID_B]],
@@ -81,85 +102,103 @@ for (const [ctx, records] of [
 ]) {
   const repo = new RepoCommit()
   for (const [c, r, cid] of records) repo.add(c, r, cid)
+  const sharedSecret = await seed(`shared secret ${ctx.rev}`)
   const commit = repo.toCommit(ctx)
-  commitObjs.push(commit)
+  const mac = computeCommitMac(sharedSecret, commit)
+  if (!verifyCommit(commit, { space: ctx.space, repo: ctx.repo, sharedSecret, mac })) {
+    throw new Error('commit vector does not verify')
+  }
+  const header = formatMacHeader(COMMIT_MAC_TYPE, mac)
+  if (hex(parseMacHeader(header, COMMIT_MAC_TYPE)) !== hex(mac)) throw new Error('mac header')
   commits.push({
-    ...ctx,
+    ctx,
     records: records.map(([c, r, cid]) => ({ collection: c, rkey: r, cid: cid.toString(), element: formatSetHashElement(c, r, cid) })),
     data: hex(commit.data),
-    cbor: hex(encode(commit)),
-    starMeta: hex(encode({ $type: REPO_STAR_TYPE, ...commit })),
+    sharedSecret: hex(sharedSecret),
+    mac: hex(mac),
+    macHeader: header,
   })
 }
 out.commits = commits
 
-// KEM: the reference's decapsulate with fixed keys on both sides
-const kem = []
-for (const [a, s] of [
-  ['vlpds spaces alpha kem author 1', 'vlpds spaces alpha kem syncer 1'],
-  ['vlpds spaces alpha kem author 2', 'vlpds spaces alpha kem syncer 2'],
-]) {
-  const author = await p256(a)
-  const syncer = await p256(s)
-  const sharedSecret = decapsulate(author, syncer.did())
-  // and the syncer's side agrees, with a fresh key
-  const enc = await encapsulate(author.did())
-  if (hex(decapsulate(author, enc.keyShare)) !== hex(enc.sharedSecret)) throw new Error('kem round trip')
-  kem.push({
-    authorPrivate: hex(await author.export()),
-    authorKem: author.did(),
-    syncerPrivate: hex(await syncer.export()),
-    keyShare: syncer.did(),
-    sharedSecret: hex(sharedSecret),
-  })
-}
-out.kem = kem
-
-// MACs and their headers
-const macs = { commits: [], records: [], wantMac: [] }
-for (const [i, commit] of commitObjs.entries()) {
-  const secret = await seed(`vlpds spaces alpha mac secret ${i}`)
-  const mac = computeCommitMac(secret, commit)
-  if (!verifyCommit(commit, { space: commit.space, repo: commit.repo, sharedSecret: secret, mac })) {
-    throw new Error('commit mac does not verify')
-  }
-  macs.commits.push({
-    secret: hex(secret),
-    commit: { ...commit, data: hex(commit.data) },
-    mac: hex(mac),
-    header: formatMacHeader(COMMIT_MAC_TYPE, mac),
-  })
-}
+const recordMacs = []
 for (const [uri, cid] of [
-  ['at://did:example:space/space/app.bsky.group/test/did:example:alice/app.bsky.feed.post/1', CID_A],
-  ['at://did:plc:asdf123/space/com.example.group/default/did:plc:user1/n.c.b/2', CID_B],
+  ['at://did:example:alice/space/did:example:space/app.bsky.group/test/app.bsky.feed.post/1', CID_A],
+  ['at://did:plc:user1/space/did:plc:asdf123/com.example.group/default/n.c.b/2', CID_B],
 ]) {
-  const secret = await seed(`vlpds spaces alpha record secret ${uri}`)
-  const mac = computeRecordMac(secret, uri, cid)
-  macs.records.push({ secret: hex(secret), uri, cid: cid.toString(), mac: hex(mac), header: formatMacHeader(RECORD_MAC_TYPE, mac) })
+  const sharedSecret = await seed(`record secret ${uri}`)
+  const mac = computeRecordMac(sharedSecret, uri, cid)
+  if (!verifyRecordMac(sharedSecret, uri, cid, mac)) throw new Error('record mac')
+  recordMacs.push({ uri, cid: cid.toString(), sharedSecret: hex(sharedSecret), mac: hex(mac), macHeader: formatMacHeader(RECORD_MAC_TYPE, mac) })
 }
+out.recordMacs = recordMacs
+
+const wantMac = []
 for (const type of [COMMIT_MAC_TYPE, RECORD_MAC_TYPE]) {
-  const keyShare = kem[0].keyShare
-  macs.wantMac.push({ type, keyShare, header: formatWantMacHeader(type, keyShare) })
+  const header = formatWantMacHeader(type, kem[0].keyShare)
+  if (parseWantMacHeader(header, type) !== kem[0].keyShare) throw new Error('want-mac header')
+  wantMac.push({ type, keyShare: kem[0].keyShare, header })
 }
-out.macs = macs
+out.wantMac = wantMac
+
+// STAR: a repo archive (getRepo) and a space meta archive (exportSpaceMeta)
+const star = []
+for (const [ctx, recs] of [
+  [{ space: 'at://did:plc:x/space/com.example.group/self', repo: 'did:plc:x', rev: '3kbcq3p7ad401' }, []],
+  [
+    { space: 'at://did:example:space/space/app.bsky.group/test', repo: 'did:example:alice', rev: '3kbcq3p7ad400' },
+    [
+      ['app.bsky.feed.post', '1', { $type: 'app.bsky.feed.post', text: 'one', createdAt: '2026-11-07T00:00:00.000Z' }],
+      ['app.bsky.feed.post', '2', { $type: 'app.bsky.feed.post', text: 'two', createdAt: '2026-11-07T00:00:01.000Z' }],
+      ['com.example.note', 'a', { $type: 'com.example.note', body: 'é ☃' }],
+    ],
+  ],
+]) {
+  const records = []
+  const repo = new RepoCommit()
+  for (const [c, r, v] of recs) {
+    const s = await serializeRecord(c, r, v)
+    repo.add(c, r, s.cid)
+    records.push({ ...s, value: v })
+  }
+  const commit = repo.toCommit(ctx)
+  const bytes = await concat(serializeRepo(commit, records))
+  star.push({
+    profile: 'atproto-space-repo',
+    ctx,
+    data: hex(commit.data),
+    records: records.map((r) => ({ path: `${r.collection}/${r.rkey}`, cid: r.cid.toString(), bytes: hex(r.bytes) })),
+    star: hex(bytes),
+  })
+}
+const metaSpace = 'at://did:plc:x/space/com.example.group/self'
+const metaBytes = await concat(
+  serializeSpaceMeta({
+    space: metaSpace,
+    policy: { $type: 'com.atproto.memberspace.policy', publicRead: false, publicWrite: false, publishPolicy: false, publishMembers: false },
+    policyState: [
+      { key: 'com.atproto.memberspace.member/did:plc:b', value: { $type: 'com.atproto.memberspace.member', read: true, write: false } },
+      { key: 'com.atproto.memberspace.member/did:plc:a', value: { $type: 'com.atproto.memberspace.member', read: true, write: true } },
+    ],
+    writers: [{ did: 'did:plc:a', rev: '3kbcq3p7ad422', data: await seed('writer a'), spaceRev: '3kbcq3p7ad432' }],
+  }),
+)
+const metaBack = await readSpaceMetaStar([metaBytes])
+if (metaBack.writers.length !== 1 || metaBack.policyState.length !== 2) throw new Error('space meta vector does not read back')
+star.push({ profile: 'atproto-space-meta', space: metaSpace, star: hex(metaBytes) })
+out.star = star
 
 // HTTP message signatures (P-256 did:key)
 const sigKey = await P256Keypair.import(await seed('vlpds spaces alpha http sig p256'))
 const httpsig = []
-for (const [credential, audience] of [
-  ['credential', 'did:example:repo'],
-  ['eyJhbGciOiJFUzI1NksifQ.e30.c2ln', 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'],
+for (const [authorization, audience] of [
+  ['Atproto-Space-Credential credential', 'did:example:repo'],
+  ['Atproto-Space-Credential eyJhbGciOiJFUzI1NksifQ.e30.c2ln', 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'],
+  ['atproto-space-credential lowercase', 'did:web:example.com'],
 ]) {
-  const authorization = `Atproto-Space-Credential ${credential}`
   const headers = await createSpaceSigHeaders(sigKey, { authorization, audience })
   await verifyCredentialSig(headers, sigKey.did())
-  const base = [
-    `"authorization": ${authorization}`,
-    `"atproto-space-audience": ${audience}`,
-    `"@signature-params": ("authorization" "atproto-space-audience");tag="atproto-space-credential"`,
-  ].join('\n')
-  httpsig.push({ keyDid: sigKey.did(), headers, base })
+  httpsig.push({ keyDid: sigKey.did(), headers })
 }
 out.httpsig = httpsig
 
@@ -182,38 +221,5 @@ await mk('credential', { iss: 'did:example:space', sub: SPACE, keyId: sigKey.did
 await mk('credential', { iss: 'did:example:space', sub: SPACE, keyId: sigKey.did(), expiresInSec: 3600 }, authority, {})
 await mk('credential', { iss: 'did:example:space', sub: SPACE, keyId: sigKey.did() }, authorityP256, {})
 out.tokens = tokens
-
-// STAR: serializeRepo's archives, read back by verifyRepoStarFull
-const star = []
-for (const [ctx, records] of [
-  [
-    { space: 'at://did:example:space/space/app.bsky.group/test', repo: 'did:example:alice', rev: '3kbcq3p7ad400' },
-    [
-      ['app.bsky.feed.post', '1', { $type: 'app.bsky.feed.post', text: 'one', createdAt: '2026-10-22T00:00:00.000Z' }],
-      ['app.bsky.feed.post', '2', { $type: 'app.bsky.feed.post', text: 'two', createdAt: '2026-10-22T00:00:01.000Z' }],
-      ['app.bsky.feed.like', '3kbcq3p7ad400', { $type: 'app.bsky.feed.like', n: 1 }],
-    ],
-  ],
-  [{ space: 'at://did:plc:x/space/com.example.group/self', repo: 'did:plc:x', rev: '3kbcq3p7ad401' }, []],
-]) {
-  const serialized = []
-  const repo = new RepoCommit()
-  for (const [c, r, v] of records) {
-    const s = await serializeRecord(c, r, v)
-    repo.add(c, r, s.cid)
-    serialized.push(s)
-  }
-  serialized.sort((a, b) => Buffer.compare(Buffer.from(`${a.collection}/${a.rkey}`), Buffer.from(`${b.collection}/${b.rkey}`)))
-  const commit = repo.toCommit(ctx)
-  const chunks = []
-  for await (const c of serializeRepo(commit, serialized)) chunks.push(c)
-  const bytes = Buffer.concat(chunks)
-  const secret = await seed(`vlpds spaces alpha star ${ctx.rev}`)
-  const mac = computeCommitMac(secret, commit)
-  const got = await verifyRepoStarFull([bytes], { space: ctx.space, repo: ctx.repo, sharedSecret: secret, mac })
-  if (got.records.length !== records.length) throw new Error('star round trip')
-  star.push({ commit: { ...commit, data: { $bytes: Buffer.from(commit.data).toString('base64').replace(/=+$/, '') } }, records: records.length, archive: hex(bytes) })
-}
-out.star = star
 
 console.log(JSON.stringify(out, null, 1))

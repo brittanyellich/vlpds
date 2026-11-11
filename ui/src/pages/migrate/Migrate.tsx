@@ -31,7 +31,7 @@ import {
   type StepId,
 } from './flow'
 import type { RecordCounts } from './count'
-import { BLOB_SCOPE, copySpace, NEW_SCOPE, OLD_SCOPE, plan, reasonOf, servesSpaces, spaceLabel, type SpaceMove, type SpacePlan } from './spaces'
+import { copySpace, newScope, OLD_SCOPE, plan, reasonOf, servesSpaces, spaceLabel, type SpaceMove, type SpacePlan } from './spaces'
 import { beginSignIn, clientInfo, finishSignIn, forgetAll, isCallback, OAuthSession, sweepKeys } from '../../lib/oauth'
 
 type Describe = { did: string; availableUserDomains: string[]; inviteCodeRequired?: boolean }
@@ -1440,8 +1440,7 @@ let madeKey: { did: string; privateHex: string; didKey: string } | undefined
 
 type Recommended = {
   alsoKnownAs: string[]
-  /** atproto_kem: the new host's Spaces key, carried into the PLC op with the rest */
-  verificationMethods: { atproto: string; atproto_kem?: string }
+  verificationMethods: { atproto: string }
   rotationKeys: string[]
   services: { atproto_pds: { type: string; endpoint: string } }
 }
@@ -1844,7 +1843,7 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
             update({ spaces: 'none', spaceMoves: [] })
             return
           }
-          const scope = plans.some((p) => p.blobs.length) ? `${NEW_SCOPE} ${BLOB_SCOPE}` : NEW_SCOPE
+          const scope = newScope(plans)
           if (!mine || !mine.grants(scope)) {
             if (mine) setError(narrowed)
             return setPhase({ at: 'sign-in-new', plans })
@@ -1946,7 +1945,7 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
               className="btn primary"
               name="spaces-sign-in-new"
               disabled={busy}
-              onClick={() => signIn('new', location.origin, phase.plans.some((p) => p.blobs.length) ? `${NEW_SCOPE} ${BLOB_SCOPE}` : NEW_SCOPE)}
+              onClick={() => signIn('new', location.origin, newScope(phase.plans))}
             >
               {busy && <Spinner />}
               Sign in at {here}

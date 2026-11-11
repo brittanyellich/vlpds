@@ -13,7 +13,7 @@ diagram:
     - { id: api, label: Apps · syncers, sub: "space.* · memberspace.*", at: [0, 5.5], size: [9, 3], tone: ink }
     - { id: fwd, label: Any node, sub: routes the call, at: [12, 5.5], size: [9, 3], tone: accent }
     - { id: as, label: Author's shard, sub: "sH · sR · sO · sP · sb · sc · sL", at: [25, 1], size: [11, 3], tone: accent }
-    - { id: hs, label: Authority's shard, sub: "sS · sM · sW · sQ · sN · sL", at: [25, 10], size: [11, 3], tone: accent }
+    - { id: hs, label: Authority's shard, sub: "sS · sM · sW · sQ · sN · sD · sL", at: [25, 10], size: [11, 3], tone: accent }
     - { id: fh, label: Firehose, sub: "merger · peers · backfill", at: [40, 0], size: [11, 2.6], tone: blue }
     - { id: log, label: "`log/` segments", sub: "private entries", at: [40, 5.2], size: [11, 3.2], shape: store, tone: amber }
   edges:
@@ -24,7 +24,7 @@ diagram:
     - { from: hs.r, to: log.l70, label: one entry }
     - { from: log.t, to: fh.b, label: empty frame · skipped, dash: true, tone: blue }
 facts:
-  - { value: "12", unit: families, label: of space rows, note: "six per author · five per authority · one index for both" }
+  - { value: "13", unit: families, label: of space rows, note: "six per author · six per authority · one index for both" }
   - { value: "0", unit: frames, label: per space entry, note: "a debug assertion refuses a space row with a frame", tone: blue }
   - { value: "2,048 B", label: LtHash state, note: "in every write's `sH` row · random, so it doesn't compress", tone: amber }
   - { value: "1", unit: control object, label: cluster-wide, note: "the revocations · written only when something is revoked", tone: violet }
@@ -46,12 +46,13 @@ hash collision fails loudly with `space id collision` instead of mixing two spac
 | `sH/{did}\0{sid}` | the author | the space repo head: URI, rev, LtHash state, record count, created |
 | `sR/{did}\0{sid}{coll}/{rkey}` | the author | CID, rev and record bytes, as `R/` holds them. The source of truth |
 | `sO/{did}\0{sid}{rev}{idx}` | the author | the oplog: action, collection, rkey, CID and prev CID. Kept 7 days |
-| `sP/{did}\0{sid}` | the author | the notifyWrite outbox: URI, repoRev and hash, one row per (repo, space) |
-| `sS/{auth}\0{sid}` | the authority | the space as JSON: URI, policies, created, and `deleted` for a tombstone |
-| `sM/{auth}\0{sid}{member}` | the authority | a member's read and write access |
-| `sW/{auth}\0{sid}{writer}` | the authority | writer state: repoRev, hash, spaceRev |
+| `sP/{did}\0{sid}` | the author | the notifyWrite outbox: URI, repoRev and data hash, one row per (repo, space) |
+| `sS/{auth}\0{sid}` | the authority | the space as JSON: URI, the policy (as on the wire, defaults filled in), created, and `deleted` for a tombstone. It also carries the closest `readPolicy`/`writePolicy`/`appAccess`, which an older build reads. A row from before space policies holds only those and decodes to the policy the reference's migration gives it |
+| `sM/{auth}\0{sid}{member}` | the authority | a member's read and write access. Read only under a `memberspace`, and wiped when the space changes policy |
+| `sW/{auth}\0{sid}{writer}` | the authority | writer state: repoRev, data hash, spaceRev |
 | `sQ/{auth}\0{sid}{spaceRev}` | the authority | the writer's DID, in `listRepos` order, and the spaceRev sequenced just before it. It holds each writer's latest state only, so the row before isn't always that one |
 | `sN/{auth}\0{sid}{service}` | the authority | a notify registration: endpoint and expiry (24 h) |
+| `sD/{auth}\0{sid}{service}` | the authority | a `notifySpaceDeleted` still owed to a registered service: the space URI, endpoint, expiry, attempt count and next try |
 | `sb/{did}\0{sid}{cid}\0{path}` | the author | a space record's blob ref, at the rev that wrote it. `space.listBlobs` scans it in CID order |
 | `sc/{did}\0{cid}\0{sid}{path}` | the author | the same ref, CID first, so the blob GC and `sync.getBlob` find a blob's space refs in one scan |
 | `sL/{did}\0{uri}\0{h\|s}` | the account | `listSpaces`'s index, in URI order: `h` for a repo the account holds, `s` for a live space it governs |
@@ -64,7 +65,8 @@ covers that authority's URIs only. With `spaceType` alone it seeks past each aut
 types, so a page reads its own rows plus about one per authority it skips.
 
 A deleted space keeps its `sS` tombstone so `getSpaceCredential` can answer `SpaceDeleted`. Its
-other host rows are swept, and a space created again at the same URI starts fresh. `deleteSpace`
+other host rows are swept, except the `sD` rows of services still owed a `notifySpaceDeleted`, and a
+space created again at the same URI starts fresh and drops those rows. `deleteSpace`
 and `deleteAccount` drop the `sb/` and `sc/` refs with the records.
 
 ## Private log entries
@@ -96,63 +98,64 @@ it, and isn't built.
 
 ## Moving a repo in
 
-`vlpds.space.importRepo` takes the STAR archive that `space.getRepo` serves on the old host
-(`application/octet-stream`). It takes a `space:` grant like any space write (an OAuth session's,
-or a scoped app password's), so an account moving in imports once it's active here (`/migrate`
-signs in with OAuth, which signs no deactivated account in). A commit carries no
-signature, so what's checked is that the archive is the account's own repo in that space and that
-its records are the repo its commit describes: the metadata must name the importing account and
-the space, the records come in strict path order (as the reference's `verifyRepoStarFull` reads
-them), each a DRISL map of at most 1 MiB whose CID is computed from its bytes, and at the end they
-must fold to the commit's `data` (`DigestMismatch` otherwise). They're staged as they stream in, in
-frameless entries of at most 1,000 rows or 4 MiB, under no head. One last entry on the repo's worker
-puts the head in at the commit's rev with an empty oplog, and the authority is owed a notify like
-after any write. The account's writes to that space are refused while it imports.
+`com.atproto.space.importRepo` takes the STAR archive that `space.getRepo` serves on the old host.
+The space comes from the archive's metadata, so the call has no query parameter. It's an OAuth call
+like any space write, so an account moving in imports once it's active here (OAuth signs no
+deactivated account in). The archive is the account's own data, uploaded with its own grant, so
+the import checks no signature, MAC or PLC history. It checks that the metadata names the
+authenticated account and that the records fold to the commit's `data`.
 
-Nothing of the body is read until the import is let in, so a stranger's archive can't cost the node
-memory first:
+The records stream in as the body arrives. Each must be canonical DRISL, and they must come in
+path order. They are staged in frameless entries of at most 1,000 rows or 4 MiB with no head over
+them. Once the set hash they fold to is the commit's `data`, one last entry on the repo's worker
+puts the head in. The repo gets a new rev after the archive's and after any rev held here, with the
+same data and an empty oplog, and the authority is owed a notify like after any write. The
+account's writes to that space are refused while it imports.
 
-- The grant must allow `create` in the space for some collection (a `space:` scope). Which
-  collections the records are in is checked as they come.
+Nothing of the body is read until the import is let in, so a stranger's archive can't cost the
+node memory first:
+
+- The grant must allow `create` in the space for some collection (a `space:` scope). Once the
+  metadata names the space, the grant must cover that space, and every record's collection must be
+  one the grant can `create` in.
 - An account gets 100 imports an hour (`space-import`), and runs 2 at once. A node runs 8, or as
   many as its import budget holds at their largest if that's fewer (one on the smallest budget,
   192 MiB, and two on a 7 GB VPS). Past that they get 503 `Overloaded` at once.
 - The import reserves what it can hold from the import budget, as `com.atproto.repo.importRepo`
-  does, and waits up to 30 s for room (then 503 `Overloaded`). That's ~11 MB for a chunked body
-  (a record twice and two staged batches). A body that declares its length reserves less.
+  does, and waits up to 30 s for room (then 503 `Overloaded`). A body that declares its length
+  reserves less.
 - A body that sends nothing for 30 s, or takes over an hour, fails and gives its slot and room
   back (as `com.atproto.repo.importRepo`'s does).
-- Every frame is refused from its length, before it's read. The metadata gets 4 KiB (a real one
-  is ~200 bytes), a record path 1 KiB, and a record 1 MiB, the archive profile's limit. The record
-  count is held to `--space-repo-max-records` as the records come.
+- Every STAR item is refused from its length, before it's read: 64 KiB for the metadata, 4 KiB for
+  a key and 1 MiB for a value. A repo past `--space-repo-max-records` is refused.
 
-- A rev more than 5 min in the future gets `FutureRev`.
-- When the space's authority is hosted here (on any node of the cluster), the rev can't be from
-  before the space was created (2 min of slack for clocks). A space deleted and made again is a new space, and a repo from the
-  old one doesn't come back into it.
-- When the space's authority is hosted here, the account must be allowed to write in the
-  space (`NotAuthorized` otherwise). An authority elsewhere refuses a non-writer's notify as it
-  would any write's.
+What the import refuses:
+
+- A rev more than 5 min in the future gets `FutureRev`, since the authorities would refuse every
+  notify of it.
+- When the space's authority is the importing account itself, its space must exist first
+  (`importSpaceMeta`), or the import gets `SpaceNotFound`.
+- The whole archive is read and checked before anything of the repo here changes: kept in memory
+  up to 8 MiB, past that in a temporary file, then staged from that copy. So a refused import
+  leaves the repo as it was. An authority refuses a non-writer's notify of the import as it would
+  any write's.
 - An import that fails clears what it staged. If the node dies part way, the rows it left have no
   head over them, so nothing serves them. The next import or the repo's first write clears them
   before it lands.
 - An import over a repo that's already here replaces it with the snapshot, as
-  `com.atproto.repo.importRepo` does for a public repo. The commit's rev must be newer than the repo's.
-  The first entry takes the old head away, the old rows go in bounded batches, the new ones are
-  staged, and the last entry puts the new head in. Reads see no repo in the space between the first
-  and last entries, so a syncer polling then gets `RepoNotFound` and falls back to `getRepo` after.
-- A retried import is the one exception to the newer rev. The same rev with the same records answers
-  200 and writes nothing: no log entry, no outbox row, no notify. The repo's head already holds the
-  set hash and the record count, so telling a retry apart costs no read past the one every import
-  makes. The same rev with other records is refused.
+  `com.atproto.repo.importRepo` does for a public repo. The first entry takes the old head away,
+  the old rows go in bounded batches, the new ones are staged, and the last entry puts the new head
+  in. Reads see no repo in the space between the first and last entries, so a syncer polling then
+  gets `RepoNotFound` and falls back to `getRepo` after.
 - A second import of the same space repo while one is running is refused, and so are the account's
   writes there.
-- The blobs the imported records name don't come with the archive. `repo.listMissingBlobs` lists them
-  next to the public repo's, with a space record URI for each, so the blob step of a move copies
-  them the same way.
+- The blobs the imported records name don't come with the archive. `repo.listMissingBlobs` lists
+  them next to the public repo's, with a space record URI for each, so the blob step of a move
+  copies them the same way.
 
-It takes an OAuth session that may create records in the space. Password sessions and app
-passwords can't import.
+`com.atproto.space.exportSpaceMeta` and `importSpaceMeta` carry the space itself: its policy,
+member list and writer set, as a STAR archive of type `atproto-space-meta`. A space's authority
+imports its meta on the new host before it imports its own repo.
 
 So a move has a short gap. Once the DID points here and the account is active, syncers that look the
 account up find this host, and it has none of the account's space repos until the import runs. They
@@ -161,29 +164,6 @@ see `RepoNotFound` for those spaces until then, and a syncer that missed the gap
 short, and `/migrate` does that. Its switch-over signs in with OAuth on both hosts and imports each
 space repo before it deactivates the old account ([Spaces](../migration.md#spaces) in the migration
 page).
-
-## Moving a space in
-
-An account that governs spaces brings them with it (the October 29 alpha's account migration). On
-the old host, `com.atproto.space.exportSpaceMeta` serves each space as a space meta archive: a STAR
-file with the `atproto-space-meta` profile holding the policy, the member list (a member space's
-only state) and the writer set, each writer at its spaceRev. Here, `com.atproto.space.importSpaceMeta`
-takes it before the account's own repo in that space, and replaces whatever this host held for the
-space: its policy, members and writers go in on the authority's repo worker in one entry, and a
-deleted space's tombstone is swept first, as `createSpace` sweeps it. The writers keep their
-spaceRevs, so a syncer's listRepos cursor from the old host still works here. Nothing is published
-(the policy and member records arrive in the authority's repo), and notification registrations,
-credential revocations and tombstones don't move. The archive is read whole, within
-`--max-import-mb`; a key out of order, an unknown policy (`UnsupportedPolicy`) or any policy state
-the policy doesn't define refuses all of it.
-
-Then `com.atproto.space.importRepo` takes each repo, as `vlpds.space.importRepo` does below, with
-the standard method's differences: the space is the archive's (no `space` parameter), the repo gets
-a new rev, newer than any it had here, over the archive's `data` (so a retry simply lands again), and
-the authority's own repo needs its space imported first (`SpaceNotFound`). Both standard imports take
-what the reference's `ACCESS_FULL` does: a password session, or OAuth with the grants they need
-(`manage=create` and `manage=update` for the space; `create` for every collection in a repo). App
-passwords can't. `exportSpaceMeta` is the owner's, with `read_self`, as `getSpace` is.
 
 ## Revocations
 
@@ -227,6 +207,7 @@ shard it no longer owns.
 - The oplog keeps 7 days (`--space-oplog-retention`, `off` keeps everything). Each node sweeps the
   shards it owns about every 6 h, one range scan per space repo, and deletes old ops in frameless
   entries of a bounded size. It never prunes on a write.
-- A space repo holds at most 100k records (`--space-repo-max-records`). `getRepo` streams it as a
-  STAR archive, one chunk at a time, in the order the store keeps the records.
+- A space repo holds at most 100k records (`--space-repo-max-records`). The cap bounds the work of
+  importing a repo and the size of its oplog. `getRepo` streams in one pass and holds no
+  per-repo state, so it doesn't depend on it.
 - `deleteAccount` sweeps every `s*` family for the DID, in frameless entries.

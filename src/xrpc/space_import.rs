@@ -1,29 +1,25 @@
-//! `vlpds.space.importRepo` (`--spaces`; DESIGN.md "Spaces", Q8): an
-//! account moving in brings its repo in a space as the STAR archive its old
-//! host's space.getRepo serves. There's no upstream import yet; this
-//! follows the plan's proposal and changes when the upstream contract
-//! settles.
+//! `com.atproto.space.importRepo` (`--spaces`): an account moving in
+//! brings its repo in a space as the STAR archive its old host's
+//! space.getRepo serves. The archive carries no MAC: it's the account's own
+//! data, uploaded with its own grant, so its records are checked against
+//! the commit's `data` and the commit must name the account, nothing more.
 //!
-//! It takes a `space:` grant like every space write (OAuth, or a scoped app
-//! password), so an account moving in imports once it's active here, after
-//! its DID points here. The archive's commit
-//! must name the account and the space; a commit carries no signature, so
-//! what's checked is that the records are the repo it describes: they
-//! stream in (paths in order, each record's CID computed from its bytes)
-//! and are staged in bounded frameless entries, folded into a set hash
-//! that must be the commit's `data` at the end. A final entry on the repo's
-//! worker then switches the head in at the commit's rev. The oplog stays
-//! empty (the spec lets a host drop ops: a syncer falls back to getRepo),
-//! and the authority is owed a notify like any write.
+//! It's OAuth-only like every space write, so an account moving in imports
+//! once it's active here, after its DID points here. The records stream in
+//! as the body arrives, each checked canonical and in path order, staged in
+//! bounded frameless entries with no head over them; once the set hash
+//! they fold to is the commit's, a final entry on the repo's worker puts
+//! the head in at a new rev (after the archive's and any held here). The
+//! oplog starts empty (a syncer reading from an older `since` gets the
+//! commit and no ops), and the authority is owed a notify like any write.
 //!
-//! An import over a repo that's there replaces it, as the public importRepo
-//! does: the claim's entry takes the old head away, the old rows are swept
-//! in bounded batches, and the new head goes in at the end. The worker
-//! refuses the account's writes to the space, and other imports of it,
-//! while it imports (`Spaces::begin_import`). An import stopped part way
-//! (or whose records don't match its commit) leaves staged rows no head
-//! names, which no read serves; they're cleared, and the next import of
-//! the space deletes any left first.
+//! An import over a repo that's there replaces it: the claim's entry takes
+//! the old head away, the old rows are swept in bounded batches, and the
+//! new head goes in at the end. The worker refuses the account's writes to
+//! the space, and other imports of it, while it imports
+//! (`Spaces::begin_import`). An import stopped part way leaves staged rows
+//! no head names, which no read serves; the next import of the space
+//! deletes them first.
 //!
 //! What a body can cost is bounded before any of it is read: the grant,
 //! the account's rate limit and slots, and a reservation from the import
@@ -33,48 +29,96 @@ use super::repo::check_path;
 use super::space::{spaces, submit_space, Space};
 use super::*;
 use crate::oauth::scopes::SpaceAccess;
+use crate::space::commit;
+use crate::space::lthash::LtHash;
 use crate::space::repo::{SpaceAck, SpaceError, SpaceOp};
 use crate::space::star;
 use vlatproto::tid::Tid;
 
 pub fn routes() -> Router<Arc<App>> {
-    Router::new()
-        .route("/xrpc/vlpds.space.importRepo", post(import_repo))
-        .route("/xrpc/com.atproto.space.importRepo", post(import_repo_standard))
+    Router::new().route("/xrpc/com.atproto.space.importRepo", post(import_repo))
 }
 
 /// Rows per staged entry, or fewer at [`BATCH_BYTES`].
 const BATCH_ROWS: usize = 1000;
 const BATCH_BYTES: usize = 4 << 20;
-/// The metadata, a commit (~200 bytes) with its `$type`.
-const MAX_META: usize = star::MAX_META_LENGTH as usize;
-/// A record path: an NSID and a record key.
-const MAX_PATH: usize = star::MAX_KEY_LENGTH as usize;
-/// What an import holds besides its frames: tasks, the reader, the claim.
+/// What an import holds besides its records: tasks, the reader, the claim.
 const FIXED: u64 = 256 << 10;
 
 /// What an import of a `declared`-byte body (None: unknown) holds at most:
-/// a record twice (the reader's buffer and its copy), and a staged batch
+/// a record twice (the reader's buffer and its copy) and a staged batch
 /// with its rows' keys while the next one fills. Every frame is capped
 /// before it's buffered, and a body declared smaller caps them more.
 fn working_set(declared: Option<u64>) -> u64 {
     let body = declared.unwrap_or(u64::MAX);
-    let record = (star::MAX_RECORD_SIZE as u64).min(body);
+    let record = ((star::LIMITS.value + star::LIMITS.key) as u64).min(body);
     let batch = (BATCH_BYTES as u64).min(body) + BATCH_ROWS as u64 * 400;
-    FIXED + 2 * record + 2 * batch
-}
-
-fn bad(error: &str, m: impl Into<String>) -> XrpcError {
-    XrpcError::bad(error, m)
+    FIXED + 3 * record + 2 * batch + (KEEP_IN_MEMORY as u64).min(body)
 }
 
 fn invalid(m: impl Into<String>) -> XrpcError {
-    bad("InvalidRequest", m)
+    XrpcError::bad("InvalidRequest", m)
 }
 
-/// A STAR archive read frame by frame as the body arrives.
-struct StarReader {
-    body: super::import_stream::TimedBody,
+/// A STAR archive read item by item as the body arrives.
+/// Where a [`StarBody`] reads: the request body (kept for a second pass,
+/// in memory up to [`KEEP_IN_MEMORY`], then in a temporary file), or that
+/// copy.
+enum Source {
+    Body { body: super::import_stream::TimedBody, kept: Kept },
+    Mem(Vec<u8>),
+    File { file: tokio::fs::File, _unlink: Unlink },
+}
+
+/// The body as read so far.
+enum Kept {
+    Mem(Vec<u8>),
+    File(tokio::fs::File, Unlink),
+}
+
+/// A body past this is kept on disk for the second pass.
+const KEEP_IN_MEMORY: usize = 8 << 20;
+const REPLAY_CHUNK: usize = 1 << 20;
+
+/// Deletes the temporary file however the import ends.
+struct Unlink(std::path::PathBuf);
+
+impl Drop for Unlink {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+impl Kept {
+    async fn push(&mut self, chunk: &[u8]) -> XResult<()> {
+        use tokio::io::AsyncWriteExt;
+        if let Kept::Mem(v) = self {
+            if v.len() + chunk.len() <= KEEP_IN_MEMORY {
+                v.extend_from_slice(chunk);
+                return Ok(());
+            }
+            let path = std::env::temp_dir().join(format!("vlpds-space-import-{:016x}.star", rand::random::<u64>()));
+            let unlink = Unlink(path.clone());
+            let mut f = tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .await
+                .map_err(|_| XrpcError::internal("could not buffer the import body"))?;
+            f.write_all(v).await.map_err(|_| XrpcError::internal("could not buffer the import body"))?;
+            *self = Kept::File(f, unlink);
+        }
+        if let Kept::File(f, _) = self {
+            f.write_all(chunk).await.map_err(|_| XrpcError::internal("could not buffer the import body"))?;
+        }
+        Ok(())
+    }
+}
+
+struct StarBody {
+    src: Source,
+    reader: star::Reader,
     buf: Vec<u8>,
     pos: usize,
     total: usize,
@@ -82,182 +126,107 @@ struct StarReader {
     eof: bool,
 }
 
-impl StarReader {
-    fn new(body: super::import_stream::TimedBody, max: usize) -> StarReader {
-        StarReader { body, buf: Vec::new(), pos: 0, total: 0, max, eof: false }
+impl StarBody {
+    fn new(body: super::import_stream::TimedBody, max: usize) -> StarBody {
+        StarBody::over(Source::Body { body, kept: Kept::Mem(Vec::new()) }, max)
     }
 
-    /// Whether `n` unread bytes are buffered, reading more as needed.
-    async fn fill(&mut self, n: usize) -> XResult<bool> {
-        while self.buf.len() - self.pos < n {
-            if self.eof {
-                return Ok(false);
-            }
-            if self.pos > 0 && self.pos * 2 >= self.buf.len() {
-                self.buf.drain(..self.pos);
-                self.pos = 0;
-            }
-            match self.body.next().await {
-                Some(Ok(chunk)) => {
-                    self.total += chunk.len();
-                    if self.total > self.max {
-                        return Err(super::import_stream::too_large(self.max));
-                    }
-                    self.buf.extend_from_slice(&chunk);
-                }
-                Some(Err(e)) => return Err(e),
-                None => self.eof = true,
-            }
-        }
-        Ok(true)
+    fn over(src: Source, max: usize) -> StarBody {
+        StarBody { src, reader: star::Reader::new(star::LIMITS), buf: Vec::new(), pos: 0, total: 0, max, eof: false }
     }
 
-    async fn magic(&mut self) -> XResult<()> {
-        if !self.fill(star::MAGIC.len()).await? || self.buf[self.pos..self.pos + 4] != star::MAGIC {
-            return Err(invalid("invalid STAR archive: invalid magic bytes"));
-        }
-        self.pos += star::MAGIC.len();
-        Ok(())
-    }
-
-    async fn pair(&mut self) -> XResult<bool> {
-        if !self.fill(1).await? {
-            return Err(invalid("invalid STAR archive: unexpected end of archive"));
-        }
-        let control = self.buf[self.pos];
-        self.pos += 1;
-        match control {
-            1 => Ok(true),
-            0 => {
-                if self.fill(1).await? {
-                    return Err(invalid("invalid STAR archive: unexpected bytes after end of archive"));
-                }
-                Ok(false)
-            }
-            _ => Err(invalid("invalid STAR archive: invalid control byte")),
-        }
-    }
-
-    /// The next length-prefixed frame, None at the end (which only a pair
-    /// boundary may be). One longer than `max` is refused from its length,
-    /// before any of it is buffered.
-    async fn frame(&mut self, max: usize, what: &str) -> XResult<Option<Vec<u8>>> {
-        if !self.fill(1).await? {
-            return Ok(None);
-        }
-        let (len, n) = loop {
-            match star::read_varint(&self.buf[self.pos..]) {
-                Ok(Some(v)) => break v,
-                Ok(None) => {}
-                Err(e) => return Err(invalid(format!("invalid STAR archive: {e}"))),
-            }
-            let have = self.buf.len() - self.pos;
-            if !self.fill(have + 1).await? {
-                return Err(invalid("invalid STAR archive: unexpected end of archive"));
+    /// A reader over the body this one read whole, from its start.
+    async fn replay(self) -> XResult<StarBody> {
+        use tokio::io::AsyncSeekExt;
+        let Source::Body { kept, .. } = self.src else { return Err(XrpcError::internal("not a request body")) };
+        let src = match kept {
+            Kept::Mem(v) => Source::Mem(v),
+            Kept::File(mut f, unlink) => {
+                f.seek(std::io::SeekFrom::Start(0)).await.map_err(XrpcError::from_err)?;
+                Source::File { file: f, _unlink: unlink }
             }
         };
-        if len > max as u64 {
-            return Err(invalid(format!("invalid STAR archive: the {what} is over {max} bytes")));
+        Ok(StarBody::over(src, self.max))
+    }
+
+    /// The next item, None once the archive has ended cleanly.
+    async fn next(&mut self) -> XResult<Option<star::Item>> {
+        loop {
+            let bad = |e: star::StarError| invalid(format!("Invalid STAR: {e}"));
+            if let Some((item, n)) = self.reader.step(&self.buf[self.pos..], self.eof).map_err(bad)? {
+                self.pos += n;
+                if item == star::Item::End {
+                    // whatever follows the end byte is refused
+                    while !self.eof {
+                        self.read().await?;
+                    }
+                    self.reader.step(&self.buf[self.pos..], true).map_err(bad)?;
+                    return Ok(None);
+                }
+                return Ok(Some(item));
+            }
+            if self.eof {
+                return Ok(None);
+            }
+            self.read().await?;
         }
-        self.pos += n;
-        if !self.fill(len as usize).await? {
-            return Err(invalid("invalid STAR archive: unexpected end of archive"));
+    }
+
+    async fn read(&mut self) -> XResult<()> {
+        if self.pos > 0 && self.pos * 2 >= self.buf.len() {
+            self.buf.drain(..self.pos);
+            self.pos = 0;
         }
-        let out = self.buf[self.pos..self.pos + len as usize].to_vec();
-        self.pos += len as usize;
-        Ok(Some(out))
+        let chunk = match &mut self.src {
+            Source::Body { body, kept } => match body.next().await {
+                Some(Ok(chunk)) => {
+                    if self.total + chunk.len() > self.max {
+                        return Err(super::import_stream::too_large(self.max));
+                    }
+                    kept.push(&chunk).await?;
+                    chunk.to_vec()
+                }
+                Some(Err(e)) => return Err(e),
+                None => Vec::new(),
+            },
+            Source::Mem(v) => std::mem::take(v),
+            Source::File { file, .. } => {
+                use tokio::io::AsyncReadExt;
+                let mut c = vec![0; REPLAY_CHUNK];
+                let n = file.read(&mut c).await.map_err(XrpcError::from_err)?;
+                c.truncate(n);
+                c
+            }
+        };
+        if chunk.is_empty() {
+            self.eof = true;
+        }
+        self.total += chunk.len();
+        self.buf.extend_from_slice(&chunk);
+        Ok(())
     }
 }
 
-/// A record's blob refs, once its size and encoding are checked.
+/// A record's blob refs, once its encoding is checked canonical: it's
+/// stored as is, so another encoding of it would match neither its CID nor
+/// the commit.
 fn record_blobs(path: &str, bytes: &[u8]) -> XResult<Vec<Cid>> {
-    if bytes.len() > star::MAX_RECORD_SIZE {
-        return Err(invalid(format!("record at '{path}' too large ({} bytes)", bytes.len())));
+    let v =
+        vlatproto::cbor::Value::decode(bytes).map_err(|_| invalid(format!("Could not parse record at '{path}'")))?;
+    let mut again = Vec::with_capacity(bytes.len());
+    v.encode(&mut again);
+    if again != bytes {
+        return Err(invalid(format!("Invalid STAR: record is not canonical DRISL at {path}")));
     }
     vlatproto::cbor::scan_blob_refs(bytes).map_err(|_| invalid(format!("Could not parse record at '{path}'")))
 }
 
-/// An authority hears of an import as of any write and refuses a
-/// non-writer then, but by that time the repo is in; when this cluster
-/// hosts the authority, it's refused up front. Run at the owner of the
-/// authority's shard (a shard nobody holds right now is refused for a
-/// retry, never skipped).
-///
-/// `require_space` (com.atproto.space.importRepo): the authority's own
-/// repo comes only after its space (importSpaceMeta), else SpaceNotFound.
-async fn authority_check(app: &App, space: &Space, did: &str, rev: Tid, require_space: bool) -> XResult<()> {
-    app.partition(&space.authority)?;
-    let own = require_space && did == space.authority;
-    // (no row: the authority moved in without its spaces; its own repos
-    // come first)
-    if super::server::account_if_exists(app, &space.authority).await?.is_none() {
-        return Ok(());
-    }
-    let Some(row) = super::space_policy::space_row_opt(app, space).await? else {
-        return match own {
-            true => Err(super::space_policy::space_not_found()),
-            false => Ok(()),
-        };
-    };
-    if !row.live() {
-        return Err(super::space_policy::space_not_found());
-    }
-    // a repo from before the space was (re)created belongs to an
-    // incarnation that was deleted: importing it would bring that back
-    if rev.micros() + CREATED_SLACK_MICROS < created_micros(&row.created_at)? {
-        return Err(invalid("the imported commit predates the space (it was deleted and made again since)"));
-    }
-    if !super::space_policy::authorize_user(app, space, &row, did, "write", None).await? {
-        return Err(bad("NotAuthorized", "Not a member allowed to write in this space"));
-    }
-    Ok(())
-}
-
-#[derive(Deserialize)]
-pub(super) struct CheckQ {
-    space: String,
-    did: String,
-    rev: String,
-    #[serde(default)]
-    require_space: bool,
-}
-
-/// [`authority_check`] for an import on another node of the cluster.
-pub(super) async fn internal_import_check(
-    State(app): AppState,
-    headers: HeaderMap,
-    Query(q): Query<CheckQ>,
-) -> XResult<Json<J>> {
-    super::internal::check(&app, &headers)?;
-    let space = Space::parse(&q.space)?;
-    let rev = Tid::parse(&q.rev).ok_or_else(|| invalid("rev must be a TID"))?;
-    authority_check(&app, &space, &q.did, rev, q.require_space).await?;
-    Ok(Json(json!({})))
-}
-
-/// How far a repo's rev may be before its space's `createdAt`: the
-/// writer's clock and the authority's needn't agree.
-const CREATED_SLACK_MICROS: u64 = 120_000_000;
-
-/// A space row's `createdAt`, in Unix microseconds.
-fn created_micros(at: &str) -> XResult<u64> {
-    chrono::DateTime::parse_from_rfc3339(at)
-        .ok()
-        .and_then(|t| u64::try_from(t.timestamp_micros()).ok())
-        .ok_or_else(|| XrpcError::internal("bad space createdAt"))
-}
-
-#[derive(Deserialize)]
-struct ImportQ {
-    space: String,
-}
-
 /// Releases the import's claim however it ends.
-struct Claim<'a> {
-    sp: &'a crate::space::Spaces,
-    did: &'a str,
-    sid: crate::state::SpaceId,
-    nonce: u64,
+pub(super) struct Claim<'a> {
+    pub(super) sp: &'a crate::space::Spaces,
+    pub(super) did: &'a str,
+    pub(super) sid: crate::state::SpaceId,
+    pub(super) nonce: u64,
 }
 
 impl Drop for Claim<'_> {
@@ -266,67 +235,24 @@ impl Drop for Claim<'_> {
     }
 }
 
-fn import_result<T>(r: &XResult<T>) {
-    crate::metrics::space_import(match r {
+async fn import_repo(State(app): AppState, Auth(creds): Auth, headers: HeaderMap, body: Body) -> XResult<StatusCode> {
+    let r = import(&app, &creds, &headers, body).await;
+    crate::metrics::space_import(match &r {
         Ok(_) => "ok",
         Err(e) if e.status.is_server_error() => "error",
         Err(_) => "refused",
     });
+    r.map(|_| StatusCode::OK)
 }
 
-async fn import_repo(
-    State(app): AppState,
-    Auth(creds): Auth,
-    Query(q): Query<ImportQ>,
-    headers: HeaderMap,
-    body: Body,
-) -> XResult<Json<J>> {
-    let r = import(&app, &creds, Some(&q.space), &headers, body)
-        .await
-        .map(|(rev, records)| Json(json!({"rev": rev.to_string(), "records": records})));
-    import_result(&r);
-    r
-}
-
-/// Reference com.atproto.space.importRepo (account migration): the space
-/// is the archive's; a full-access session or OAuth (a `create` grant per
-/// collection); the repo gets a new rev with the archive's `data`,
-/// replacing what was here, so a retry lands the same. The authority's
-/// own repo needs its space imported first (SpaceNotFound).
-async fn import_repo_standard(
-    State(app): AppState,
-    Auth(creds): Auth,
-    headers: HeaderMap,
-    body: Body,
-) -> XResult<StatusCode> {
-    let r = import(&app, &creds, None, &headers, body).await.map(|_| StatusCode::OK);
-    import_result(&r);
-    r
-}
-
-/// `space`: vlpds.space.importRepo's, the archive's commit at its own rev.
-/// None: com.atproto.space.importRepo's, at a new rev.
-async fn import(
-    app: &Arc<App>,
-    creds: &Credentials,
-    space_q: Option<&str>,
-    headers: &HeaderMap,
-    body: Body,
-) -> XResult<(Tid, u64)> {
+async fn import(app: &Arc<App>, creds: &Credentials, headers: &HeaderMap, body: Body) -> XResult<()> {
     let sp = spaces(app)?;
-    let standard = space_q.is_none();
     let did = creds.user_did()?.to_string();
-    // Everything before the body is read: a grant that writes in the space
-    // (OAuth, as every space write: need_space refuses anything else; the
-    // standard method also takes a full-access session, and learns its
-    // space from the archive), the account's budget and slot, and the
-    // import's memory. Which collections it writes is checked as its
-    // records come in.
-    let named = space_q.map(Space::parse).transpose()?;
-    match &named {
-        Some(space) => creds.need_space(&space.target(), SpaceAccess::WriteAny("create"))?,
-        None => super::space_migrate::import_credentials(creds)?,
-    }
+    // Everything before the body is read: an OAuth grant that writes in
+    // some space (need_space refuses anything else), the account's budget
+    // and slot, and the import's memory. The archive names the space, and
+    // which collections it writes are checked as its records arrive.
+    creds.need_any_space_write()?;
     let max = app.config.max_import_bytes;
     let declared =
         headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
@@ -347,81 +273,53 @@ async fn import(
     })?;
     let _room = app.imports.admit_working_set(working_set(declared)).await?;
     let body = super::import_stream::TimedBody::new(body, app.config.import_body_idle, app.config.import_body_deadline);
-    let mut star = StarReader::new(body, max);
-    star.magic().await?;
-    let meta =
-        star.frame(MAX_META, "metadata").await?.ok_or_else(|| invalid("invalid STAR archive: missing metadata"))?;
-    let commit = star::parse_meta(&meta).map_err(|e| invalid(format!("invalid STAR archive: {e}")))?;
-    if commit.ver != crate::space::commit::COMMIT_VERSION {
-        return Err(invalid(format!("unsupported commit version {}", commit.ver)));
-    }
-    let space = match named {
-        Some(s) => s,
-        None => {
-            let s = Space::parse(&commit.space)?;
-            super::space_migrate::need_import_grant(creds, &s, SpaceAccess::WriteAny("create"))?;
-            s
-        }
+    let mut star = StarBody::new(body, max);
+    let meta = match star.next().await? {
+        Some(star::Item::Meta(m)) => m,
+        _ => return Err(invalid("Invalid STAR: missing metadata")),
     };
-    if commit.repo != did || commit.space != space.uri {
+    let c = star::parse_repo_meta(&meta).map_err(|e| invalid(format!("Invalid STAR: {e}")))?;
+    if c.repo != did {
         return Err(invalid("Repo does not match the authenticated account"));
+    }
+    let space = Space::parse(&c.space)?;
+    creds.need_space(&space.target(), SpaceAccess::WriteAny("create"))?;
+    // the authority's own repo comes after its space (importSpaceMeta)
+    if space.authority == did && !super::space_policy::live_space(app, &space).await.is_ok() {
+        return Err(super::space_policy::space_not_found());
+    }
+    let floor = Tid::parse(&c.rev);
+    // the repo's new rev comes after this one: past the authorities'
+    // FutureRev window, every notify of it would be refused
+    if floor.is_some_and(|r| r.micros() > vlatproto::tid::now_micros() + super::space::FUTURE_REV.as_micros() as u64) {
+        return Err(XrpcError::bad("FutureRev", "The archive's rev is in the future"));
     }
     // (the worker checks again)
     let held = super::space::load_head(sp, &*app.partition(&did)?, &did, &space).await?;
-    if commit.data.len() != 32 {
-        return Err(invalid("commit.data must be 32 bytes"));
+    let prev = held.as_ref().map(|h| h.rev).max(floor);
+
+    // the whole archive is checked before anything of the repo here is
+    // touched, so a refused import leaves it as it was
+    let (set, _) = stage(None, creds, &did, &space, &mut star, sp.limits.max_records).await?;
+    if !commit::matches(&set, &c) {
+        return Err(invalid("Invalid STAR: the records do not match the commit's data"));
     }
-    let mut rev = Tid::parse(&commit.rev).ok_or_else(|| invalid("commit.rev must be a TID"))?;
-    if standard {
-        // a new rev, newer than any the repo had here, over the same data
-        rev = app.tids.next();
-        if let Some(h) = held.as_ref().filter(|h| h.rev >= rev) {
-            rev = Tid(h.rev.0 + (1 << 10));
-        }
-    }
-    match app.remote_owner(&space.authority) {
-        Some(owner) => {
-            let rev_s = rev.to_string();
-            let mut q = vec![("space", space.uri.as_str()), ("did", did.as_str()), ("rev", rev_s.as_str())];
-            if standard {
-                q.push(("require_space", "true"));
-            }
-            super::internal::owner_get(app, &owner, "/internal/v1/space/importCheck", &q).await?;
-        }
-        None => authority_check(app, &space, &did, rev, standard).await?,
-    }
-    // every later write's rev follows it, and an authority refuses a
-    // notify this far ahead (FutureRev), so the account would go unheard
-    if rev.micros() > vlatproto::tid::now_micros() + super::space::FUTURE_REV.as_micros() as u64 {
-        return Err(bad("FutureRev", "The commit's rev is in the future"));
-    }
-    // an equal rev is let through here only to be checked for the same
-    // content below
-    if held.as_ref().is_some_and(|h| rev < h.rev) {
-        return Err(invalid("the imported commit's rev must be newer than the repo's in the space"));
-    }
-    let limits = Limits { max_records: sp.limits.max_records, creds, space: &space };
-    if let Some(h) = held.filter(|h| h.rev == rev && !standard) {
-        // a retried import of the repo as it stands: the set hash covers
-        // every (path, CID), so an equal digest and count is the same records
-        if h.hash.digest()[..] != commit.data[..] {
-            return Err(invalid("the imported commit's rev must be newer than the repo's in the space"));
-        }
-        let (records, set) = stage(None, &did, &space, &mut star, commit, rev, &limits).await?;
-        if records != h.records || set.state() != h.hash.state() {
-            return Err(invalid("the imported commit's rev must be newer than the repo's in the space"));
-        }
-        return Ok((rev, records));
+    let mut star = star.replay().await?;
+    if !matches!(star.next().await?, Some(star::Item::Meta(_))) {
+        return Err(XrpcError::internal("the kept import body changed"));
     }
 
     let nonce = rand::random::<u64>();
     let _claim = Claim { sp, did: &did, sid: space.sid, nonce };
-    submit_space(app, &did, &space, SpaceOp::ImportBegin { nonce, rev: Some(rev) }).await?;
+    submit_space(app, &did, &space, SpaceOp::ImportBegin { nonce, replace: true }).await?;
     let p = app.partition(&did)?;
     clear_unheaded(&p, &did, &space).await?;
-    let staged = stage(Some(&p), &did, &space, &mut star, commit, rev, &limits).await;
-    let (records, set) = match staged {
-        Ok(n) => n,
+    let staged = stage(Some(&p), creds, &did, &space, &mut star, sp.limits.max_records).await;
+    let (set, records) = match staged.and_then(|(again, n)| match again.digest() == set.digest() {
+        true => Ok((again, n)),
+        false => Err(XrpcError::internal("the kept import body changed")),
+    }) {
+        Ok(v) => v,
         Err(e) => {
             // rows staged with no head over them are never served, but
             // they'd hold blobs and slow the repo's first write (which
@@ -432,81 +330,71 @@ async fn import(
             return Err(e);
         }
     };
-    let op = SpaceOp::ImportCommit { nonce, rev, hash: Box::new(set), records };
+    let op = SpaceOp::ImportCommit { nonce, prev, hash: Box::new(set), records };
     match submit_space(app, &did, &space, op).await? {
-        SpaceAck::Write { .. } => {}
-        _ => return Err(XrpcError::internal("unexpected space ack")),
+        SpaceAck::Write { .. } => Ok(()),
+        _ => Err(XrpcError::internal("unexpected space ack")),
     }
-    Ok((rev, records))
-}
-
-/// What an import may hold: the record cap, and the grant's collections.
-struct Limits<'a> {
-    max_records: u64,
-    creds: &'a Credentials,
-    space: &'a Space,
 }
 
 /// Writes the archive's records (and their blob refs) as rows with no head
-/// over them yet, checking each ([`star::Archive::push`]) and, at the end,
-/// that they're the repo the commit describes; Ok((the record count, their
-/// set)). With no partition it only checks them.
-#[allow(clippy::too_many_arguments)]
+/// over them yet, at rev 0 until the head names theirs; Ok(the set they
+/// fold to, the record count). With no partition it only checks them.
 async fn stage(
     p: Option<&crate::partition::Partition>,
+    creds: &Credentials,
     did: &str,
     space: &Space,
-    star: &mut StarReader,
-    commit: crate::space::commit::Commit,
-    rev: Tid,
-    limits: &Limits<'_>,
-) -> XResult<(u64, crate::space::lthash::LtHash)> {
-    let mut archive = star::Archive::new(commit);
-    let mut collections: std::collections::BTreeSet<String> = Default::default();
+    star: &mut StarBody,
+    max_records: u64,
+) -> XResult<(LtHash, u64)> {
+    let mut set = LtHash::default();
+    let (mut records, mut bytes) = (0u64, 0usize);
     let mut muts = Vec::new();
-    let mut bytes = 0;
-    while star.pair().await? {
-        let key = star
-            .frame(MAX_PATH, "record path")
-            .await?
-            .ok_or_else(|| invalid("invalid STAR archive: unexpected end of archive"))?;
-        let b = star
-            .frame(star::MAX_RECORD_SIZE, "record")
-            .await?
-            .ok_or_else(|| invalid("invalid STAR archive: missing value for key"))?;
-        let (path, cid) = archive.push(&key, &b).map_err(|e| invalid(format!("invalid STAR archive: {e}")))?;
-        let (collection, rkey) = path.split_once('/').unwrap_or_default();
+    let mut prev: Option<Vec<u8>> = None;
+    let mut granted: std::collections::BTreeSet<String> = Default::default();
+    while let Some(item) = star.next().await? {
+        let star::Item::Pair { key, value } = item else { return Err(invalid("Invalid STAR: a second metadata")) };
+        if prev.as_ref().is_some_and(|p| key <= *p) {
+            return Err(invalid("Invalid STAR: duplicate or out-of-order key"));
+        }
+        let path = std::str::from_utf8(&key).map_err(|_| invalid("Invalid STAR: a record path is not UTF-8"))?;
+        let (collection, rkey) = path.split_once('/').ok_or_else(|| invalid(format!("invalid record path {path}")))?;
         check_path(collection, Some(rkey))?;
-        if !collections.contains(collection) {
-            super::space_migrate::need_import_grant(
-                limits.creds,
-                limits.space,
-                SpaceAccess::Write("create", collection),
-            )?;
-            collections.insert(collection.to_string());
+        if !granted.contains(collection) {
+            creds.need_space(&space.target(), SpaceAccess::Write("create", collection))?;
+            granted.insert(collection.to_string());
         }
-        if archive.records > limits.max_records {
-            return Err(invalid(format!("Space repo record limit reached: at most {} records", limits.max_records)));
+        records += 1;
+        if records > max_records {
+            return Err(invalid(format!("Space repo record limit reached: at most {max_records} records")));
         }
-        let blobs = record_blobs(&path, &b)?;
-        let Some(p) = p else { continue };
+        let blobs = record_blobs(path, &value)?;
+        let cid = Cid::dag_cbor(&value);
+        set.add(&commit::element(collection, rkey, &cid.to_string()));
+        let Some(p) = p else {
+            prev = Some(key);
+            continue;
+        };
         for blob in &blobs {
-            let r = Bytes::copy_from_slice(&rev.0.to_be_bytes());
-            muts.push(put(state::space_blob_key(did, &space.sid, blob, &path), r));
-            muts.push(put(state::space_blob_cid_key(did, blob, &space.sid, &path), Bytes::new()));
+            muts.push(put(
+                state::space_blob_key(did, &space.sid, blob, path),
+                Bytes::copy_from_slice(&0u64.to_be_bytes()),
+            ));
+            muts.push(put(state::space_blob_cid_key(did, blob, &space.sid, path), Bytes::new()));
         }
-        muts.push(put(state::space_record_key(did, &space.sid, &path), state::record_value(&cid, rev.0, &b)));
-        bytes += b.len();
+        muts.push(put(state::space_record_key(did, &space.sid, path), state::record_value(&cid, 0, &value)));
+        bytes += value.len();
         if muts.len() >= BATCH_ROWS || bytes >= BATCH_BYTES {
             write_private_local(p, std::mem::take(&mut muts)).await?;
             bytes = 0;
         }
+        prev = Some(key);
     }
-    archive.finish().map_err(|_| bad("DigestMismatch", "The archive's records are not the commit's"))?;
     if let Some(p) = p.filter(|_| !muts.is_empty()) {
         write_private_local(p, muts).await?;
     }
-    Ok((archive.records, archive.set))
+    Ok((set, records))
 }
 
 fn put(key: Vec<u8>, val: Bytes) -> vlsync_store::segment::Mutation {
@@ -520,7 +408,7 @@ pub(super) async fn sweep_unheaded(app: &App, did: &str, space: &Space) -> XResu
     let sp = spaces(app)?;
     let nonce = rand::random::<u64>();
     let _claim = Claim { sp, did, sid: space.sid, nonce };
-    let op = SpaceOp::ImportBegin { nonce, rev: None };
+    let op = SpaceOp::ImportBegin { nonce, replace: false };
     match super::space::submit_space_once(app, did, space, op).await? {
         Ok(_) => clear_unheaded(&*app.partition(did)?, did, space).await,
         Err(SpaceError::Write(WriteError::Invalid(_))) => Ok(()),
@@ -571,6 +459,29 @@ mod tests {
         assert!(working_set(Some(10 << 10)) < 2 << 20, "{}", working_set(Some(10 << 10)));
         let full = working_set(None);
         assert!(full <= super::super::import_budget::MAX_WORKING_SET, "{full}");
-        assert!(full >= 2 * star::MAX_RECORD_SIZE as u64);
+    }
+
+    #[test]
+    fn records_must_be_canonical() {
+        let mut b = Vec::new();
+        vlatproto::cbor::write_map_head(&mut b, 1);
+        vlatproto::cbor::write_text(&mut b, "a");
+        vlatproto::cbor::write_int(&mut b, 1);
+        assert!(record_blobs("a.b.c/x", &b).is_ok());
+        // the same map with a non-minimal integer, and with its keys out of
+        // canonical order: refused whether the decoder or the re-encoding
+        // catches it
+        let mut nc = Vec::new();
+        vlatproto::cbor::write_map_head(&mut nc, 1);
+        vlatproto::cbor::write_text(&mut nc, "a");
+        nc.extend_from_slice(&[0x18, 0x01]);
+        assert!(record_blobs("a.b.c/x", &nc).is_err());
+        let mut unsorted = Vec::new();
+        vlatproto::cbor::write_map_head(&mut unsorted, 2);
+        for k in ["bb", "a"] {
+            vlatproto::cbor::write_text(&mut unsorted, k);
+            vlatproto::cbor::write_int(&mut unsorted, 1);
+        }
+        assert!(record_blobs("a.b.c/x", &unsorted).is_err());
     }
 }

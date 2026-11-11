@@ -541,8 +541,8 @@ pub const FIRST_PARTY_PATH: &str = "/oauth/client-metadata.json";
 /// last is the account page's owner grant: `authority` is left at its
 /// default (`self`), so the token can only manage the user's own spaces.
 pub const FIRST_PARTY_SCOPE: &str = "atproto space:*?authority=*&action=read_self \
-space:*?authority=*&collection=*&action=create&action=read_self&manage=create&manage=update blob:*/* \
-space:*?action=read_self&manage=update&manage=delete";
+space:*?authority=*&collection=*&action=create&action=read_self blob:*/* \
+space:*?action=read_self&manage=update&manage=delete space:*?manage=create&manage=update";
 pub const FIRST_PARTY_CALLBACK: &str = "/migrate/oauth/callback";
 /// The account page's "Your spaces" sign-in comes back here.
 pub const FIRST_PARTY_ACCOUNT_CALLBACK: &str = "/account/oauth/callback";
@@ -900,7 +900,7 @@ mod tests {
         assert!(!c.allows_redirect_uri("https://pds.example.com/account"));
         for s in [
             "space:*?authority=*&action=read_self",
-            "space:*?authority=*&collection=*&action=create&action=read_self&manage=create&manage=update",
+            "space:*?authority=*&collection=*&action=create&action=read_self",
             "blob:*/*",
             "space:*?action=read_self&manage=update&manage=delete",
         ] {

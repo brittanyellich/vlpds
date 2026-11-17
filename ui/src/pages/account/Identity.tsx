@@ -3,6 +3,7 @@ import { ErrorNotice, Field, Loading, Notice, PageHead, Panel, Spinner, Status }
 import { useAction, useLoad } from '../../lib/hooks'
 import { acall, call } from '../../lib/xrpc'
 import { HandleChange } from './HandleChange'
+import { AgentBinding } from './AgentBinding'
 import { loadSession } from './Overview'
 
 export function Identity() {
@@ -25,6 +26,7 @@ export function Identity() {
             <Loading />
           )}
           <EmailPanel email={d.email} confirmed={!!d.emailConfirmed} onDone={info.reload} />
+          <AgentBinding did={d.did} handle={d.handle} />
         </>
       )}
     </>

@@ -26,9 +26,11 @@ the Worker using the live configuration, then gracefully replaces the running
 container and checks its image and public health. It does **not** use the
 disabled tracked `wrangler.jsonc` template. Set it up before running:
 
-1. Create a random 32-byte hex token (`openssl rand -hex 32`). In this directory,
-   set it on the existing Worker with `npx wrangler secret put DEPLOY_TOKEN
-   --config .wrangler/deployment.json`. Store the same value in the GitHub
+1. Create a random 32-byte hex token (`openssl rand -hex 32`). Add it as the
+   `DEPLOY_TOKEN` secret on the **existing live** `crate-pds` Worker through
+   Cloudflare's dashboard or its [Worker secret API](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/secrets/methods/update/).
+   Do not run `wrangler secret put` from an older checkout: it can publish
+   stale Worker code or settings. Store the same value in the GitHub
    `production` environment secret `VLPDS_DEPLOY_TOKEN`. This adds a narrowly
    scoped restart/status endpoint on `admin.crate.social`, not on the public PDS.
    The endpoint becomes available after the first workflow deployment. Keep

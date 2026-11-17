@@ -49,3 +49,37 @@ choices; this file is the checklist.
 Upgrades: set `vlpds_image` to the new pinned tag and run the playbook (with
 `--tags vlpds-deploy,vlpds-verify` for only the node). More nodes:
 [Scaling and clustering](../../docs/operations/scaling-and-clustering.md).
+
+## Manual GitHub Actions deploy / rollback
+
+The repo's **Deploy vlpds** workflow (`.github/workflows/deploy.yml`) can apply
+a pinned GHCR image to an existing, bootstrapped inventory. It does not create
+the server, bucket, DNS, or secrets. Before its first run:
+
+1. Copy and configure `inventories/example/` as `inventories/<name>/` and commit
+   its non-secret files and **sops-encrypted** `group_vars/vlpds.sops.yaml`.
+   Do not commit a plaintext secrets file. Verify the server SSH host-key
+   fingerprint out of band and commit its entry in `deploy/ansible/known_hosts`.
+   The runner must have SSH network access to the server; a private-only
+   tailnet host needs a self-hosted runner or a separately configured VPN.
+2. In GitHub, create an environment named `production` (recommended: require
+   reviewers and restrict deployment branches to `main`). Add environment
+   secrets `VLPDS_DEPLOY_SSH_KEY` (the operator user's private SSH key) and
+   `VLPDS_SOPS_AGE_KEY` (the age identity that decrypts the inventory).
+   The operator needs passwordless sudo as configured by bootstrap. Treat these
+   secrets as production credentials and rotate them if exposed.
+3. In **Actions → Deploy vlpds → Run workflow**, select `main`, choose `deploy`,
+   enter the inventory directory name and a full pinned image such as
+   `ghcr.io/brittanyellich/vlpds:sha-abcdef0` (after its Image workflow has
+   published it). A digest `ghcr.io/brittanyellich/vlpds@sha256:...` works too.
+   Do not use `main` or `latest`. Review the run's Ansible verification result.
+
+For **rollback**, run the same workflow with `operation: rollback` and enter
+the **previous known-good image reference** in `image`. Record that reference
+before every deploy (the workflow's run summary records each successful one).
+Rollback redeploys the earlier binary using the *current* inventory and
+secrets; it does **not** rewind data, configuration, schema changes or account
+state. Check [Upgrades](../../docs/operations/upgrades.md) for compatibility
+before rolling back across a feature-level or data migration. A failed health
+check does not trigger an automatic rollback: investigate, then explicitly run
+the rollback with the known-good image.

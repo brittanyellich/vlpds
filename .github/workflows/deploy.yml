@@ -1,0 +1,111 @@
+name: Deploy vlpds
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Deploy a new image or roll back to a known-good older image
+        required: true
+        type: choice
+        options: [deploy, rollback]
+      inventory:
+        description: Inventory directory name under deploy/ansible/inventories (not example)
+        required: true
+        type: string
+      image:
+        description: Full pinned image reference (tag or sha256 digest); for rollback, enter the previous known-good image
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Never run two updates to the same deployment concurrently (including rollback).
+concurrency:
+  group: vlpds-deploy-${{ inputs.inventory }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: ${{ inputs.operation }} ${{ inputs.inventory }}
+    runs-on: ubuntu-24.04
+    environment: production
+    defaults:
+      run:
+        working-directory: deploy/ansible
+    env:
+      DEPLOY_INVENTORY: ${{ inputs.inventory }}
+      DEPLOY_IMAGE: ${{ inputs.image }}
+      DEPLOY_OPERATION: ${{ inputs.operation }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate deployment inputs and inventory
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          inventory = os.environ['DEPLOY_INVENTORY']
+          image = os.environ['DEPLOY_IMAGE']
+          if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_-]*', inventory) or inventory == 'example':
+              raise SystemExit('Use a configured inventory name (not example).')
+          root = pathlib.Path('inventories') / inventory
+          if not (root / 'hosts.yml').is_file() or not (root / 'group_vars/vlpds.sops.yaml').is_file():
+              raise SystemExit('Inventory must include hosts.yml and encrypted group_vars/vlpds.sops.yaml.')
+          if not any(line.strip() and not line.lstrip().startswith('#') for line in pathlib.Path('known_hosts').read_text().splitlines()):
+              raise SystemExit('Commit verified server SSH host keys to deploy/ansible/known_hosts first.')
+          if not re.fullmatch(r'ghcr\.io/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(?::[a-zA-Z0-9_.-]+|@sha256:[a-fA-F0-9]{64})', image):
+              raise SystemExit('Use a fully qualified, pinned GHCR image tag or sha256 digest.')
+          if image.endswith((':main', ':latest')) or 'CHANGEME' in image:
+              raise SystemExit('Mutable main/latest and placeholder images are not permitted.')
+          print(f'{os.environ["DEPLOY_OPERATION"]}: {image} to {inventory}')
+          PY
+
+      - name: Install Ansible and sops
+        run: |
+          python3 -m pip install --user 'ansible==14.4.0'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          curl -fsSL -o "$RUNNER_TEMP/sops.deb" https://github.com/getsops/sops/releases/download/v3.10.2/sops_3.10.2_amd64.deb
+          sudo dpkg -i "$RUNNER_TEMP/sops.deb"
+
+      - name: Configure deploy credentials
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.VLPDS_DEPLOY_SSH_KEY }}
+          DEPLOY_AGE_KEY: ${{ secrets.VLPDS_SOPS_AGE_KEY }}
+        run: |
+          test -n "$DEPLOY_SSH_KEY" && test -n "$DEPLOY_AGE_KEY" || { echo 'Configure production secrets VLPDS_DEPLOY_SSH_KEY and VLPDS_SOPS_AGE_KEY.' >&2; exit 1; }
+          umask 077
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/deploy_key"
+          printf '%s\n' "$DEPLOY_AGE_KEY" > "$RUNNER_TEMP/age_key"
+          echo "SOPS_AGE_KEY_FILE=$RUNNER_TEMP/age_key" >> "$GITHUB_ENV"
+          echo "ANSIBLE_PRIVATE_KEY_FILE=$RUNNER_TEMP/deploy_key" >> "$GITHUB_ENV"
+
+      - name: Install pinned Ansible collections
+        run: ansible-galaxy collection install -r requirements.yml
+
+      - name: Apply image and verify health
+        run: |
+          umask 077
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          Path(os.environ['RUNNER_TEMP'], 'image-vars.json').write_text(
+              json.dumps({'vlpds_image': os.environ['DEPLOY_IMAGE']})
+          )
+          PY
+          ansible-playbook -i "inventories/$DEPLOY_INVENTORY/hosts.yml" playbooks/vlpds.yml \
+            --tags vlpds-assert,vlpds-deploy,vlpds-verify -e "@$RUNNER_TEMP/image-vars.json"
+
+      - name: Record deployment
+        if: success()
+        run: |
+          {
+            echo "### vlpds $DEPLOY_OPERATION"
+            echo "- Inventory: \`$DEPLOY_INVENTORY\`"
+            echo "- Image: \`$DEPLOY_IMAGE\`"
+            echo "- Result: Ansible deployment and verification passed"
+          } >> "$GITHUB_STEP_SUMMARY"

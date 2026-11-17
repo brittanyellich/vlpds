@@ -1,5 +1,6 @@
 node_modules/
 .wrangler/
+.ci-deployment.json
 .dev.vars*
 .env*
 !.env.example

@@ -38,7 +38,9 @@ async function deployAuthorized(request: Request, token?: string): Promise<boole
   if (!token || !/^[a-f0-9]{64}$/.test(token) || !supplied) return false;
   const digest = async (value: string) => new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
   const [a, b] = await Promise.all([digest(token), digest(supplied)]);
-  return a.every((byte, index) => byte === b[index]);
+  let difference = 0;
+  for (let i = 0; i < a.length; i++) difference |= a[i] ^ b[i];
+  return difference === 0;
 }
 
 export class Pds extends DurableObject<Env> {

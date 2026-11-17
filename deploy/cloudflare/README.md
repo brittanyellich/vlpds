@@ -19,6 +19,47 @@ using it directly would disable the live service and omit operator SSH access.
 Never upload `.dev.vars` wholesale: it includes the local-only DNS token.
 The recovery private key is in the separate private backup and never uploaded.
 
+### Manual GitHub Actions deployment and rollback
+
+The **Deploy Cloudflare PDS** action builds this revision's image and deploys
+the Worker using the live configuration, then gracefully replaces the running
+container and checks its image and public health. It does **not** use the
+disabled tracked `wrangler.jsonc` template. Set it up before running:
+
+1. Create a random 32-byte hex token (`openssl rand -hex 32`). In this directory,
+   set it on the existing Worker with `npx wrangler secret put DEPLOY_TOKEN
+   --config .wrangler/deployment.json`. Store the same value in the GitHub
+   `production` environment secret `VLPDS_DEPLOY_TOKEN`. This adds a narrowly
+   scoped restart/status endpoint on `admin.crate.social`, not on the public PDS.
+   The endpoint becomes available after the first workflow deployment. Keep
+   this token separate from the PDS admin token.
+2. Add `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` (Workers, Containers,
+   registry and zone permissions needed by Wrangler), and
+   `VLPDS_CLOUDFLARE_CONFIG_JSON` as GitHub `production` environment secrets.
+   For the last value use the **entire current** Git-ignored
+   `.wrangler/deployment.json` (not the tracked template). Do not include
+   `.dev.vars` or copy its local DNS token. Keep the configuration secret in
+   sync with intentional live route, SSH key and Worker-var changes. Require
+   reviewers and restrict the environment to `main` before granting access.
+3. Merge the workflow and use **Actions → Deploy Cloudflare PDS → Run workflow**
+   on `main`, `operation: deploy`, leaving `rollback_image` blank. The workflow
+   runs tests, builds/uploads the image, deploys without an automatic container
+   rollout, sends SIGTERM to the old container, and verifies the new running
+   digest plus `/xrpc/_health`. Save the resulting digest from the run summary.
+
+For rollback, run the same action with `operation: rollback` and the **previous
+known-good Cloudflare registry digest** from a successful run (for the first
+run, record the image in the current deployment notes). This changes the image
+map and gracefully restarts the container; it does not roll back data, Worker
+code, secrets, or incompatible feature-level migrations. The workflow never
+rolls back automatically on failed verification: inspect the failure and choose
+an earlier compatible image explicitly. Keep the offline KEK/PLC backups.
+
+**Important:** the current deployment configuration and Worker secrets are not
+in Git. A GitHub runner cannot infer them from this repository. Do not run this
+action until the production environment has the *actual* live configuration
+and credentials; no production deployment was performed while adding it.
+
 The private container hop uses HTTP as required by Cloudflare's container API;
 public requests use HTTPS, with the original host and forwarded scheme retained.
 

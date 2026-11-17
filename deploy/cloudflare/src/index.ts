@@ -24,12 +24,22 @@ interface Env {
   EMAIL_FROM_ADDRESS: string;
   EMAIL_API_URL: string;
   EMAIL_API_TOKEN: string;
+  DEPLOY_TOKEN?: string;
 }
 
 // Never change this name for an existing bucket/prefix: all traffic owns one instance.
 const INSTANCE = "crate-pds-single";
 const INACTIVITY_MS = 60 * 60 * 1000;
 const HEARTBEAT_MS = 5 * 60 * 1000;
+const DEPLOY_PATHS = new Set(["/_deploy/status", "/_deploy/restart"]);
+
+async function deployAuthorized(request: Request, token?: string): Promise<boolean> {
+  const supplied = request.headers.get("authorization")?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
+  if (!token || !/^[a-f0-9]{64}$/.test(token) || !supplied) return false;
+  const digest = async (value: string) => new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+  const [a, b] = await Promise.all([digest(token), digest(supplied)]);
+  return a.every((byte, index) => byte === b[index]);
+}
 
 export class Pds extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -96,7 +106,30 @@ export class Pds extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
-    if (this.env.ADMIN_HOST && new URL(request.url).hostname === this.env.ADMIN_HOST) {
+    const url = new URL(request.url);
+    if (this.env.ADMIN_HOST && url.protocol === "https:" && !url.port &&
+        url.hostname === this.env.ADMIN_HOST && DEPLOY_PATHS.has(url.pathname)) {
+      if (!await deployAuthorized(request, this.env.DEPLOY_TOKEN)) return new Response("Not found", { status: 404 });
+      const container = this.ctx.container!;
+      const desired = container.images.pds;
+      if (url.pathname === "/_deploy/status" && request.method === "GET") {
+        const current = await container.inspect();
+        return secure(Response.json({ desired, running: container.running, current: current?.image ?? null }));
+      }
+      if (url.pathname === "/_deploy/restart" && request.method === "POST") {
+        if (request.headers.get("x-deploy-image") !== desired || !desired) {
+          return new Response("Image mismatch", { status: 409 });
+        }
+        const current = await container.inspect();
+        if (current?.image === desired) return secure(Response.json({ restarted: false, desired }));
+        // Signal the existing process gracefully. The next request or alarm starts
+        // the desired image only after the old container has stopped.
+        if (container.running) container.signal(15);
+        return secure(Response.json({ restarted: container.running, desired }, { status: 202 }));
+      }
+      return new Response("Method not allowed", { status: 405 });
+    }
+    if (this.env.ADMIN_HOST && url.hostname === this.env.ADMIN_HOST) {
       try {
         const gateway = this.operator();
         if (!gateway || this.env.ENABLED !== "true") return new Response("Unavailable", {status:503});
@@ -106,7 +139,7 @@ export class Pds extends DurableObject<Env> {
         return secure(new Response("Sign-in unavailable. Start again from the operator homepage.", {status:502}));
       }
     }
-    if (!permitted(new URL(request.url), this.env.PUBLIC_HOST, this.env.HANDLE_DOMAIN)) return new Response("Not found", { status: 404 });
+    if (!permitted(url, this.env.PUBLIC_HOST, this.env.HANDLE_DOMAIN)) return new Response("Not found", { status: 404 });
     if (this.env.ENABLED !== "true") return new Response("Deployment pending preflight", { status: 503 });
     return this.proxy(request);
   }
@@ -131,7 +164,9 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const admin = !!env.ADMIN_HOST && operatorPath(url, env.ADMIN_HOST);
-    if (!admin && !permitted(url, env.PUBLIC_HOST, env.HANDLE_DOMAIN)) return new Response("Not found", { status: 404 });
+    const deploy = !!env.ADMIN_HOST && url.protocol === "https:" && !url.port &&
+      url.hostname === env.ADMIN_HOST && DEPLOY_PATHS.has(url.pathname);
+    if (!admin && !deploy && !permitted(url, env.PUBLIC_HOST, env.HANDLE_DOMAIN)) return new Response("Not found", { status: 404 });
     return env.PDS.getByName(INSTANCE).fetch(forwarded(request));
   },
 } satisfies ExportedHandler<Env>;

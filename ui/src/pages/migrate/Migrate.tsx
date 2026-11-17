@@ -1982,7 +1982,9 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
           )}
           {phase.at === 'result' && (
             <>
-              {failed.length > 0 ? (
+              {error ? (
+                <Notice kind="warn">The Spaces listing failed. Nothing has been confirmed copied; retry after checking the old server's response.</Notice>
+              ) : failed.length > 0 ? (
                 <Notice kind="warn">
                   {failed.length === 1 ? '1 space' : `${failed.length} spaces`} didn't copy. Retry, or go on without {failed.length === 1 ? 'it' : 'them'}: {failed.length === 1 ? 'it stays' : 'they stay'} at {oldHost}, which goes offline next.
                 </Notice>

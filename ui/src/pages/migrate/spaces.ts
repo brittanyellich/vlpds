@@ -9,6 +9,7 @@
 import { OAuthSession } from '../../lib/oauth'
 import { XrpcError } from '../../lib/xrpc'
 import { retry } from '../../lib/backoff'
+import { spaceRefs } from './spaceListing.mjs'
 
 export const OLD_SCOPE = 'atproto space:*?authority=*&action=read_self'
 export const NEW_SCOPE = 'atproto space:*?authority=*&collection=*&action=create&action=read_self'
@@ -59,10 +60,11 @@ export async function plan(old: OAuthSession, onPause: (until: number) => void):
   const seen = new Set<string>()
   for (let cursor: string | undefined; ; ) {
     const page = await retry(() => old.call('com.atproto.space.listSpaces', { params: { limit: 100, cursor } }), onPause)
-    for (const s of page.spaces as { uri: string }[]) uris.push(s.uri)
+    const refs = spaceRefs(page)
+    uris.push(...refs)
     if (uris.length > MAX_SPACES) throw new Error(`${new URL(old.pds).host} lists more than ${MAX_SPACES} spaces.`)
     cursor = page.cursor
-    if (!cursor || !page.spaces.length || seen.has(cursor)) break
+    if (!cursor || !refs.length || seen.has(cursor)) break
     seen.add(cursor)
   }
   const out: SpacePlan[] = []

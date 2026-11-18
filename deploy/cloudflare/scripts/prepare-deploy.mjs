@@ -6,7 +6,7 @@ if (!DEPLOY_CONFIG || !CLOUDFLARE_API_TOKEN || !/^[a-f0-9]{32}$/.test(CLOUDFLARE
 const config = JSON.parse(DEPLOY_CONFIG);
 const image = config.containers?.[0]?.images?.pds;
 if (config.name !== 'crate-pds' || config.account_id !== CLOUDFLARE_ACCOUNT_ID ||
-    config.main !== 'src/index.ts' || config.vars?.ENABLED !== 'true' ||
+    !['src/index.ts', '../src/index.ts'].includes(config.main) || config.vars?.ENABLED !== 'true' ||
     config.vars?.PUBLIC_HOST !== 'pds.crate.social' || config.vars?.HANDLE_DOMAIN !== 'crate.social' ||
     config.vars?.S3_BUCKET !== 'crate-pds' || config.vars?.S3_PREFIX !== 'crate' ||
     config.vars?.ADMIN_HOST !== 'admin.crate.social' ||
@@ -16,6 +16,10 @@ if (config.name !== 'crate-pds' || config.account_id !== CLOUDFLARE_ACCOUNT_ID |
     !config.routes?.some(r => r.pattern === 'admin.crate.social/*')) {
   throw new Error('Production configuration does not match the known live deployment');
 }
+// The existing private deployment.json lives in .wrangler/, where its main
+// path is relative to that directory. CI writes the config at this directory's
+// root, so normalize the path before Wrangler reads it.
+config.main = 'src/index.ts';
 if (OPERATION === 'rollback') {
   if (!/^registry\.cloudflare\.com\/[a-f0-9]{32}\/vlpds@sha256:[a-f0-9]{64}$/.test(ROLLBACK_IMAGE ?? '') ||
       !ROLLBACK_IMAGE.startsWith(`registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/`)) {

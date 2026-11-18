@@ -57,8 +57,11 @@ jobs:
             echo 'No deploy endpoint yet (first deployment of this workflow).' >&2
           node -e 'const fs=require("fs");let p=process.env.RUNNER_TEMP+"/before.json";if(fs.statSync(p).size){let s=JSON.parse(fs.readFileSync(p));console.log("Previously running image:",s.current)}'
 
-      - name: Publish Worker and image map without container rollout
-        run: npx wrangler deploy --config .ci-deployment.json --containers-rollout none
+      - name: Publish Worker and named image
+        # This app uses durable_object scheduling: publishing updates the image
+        # map but does not replace the running container. Do not use rollout
+        # none here, since it can leave the named image unchanged.
+        run: npx wrangler deploy --config .ci-deployment.json
 
       - name: Switch container image gracefully
         run: |

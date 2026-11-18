@@ -2032,7 +2032,7 @@ function DoneStep({ saved, newPds, onReset }: { saved: Saved; newPds: Pds; onRes
   const st = useLoad<AccountStatus | null>(() => (newPds.tokens ? newPds.call('com.atproto.server.checkAccountStatus') : Promise.resolve(null)), [])
   const leave = () => {
     if (saved.spaces === 'skipped' || saved.spaceMoves?.some((m) => m.state === 'failed')) {
-      saveRecovery({ did: saved.did, oldPds: saved.oldPds, completed: saved.spaceMoves?.filter((m) => m.state === 'moved').map((m) => m.uri) ?? [] })
+      saveRecovery({ did: saved.did, oldPds: saved.oldPds, completed: saved.spaceMoves?.filter((m) => m.state === 'moved' || m.state === 'empty').map((m) => m.uri) ?? [] })
     }
     onReset()
   }

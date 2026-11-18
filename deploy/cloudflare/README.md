@@ -35,8 +35,11 @@ disabled tracked `wrangler.jsonc` template. Set it up before running:
    scoped restart/status endpoint on `admin.crate.social`, not on the public PDS.
    The endpoint becomes available after the first workflow deployment. Keep
    this token separate from the PDS admin token.
-2. Add `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` (Workers, Containers,
-   registry and zone permissions needed by Wrangler), and
+2. Add `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` (a token scoped to this
+   account with **Workers Editor** on the existing `crate-pds` Worker,
+   **Workers Containers Write** for the account, and **Zone Workers Routes
+   Write** on `crate.social` if Wrangler manages its routes; the legacy
+   Workers Scripts Edit permission corresponds to Workers Editor), and
    `VLPDS_CLOUDFLARE_CONFIG_JSON` as GitHub `production` environment secrets.
    For the last value use the **entire current** Git-ignored
    `.wrangler/deployment.json` (not the tracked template). Do not include
@@ -45,8 +48,8 @@ disabled tracked `wrangler.jsonc` template. Set it up before running:
    reviewers and restrict the environment to `main` before granting access.
 3. Merge the workflow and use **Actions → Deploy Cloudflare PDS → Run workflow**
    on `main`, `operation: deploy`, leaving `rollback_image` blank. The workflow
-   runs tests, builds/uploads the image, deploys without an automatic container
-   rollout, sends SIGTERM to the old container, and verifies the new running
+   runs tests, builds/uploads the named image, deploys the Worker, sends SIGTERM
+   to the old container (durable-object scheduling does not roll it automatically), and verifies the new running
    digest plus `/xrpc/_health`. Save the resulting digest from the run summary.
 
 For rollback, run the same action with `operation: rollback` and the **previous

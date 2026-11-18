@@ -19,6 +19,15 @@ test('admin routing excludes public, internal, encoded and insecure URLs', () =>
   for (const p of ['/admin','/assets/app.js','/xrpc/vlpds.admin.getClusterStatus']) assert(operatorPath(new URL(`https://${host}${p}`),host));
   for (const u of [`http://${host}/admin`,`https://evil.example/admin`,`https://${host}/internal`,`https://${host}/xrpc/vlpds.internal.forward`,`https://${host}/%61dmin`]) assert(!operatorPath(new URL(u),host));
 });
+test('deploy endpoints pass the top-level admin gate only on the exact HTTPS host', () => {
+  for (const path of ['/_deploy/status', '/_deploy/restart']) {
+    assert(operatorPath(new URL(`https://${host}${path}`), host));
+    for (const url of [`http://${host}${path}`, `https://evil.example.com${path}`,
+      `https://${host}:8443${path}`, `https://${host}${path}/extra`, `https://${host}/%5Fdeploy/status`]) {
+      assert(!operatorPath(new URL(url), host), url);
+    }
+  }
+});
 test('cookie parser rejects duplicates and malformed tokens', () => {
   assert.equal(readCookie(new Request('https://x',{headers:{cookie:`s=${nonce}`}}),'s'),nonce);
   assert.equal(readCookie(new Request('https://x',{headers:{cookie:`s=${nonce}; s=${session}`}}),'s'),undefined);

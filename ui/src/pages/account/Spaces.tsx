@@ -25,6 +25,7 @@ import {
   writeText,
 } from '../../lib/spaces'
 import { Nsid, preview } from './Repo'
+import { RecoverSpaces } from './RecoverSpaces'
 
 const base = '/account/spaces'
 
@@ -146,12 +147,14 @@ export function SpacesHome() {
     return (
       <>
         {head}
+        <RecoverSpaces />
         <ConnectPanel error={error} />
       </>
     )
   return (
     <>
       {head}
+      <RecoverSpaces />
       <Overview sess={session} />
     </>
   )

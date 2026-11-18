@@ -32,6 +32,7 @@ import {
 } from './flow'
 import type { RecordCounts } from './count'
 import { copySpace, newScope, OLD_SCOPE, plan, reasonOf, servesSpaces, spaceLabel, type SpaceMove, type SpacePlan } from './spaces'
+import { saveRecovery } from './spaceRecovery'
 import { beginSignIn, clientInfo, finishSignIn, forgetAll, isCallback, OAuthSession, sweepKeys } from '../../lib/oauth'
 
 type Describe = { did: string; availableUserDomains: string[]; inviteCodeRequired?: boolean }
@@ -2029,9 +2030,15 @@ function spaceName(uri: string, adv: boolean): string {
 function DoneStep({ saved, newPds, onReset }: { saved: Saved; newPds: Pds; onReset: () => void }) {
   const adv = useAdv()
   const st = useLoad<AccountStatus | null>(() => (newPds.tokens ? newPds.call('com.atproto.server.checkAccountStatus') : Promise.resolve(null)), [])
+  const leave = () => {
+    if (saved.spaces === 'skipped' || saved.spaceMoves?.some((m) => m.state === 'failed')) {
+      saveRecovery({ did: saved.did, oldPds: saved.oldPds, completed: saved.spaceMoves?.filter((m) => m.state === 'moved').map((m) => m.uri) ?? [] })
+    }
+    onReset()
+  }
   const open = () => {
     if (newPds.tokens) setSession({ did: saved.did, handle: saved.newHandle ?? '', ...newPds.tokens })
-    onReset()
+    leave()
     navigate('/account')
   }
   return (
@@ -2129,7 +2136,7 @@ function DoneStep({ saved, newPds, onReset }: { saved: Saved; newPds: Pds; onRes
         </details>
       )}
       <div className="row between">
-        <button type="button" className="btn quiet" onClick={onReset}>
+        <button type="button" className="btn quiet" onClick={leave}>
           Move another account
         </button>
         <button type="button" className="btn primary" onClick={open}>

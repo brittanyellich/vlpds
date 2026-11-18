@@ -35,6 +35,7 @@ export function operatorPath(url: URL, host: string): boolean {
     (url.pathname === '/' || url.pathname === '/admin' || url.pathname.startsWith('/admin/') ||
      url.pathname.startsWith('/assets/') || url.pathname.startsWith('/xrpc/vlpds.admin.') ||
      url.pathname.startsWith('/xrpc/com.atproto.admin.') || CONSOLE_METHODS.has(url.pathname) ||
+     (url.pathname === '/_deploy/status' || url.pathname === '/_deploy/restart') ||
      ['/favicon.svg', '/operator/login', '/operator/callback', '/operator/logout', '/operator/client-metadata.json'].includes(url.pathname));
 }
 export function secure(response: Response): Response {

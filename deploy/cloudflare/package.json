@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/*.test.ts",
+    "test": "node --test test/*.test.ts test/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "dry-run": "wrangler deploy --dry-run --containers-rollout none",
     "deploy": "wrangler deploy",

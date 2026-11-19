@@ -122,12 +122,29 @@ export class Pds extends DurableObject<Env> {
         if (request.headers.get("x-deploy-image") !== desired || !desired) {
           return new Response("Image mismatch", { status: 409 });
         }
-        const current = await container.inspect();
-        if (current?.image === desired) return secure(Response.json({ restarted: false, desired }));
-        // Signal the existing process gracefully. The next request or alarm starts
-        // the desired image only after the old container has stopped.
-        if (container.running) container.signal(15);
-        return secure(Response.json({ restarted: container.running, desired }, { status: 202 }));
+        // inspect().image is not proof of which UI the running process serves.
+        // A repeat deploy must actually stop the container even if its image
+        // reference matches: otherwise a stale process can pass the old gate.
+        const restarted = container.running;
+        if (restarted) {
+          // SIGTERM may produce a nonzero exit code; that still confirms exit.
+          // A monitor failure without an exit code is not proof of shutdown.
+          const stopped = container.monitor().then(
+            () => "exited",
+            (error: unknown) => typeof (error as { exitCode?: unknown })?.exitCode === "number" ? "exited" : "monitor-failed",
+          );
+          container.signal(15);
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const outcome = await Promise.race([
+            stopped,
+            new Promise<string>((resolve) => { timer = setTimeout(() => resolve("timeout"), 60_000); }),
+          ]);
+          if (timer) clearTimeout(timer);
+          if (outcome !== "exited" || container.running)
+            return secure(new Response("Container exit was not confirmed; no new image started", { status: 503 }));
+        }
+        await this.ensureRunning();
+        return secure(Response.json({ restarted, desired, starting: true }, { status: 202 }));
       }
       return new Response("Method not allowed", { status: 405 });
     }

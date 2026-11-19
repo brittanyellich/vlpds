@@ -57,6 +57,15 @@ async fn public_pages_have_link_preview_tags() {
     assert_eq!(meta(&migrate, "property", "og:title").unwrap(), format!("Move your Bluesky account to {host}"));
     assert_eq!(canonical(&migrate).unwrap(), format!("{origin}/migrate"));
 
+    for path in ["/account/spaces", "/account/oauth/callback"] {
+        let csp = get(path).await.header("content-security-policy").unwrap();
+        assert!(csp.contains("connect-src 'self' https:"), "{path}: {csp}");
+    }
+    for path in ["/account", "/account/security", "/account/spaces/other"] {
+        let csp = get(path).await.header("content-security-policy").unwrap();
+        assert!(csp.contains("connect-src 'self';"), "{path}: {csp}");
+    }
+
     for (path, noindex) in
         [("/account", true), ("/account/security", true), ("/admin", true), ("/admin/cluster", true), ("/", false)]
     {

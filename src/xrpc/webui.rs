@@ -136,6 +136,21 @@ const MIGRATE_CSP_DEV: &str = "default-src 'none'; script-src 'self'; style-src 
 img-src 'self' data: blob:; connect-src 'self' https: http:; manifest-src 'self'; frame-ancestors 'none'; \
 base-uri 'none'; form-action 'none'";
 
+/// Spaces recovery reads the previous PDS's OAuth metadata and Spaces API.
+/// Like migration, its source can be any HTTPS host; only dev mode permits
+/// plain HTTP sources for local testing. Keep the rest of /account same-origin.
+fn account_csp(path: &str, dev_mode: bool) -> &'static str {
+    if matches!(path, "/account/spaces" | "/account/spaces/" | crate::oauth::client::FIRST_PARTY_ACCOUNT_CALLBACK) {
+        if dev_mode {
+            MIGRATE_CSP_DEV
+        } else {
+            MIGRATE_CSP
+        }
+    } else {
+        SPA_CSP
+    }
+}
+
 /// What the UI build wrote to `og/manifest.json`: the link-preview cards and
 /// each docs page's front matter.
 #[derive(Deserialize)]
@@ -304,7 +319,7 @@ Sign in, create an account, or move an existing Bluesky account here."
     shell_with(&app, StatusCode::OK, &head, SPA_CSP, true)
 }
 
-async fn account_shell(State(app): AppState) -> Response {
+async fn account_shell(State(app): AppState, uri: axum::http::Uri) -> Response {
     let (_, host) = origin_and_host(&app.config.public_url);
     let head = PageHead {
         title: format!("Account · {}", app.theme.current().brand.display_name()),
@@ -316,7 +331,7 @@ async fn account_shell(State(app): AppState) -> Response {
         og_type: "website",
         noindex: true,
     };
-    shell_with(&app, StatusCode::OK, &head, SPA_CSP, true)
+    shell_with(&app, StatusCode::OK, &head, account_csp(uri.path(), app.config.dev_mode), true)
 }
 
 async fn admin_shell(State(app): AppState) -> Response {
@@ -588,4 +603,21 @@ async fn feature_levels(c: &crate::cluster::Cluster, nodes: &[crate::cluster::No
         out["error"] = json!(e);
     }
     out
+}
+
+#[cfg(test)]
+mod csp_tests {
+    use super::*;
+
+    #[test]
+    fn spaces_recovery_only_relaxes_its_page_and_oauth_callback() {
+        for path in ["/account/spaces", "/account/spaces/", crate::oauth::client::FIRST_PARTY_ACCOUNT_CALLBACK] {
+            assert_eq!(account_csp(path, false), MIGRATE_CSP, "{path}");
+            assert_eq!(account_csp(path, true), MIGRATE_CSP_DEV, "{path}");
+        }
+        for path in ["/account", "/account/", "/account/security", "/account/spaces/other", "/account/oauth/other"] {
+            assert_eq!(account_csp(path, false), SPA_CSP, "{path}");
+            assert_eq!(account_csp(path, true), SPA_CSP, "{path}");
+        }
+    }
 }

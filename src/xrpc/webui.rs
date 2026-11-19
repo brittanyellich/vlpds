@@ -141,7 +141,11 @@ base-uri 'none'; form-action 'none'";
 /// plain HTTP sources for local testing. Keep the rest of /account same-origin.
 fn account_csp(path: &str, dev_mode: bool) -> &'static str {
     if matches!(path, "/account/spaces" | "/account/spaces/" | crate::oauth::client::FIRST_PARTY_ACCOUNT_CALLBACK) {
-        if dev_mode { MIGRATE_CSP_DEV } else { MIGRATE_CSP }
+        if dev_mode {
+            MIGRATE_CSP_DEV
+        } else {
+            MIGRATE_CSP
+        }
     } else {
         SPA_CSP
     }
@@ -328,23 +332,6 @@ async fn account_shell(State(app): AppState, uri: axum::http::Uri) -> Response {
         noindex: true,
     };
     shell_with(&app, StatusCode::OK, &head, account_csp(uri.path(), app.config.dev_mode), true)
-}
-
-#[cfg(test)]
-mod csp_tests {
-    use super::*;
-
-    #[test]
-    fn spaces_recovery_only_relaxes_its_page_and_oauth_callback() {
-        for path in ["/account/spaces", "/account/spaces/", crate::oauth::client::FIRST_PARTY_ACCOUNT_CALLBACK] {
-            assert_eq!(account_csp(path, false), MIGRATE_CSP, "{path}");
-            assert_eq!(account_csp(path, true), MIGRATE_CSP_DEV, "{path}");
-        }
-        for path in ["/account", "/account/", "/account/security", "/account/spaces/other", "/account/oauth/other"] {
-            assert_eq!(account_csp(path, false), SPA_CSP, "{path}");
-            assert_eq!(account_csp(path, true), SPA_CSP, "{path}");
-        }
-    }
 }
 
 async fn admin_shell(State(app): AppState) -> Response {
@@ -616,4 +603,21 @@ async fn feature_levels(c: &crate::cluster::Cluster, nodes: &[crate::cluster::No
         out["error"] = json!(e);
     }
     out
+}
+
+#[cfg(test)]
+mod csp_tests {
+    use super::*;
+
+    #[test]
+    fn spaces_recovery_only_relaxes_its_page_and_oauth_callback() {
+        for path in ["/account/spaces", "/account/spaces/", crate::oauth::client::FIRST_PARTY_ACCOUNT_CALLBACK] {
+            assert_eq!(account_csp(path, false), MIGRATE_CSP, "{path}");
+            assert_eq!(account_csp(path, true), MIGRATE_CSP_DEV, "{path}");
+        }
+        for path in ["/account", "/account/", "/account/security", "/account/spaces/other", "/account/oauth/other"] {
+            assert_eq!(account_csp(path, false), SPA_CSP, "{path}");
+            assert_eq!(account_csp(path, true), SPA_CSP, "{path}");
+        }
+    }
 }

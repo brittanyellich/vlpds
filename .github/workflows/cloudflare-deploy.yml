@@ -45,6 +45,12 @@ jobs:
           cache-dependency-path: deploy/cloudflare/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npm test && npm run typecheck
+      - name: Build expected UI entry for public verification
+        if: inputs.operation == 'deploy'
+        run: |
+          npm ci --prefix ../../ui --no-audit --no-fund
+          npm run build --prefix ../../ui
+          echo "EXPECTED_UI_ASSET=$(node scripts/verify-ui.mjs --expected ../../ui/dist/index.html)" >> "$GITHUB_ENV"
 
       - name: Validate and prepare live configuration
         run: node scripts/prepare-deploy.mjs
@@ -82,7 +88,7 @@ jobs:
             https://admin.crate.social/_deploy/restart
           echo "DESIRED_IMAGE=$desired" >> "$GITHUB_ENV"
 
-      - name: Verify new image and public health
+      - name: Verify new image, public health and UI
         run: |
           set -euo pipefail
           for i in $(seq 1 90); do
@@ -91,12 +97,13 @@ jobs:
             if curl --fail --silent --show-error -H "Authorization: Bearer $DEPLOY_TOKEN" \
                 https://admin.crate.social/_deploy/status > "$RUNNER_TEMP/status.json" && \
                node -e 'let s=JSON.parse(require("fs").readFileSync(process.argv[1]));process.exit(s.running && s.current===process.env.DESIRED_IMAGE?0:1)' "$RUNNER_TEMP/status.json" && \
-               curl --max-time 5 -fsS https://pds.crate.social/xrpc/_health >/dev/null; then
+               curl --max-time 5 -fsS https://pds.crate.social/xrpc/_health >/dev/null && \
+               { [ "$OPERATION" = rollback ] || node scripts/verify-ui.mjs --public "$EXPECTED_UI_ASSET"; }; then
               exit 0
             fi
             sleep 5
           done
-          echo 'New image did not become healthy; inspect Cloudflare logs and explicitly roll back if safe.' >&2
+          echo 'New image or public UI did not match; inspect Cloudflare logs and explicitly roll back if safe.' >&2
           exit 1
 
       - name: Deployment record
@@ -106,5 +113,5 @@ jobs:
             echo "### Cloudflare PDS $OPERATION"
             echo "- Image: \`$DESIRED_IMAGE\`"
             echo "- Previous: \`$(node -e 'let fs=require("fs"),p=process.env.RUNNER_TEMP+"/before.json";console.log(fs.statSync(p).size?JSON.parse(fs.readFileSync(p)).current:"unknown")')\`"
-            echo '- Running image matched and public health passed.'
+            echo '- Running image matched and public health passed; deploys also verified the public UI entry and asset.'
           } >> "$GITHUB_STEP_SUMMARY"

@@ -40,7 +40,7 @@ async function fixture(t) {
     if (mode === 'redirect') { res.writeHead(302, { location: 'https://unconfigured.invalid/key' }); return res.end(); }
     if (mode === 'missing') { res.writeHead(404); return res.end(); }
     if (mode === 'error') { res.writeHead(503); return res.end(); }
-    res.writeHead(200, { 'content-type': 'application/json' });
+    res.writeHead(200, { 'content-type': mode === 'did-json' ? 'application/did+ld+json; charset=utf-8' : mode === 'html' ? 'text/html' : 'application/json' });
     if (mode === 'hang') { res.write('{'); return; }
     if (mode === 'large') return res.end(' '.repeat(33000));
     if (mode === 'invalid') return res.end('{');
@@ -79,6 +79,14 @@ test('normal TLS, fixed origin/path/DID and coalesced fresh reads; caller cannot
   const noCa = f.resolver({ ca: undefined });
   await assert.rejects(noCa.resolve());
   assert.equal(f.state.calls, 1, 'untrusted TLS cannot reach HTTP handler');
+});
+
+test('PLC DID JSON media type is accepted without accepting unrelated content', async t => {
+  const f = await fixture(t); const current = identity(); f.state.doc = current.doc;
+  const resolver = f.resolver(); f.state.mode = 'did-json';
+  assert.equal((await resolver.verify(current.options)).cardSignatureValid, true);
+  await delay(40); f.state.mode = 'html';
+  await assert.rejects(resolver.resolve(), /Invalid trusted resolver response/);
 });
 
 test('rotation retires prior keys, revocation denies all, journal rejects rollback across restart', async t => {

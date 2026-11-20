@@ -68,7 +68,8 @@ function readDocument(url, agent, timeoutMs) {
   return new Promise((resolve, reject) => {
     const request = https.get(url, { agent, headers: { accept: 'application/json' } }, response => {
       if ([404, 410].includes(response.statusCode)) { response.destroy(); return reject(new MissingKey('Authoritative DID absent')); }
-      if (response.statusCode !== 200 || response.headers['content-type']?.split(';')[0] !== 'application/json' ||
+      const mediaType = response.headers['content-type']?.split(';')[0].trim().toLowerCase();
+      if (response.statusCode !== 200 || !['application/json', 'application/did+ld+json'].includes(mediaType) ||
           response.headers['content-encoding'] && response.headers['content-encoding'] !== 'identity' ||
           Number(response.headers['content-length']) > 32768) {
         response.destroy(); return reject(new Error('Invalid trusted resolver response'));

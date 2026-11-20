@@ -21,6 +21,9 @@
 # cores/2. vlpds raises its soft open-files limit to the hard limit at startup
 # (docker run --ulimit nofile=1048576:1048576 sets the hard limit).
 
+# Operator-selected build stage; default remains the existing Rust/UI image.
+ARG VLPDS_RUNTIME_STAGE=pds-runtime
+
 # --- web UI -----------------------------------------------------------------
 # the UI build is the same on every platform, so it runs natively
 FROM --platform=$BUILDPLATFORM node:26.12.1-bookworm-slim AS ui
@@ -102,6 +105,21 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/$t/$CARGO_PROFILE/vlpds target/$t/$CARGO_PROFILE/vlpds-bucket-probe /out/ \
     && if [ "$TARGETARCH" = "$BUILDARCH" ]; then /out/vlpds --help >/dev/null && /out/vlpds-bucket-probe --help >/dev/null; fi
 
+# --- explicitly selected native agent profile runtime ------------------------
+# Build only with --target agent-a2a; default runtime remains Rust/UI only.
+FROM node:26.12.1-bookworm-slim AS agent-profile-build
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gzip && rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/agent-contact-pilot/production/a2a-profile-runtime
+COPY tools/agent-contact-pilot/production/a2a-profile-runtime/package*.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
+WORKDIR /opt/agent-contact-pilot
+COPY tools/agent-contact-pilot/pilot.mjs ./
+COPY tools/agent-contact-pilot/production/bridge.mjs tools/agent-contact-pilot/production/run-bridge.mjs tools/agent-contact-pilot/production/supervisor.mjs tools/agent-contact-pilot/production/a2a-profile-assert.mjs tools/agent-contact-pilot/production/a2a-profile-dispatch-production.mjs tools/agent-contact-pilot/production/install-workerd.sh ./production/
+RUN printf '%s  production/a2a-profile-assert.mjs\n%s  production/a2a-profile-dispatch-production.mjs\n' 45500d83afc079361af1a8e0eaf9b5da994b11f248d486cca6ba99dd59eb2b28 848fb40c1ded70137f97d4c3ba096f84554cef8fcda74790230a5c56ac5ee90b | sha256sum -c -
+RUN sh production/install-workerd.sh "$TARGETARCH"
+RUN node production/a2a-profile-runtime/node_modules/@kodycodes/cli/dist/bin.js --version
+
 # --- runtime ----------------------------------------------------------------
 # runtime-base is everything but the binaries, the UI and the commit: the base
 # build/oci-image.sh puts its layers on (pinned in build/oci-base), so the image
@@ -126,7 +144,7 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=60s --retries=3 \
 # tini forwards SIGTERM so vlpds drains and releases its shards gracefully
 ENTRYPOINT ["/usr/bin/tini", "--", "vlpds"]
 
-FROM runtime-base AS runtime
+FROM runtime-base AS pds-runtime
 # vlpds-bucket-probe: the bucket pre-flight (DESIGN.md "Choosing a bucket"),
 # run with --entrypoint from the node's own env
 COPY --from=build /out/vlpds /out/vlpds-bucket-probe /usr/local/bin/
@@ -137,3 +155,16 @@ COPY --from=ui /src/ui/dist /usr/share/vlpds/ui
 # the binary on every commit.
 ARG VLPDS_GIT_REV=""
 ENV VLPDS_GIT_REV=${VLPDS_GIT_REV}
+
+# Explicit opt-in artifact; no bridge or credential is enabled by selecting it.
+FROM pds-runtime AS agent-a2a
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 libatomic1 && rm -rf /var/lib/apt/lists/*
+COPY --from=agent-profile-build /usr/local/bin/node /usr/local/bin/node
+COPY --from=agent-profile-build /opt/agent-contact-pilot /opt/agent-contact-pilot
+COPY --from=agent-profile-build /opt/agent-home /opt/agent-home
+USER vlpds:vlpds
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/node", "/opt/agent-contact-pilot/production/supervisor.mjs"]
+
+# Keep the existing default image, entrypoint and dependency footprint.
+FROM ${VLPDS_RUNTIME_STAGE} AS runtime

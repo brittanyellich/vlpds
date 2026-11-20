@@ -605,11 +605,13 @@ pub async fn route(
     next: axum::middleware::Next,
 ) -> Response {
     let path = req.uri().path();
+    let app = router.app();
+    let agent = app.is_some_and(|a| a.config.agent_a2a.is_some())
+        && matches!(path, crate::agent_contact_pilot::AGENT_PATH | crate::agent_contact_pilot::CARD_PATH);
     let (xrpc, oauth) = (path.starts_with("/xrpc/"), path.starts_with("/oauth/"));
-    if !xrpc && !oauth {
+    if !xrpc && !oauth && !agent {
         return next.run(req).await;
     }
-    let app = router.app();
     // a client's copy never counts; a peer's only with its valid token
     let client_ip = req.headers_mut().remove(crate::ratelimit::CLIENT_IP_HEADER);
     let resent = req.headers_mut().remove(RESEND_HEADER);
@@ -648,7 +650,13 @@ pub async fn route(
         }
         return next.run(req).await;
     }
-    let target = if xrpc { xrpc_target(router, app, req).await } else { oauth_target(app, req).await };
+    let target = if agent {
+        Ok((req, Some(crate::agent_endorsement::AGENT.to_string())))
+    } else if xrpc {
+        xrpc_target(router, app, req).await
+    } else {
+        oauth_target(app, req).await
+    };
     let (req, key) = match target {
         Ok(t) => t,
         Err(r) => return r,
@@ -659,7 +667,7 @@ pub async fn route(
     let Some(owner) = key.as_deref().and_then(|k| router.remote_owner(k)) else {
         return next.run(req).await;
     };
-    let ttfb = ttfb_for(&req);
+    let ttfb = if agent { Duration::from_secs(90) } else { ttfb_for(&req) };
     forward_counted(client, &owner, req, token, ttfb).await
 }
 

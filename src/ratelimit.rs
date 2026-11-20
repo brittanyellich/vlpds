@@ -1455,7 +1455,8 @@ pub async fn layer(
         || FEDERATED_PATHS.contains(&path)
         || path.starts_with("/oauth/federated/callback/");
     let oauth_endpoint = post && OAUTH_IP_PATHS.contains(&path);
-    if !oauth_form && !oauth_endpoint && (!path.starts_with("/xrpc/") || unlimited_path(path)) {
+    let agent = matches!(path, crate::agent_contact_pilot::AGENT_PATH | crate::agent_contact_pilot::CARD_PATH);
+    if !oauth_form && !oauth_endpoint && !agent && (!path.starts_with("/xrpc/") || unlimited_path(path)) {
         return next.run(req).await;
     }
     // the admin token's bypass, for the operator a proxy named

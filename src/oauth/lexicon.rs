@@ -254,6 +254,18 @@ async fn fetch_bytes(url: &str, dev_mode: bool) -> Result<Vec<u8>, String> {
 /// Every block hashes to its CID, the root commit is `did`'s and signed by
 /// `key_multibase`, and its MST maps `rpath` to the included record.
 pub fn verify_record_proof(car: &[u8], did: &str, key_multibase: &str, rpath: &str) -> Result<J, String> {
+    let (_, record) = verify_record_inclusion(car, did, key_multibase, rpath)?;
+    check_record_type(record.ok_or("Record not found in proof")?.1)
+}
+
+/// Native cryptographic primitive only: caller supplies trusted DID/key/path and
+/// enforces transport, byte limits, current head and application record semantics.
+pub(crate) fn verify_record_inclusion(
+    car: &[u8],
+    did: &str,
+    key_multibase: &str,
+    rpath: &str,
+) -> Result<(Cid, Option<(Cid, J)>), String> {
     let (roots, blocks) = vlatproto::car::read_car(car).map_err(|e| e.to_string())?;
     let root = *roots.first().ok_or("CAR has no root")?;
     let mut map: HashMap<Cid, Vec<u8>> = HashMap::new();
@@ -284,9 +296,11 @@ pub fn verify_record_proof(car: &[u8], did: &str, key_multibase: &str, rpath: &s
     // the rest of an attacker's block set is never decoded
     let tree =
         vlatproto::mst::Tree::load_path_from_blocks(&map, *data, rpath.as_bytes()).map_err(|e| format!("{e:?}"))?;
-    let rcid = tree.get(rpath.as_bytes()).map_err(|e| format!("{e:?}"))?.ok_or("Record not found in proof")?;
+    let Some(rcid) = tree.get(rpath.as_bytes()).map_err(|e| format!("{e:?}"))? else {
+        return Ok((root, None));
+    };
     let rec = Value::decode(map.get(&rcid).ok_or("record block missing")?).map_err(|e| e.to_string())?;
-    check_record_type(rec.to_json())
+    Ok((root, Some((rcid, rec.to_json()))))
 }
 
 /// Compact signatures, low-S only (high-S is Ok(false), as the reference's

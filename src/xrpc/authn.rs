@@ -592,6 +592,38 @@ pub async fn verify_service_jwt(app: &App, token: &str, lxm: Option<&str>) -> XR
     verify_jwt(app, token, lxm, None, false, false).await
 }
 
+/// Opt-in A2A caller auth: one configured issuer, normal DID-key verification,
+/// this PDS audience and exact contact method. Never infer this from endorsement.
+pub async fn verify_agent_contact_jwt(app: &App, token: &str, caller: &str) -> XResult<ServiceAuth> {
+    if token.len() > 8192 {
+        return Err(service_auth_err("BadJwt", "token limit"));
+    }
+    use base64::Engine;
+    let header: J = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token.split('.').next().unwrap_or(""))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .ok_or_else(|| service_auth_err("BadJwt", "invalid JWT header"))?;
+    if header["typ"] != "JWT" || !matches!(header["alg"].as_str(), Some("ES256K" | "ES256")) {
+        return Err(service_auth_err("BadJwt", "service JWT profile required"));
+    }
+    let payload = unverified_claims(token).ok_or_else(|| service_auth_err("BadJwt", "invalid token"))?;
+    let now = vlatproto::tid::now_micros() / 1_000_000;
+    let iat = payload["iat"].as_u64().ok_or_else(|| service_auth_err("BadJwt", "iat required"))?;
+    let exp = payload["exp"].as_u64().ok_or_else(|| service_auth_err("BadJwt", "exp required"))?;
+    if iat > now + 5
+        || iat.saturating_add(60) < now
+        || exp <= now
+        || exp > now + 65
+        || exp <= iat
+        || exp > iat.saturating_add(60)
+        || payload.get("nbf").is_some_and(|v| v.as_u64().is_none_or(|n| n > now))
+    {
+        return Err(service_auth_err("BadJwt", "contact token freshness refused"));
+    }
+    verify_jwt(app, token, Some("chat.atagents.agent.contact"), Some(&[caller.to_string()]), false, false).await
+}
+
 /// Service auth for the space methods whose audience depends on the
 /// request (reference `serviceAuth`, `audience: null`): notifyRepoUpdate to a
 /// space host (`{authority}#atproto_pds` or the bare authority DID)

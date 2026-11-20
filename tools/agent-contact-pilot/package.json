@@ -1,0 +1,10 @@
+{
+  "name": "exp-710-local-agent-pilot",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=26" },
+  "scripts": {
+    "test": "node --test pilot.test.mjs signed-card.test.mjs card-resolver.test.mjs",
+    "check": "node --check pilot.mjs && node --check run.mjs && node --check pilot.test.mjs && node --check discovery.mjs && node --check native-smoke.mjs && node --check signed-card.mjs && node --check signed-card.test.mjs && node --check fixtures/signed-card-worker.mjs && node --check card-resolver.mjs && node --check card-resolver.test.mjs"
+  }
+}

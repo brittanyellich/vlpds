@@ -748,6 +748,10 @@ struct Args {
     /// MethodNotImplemented.
     #[arg(long, env = "VLPDS_SPACES")]
     spaces: bool,
+    /// EXP-710: mount the fixed-agent authenticated sidecar, dev mode and an
+    /// exact IPv4 loopback listener only. Value is http://127.0.0.1:PORT.
+    #[arg(long)]
+    agent_contact_pilot: Option<String>,
     /// Most records one account's repo in one space may hold (--spaces).
     /// getRepo exports a space repo as a CAR with one index block, about
     /// 60 bytes per record.
@@ -1517,6 +1521,11 @@ async fn run(args: Args) -> anyhow::Result<()> {
         vlpds::xrpc::blobs::size_flags(args.max_blob_mb, args.max_blob_override_mb)?;
     let cfg = Config {
         public_url: args.public_url.clone(),
+        agent_contact_pilot: args
+            .agent_contact_pilot
+            .as_deref()
+            .map(|backend| vlpds::agent_contact_pilot::Mount::new(backend, &args.public_url, args.dev_mode))
+            .transpose()?,
         handle_domain: args.handle_domain.clone(),
         service_did: args.service_did.clone(),
         jwt_secret: secret(&args.jwt_secret, args.dev_mode, server::DEV_JWT_SECRET),
@@ -1707,6 +1716,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
         );
     }
     let listener = bind(&args.listen, args.listen_backlog).await?;
+    if let Some(mount) = &cfg.agent_contact_pilot {
+        mount.validate_listener(listener.local_addr()?)?;
+    }
     let metrics_listener = match &metrics_addr {
         Some(a) => Some(bind(a, args.listen_backlog).await?),
         None => None,

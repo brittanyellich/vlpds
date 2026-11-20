@@ -16,6 +16,8 @@ pub use crate::appview_override::AppviewOverride;
 #[derive(Clone)]
 pub struct Config {
     pub public_url: String,
+    /// Explicit dev-only loopback mount; None leaves contact routes absent.
+    pub agent_contact_pilot: Option<crate::agent_contact_pilot::Mount>,
     pub handle_domain: String,
     pub service_did: String,
     pub jwt_secret: String,
@@ -267,6 +269,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             public_url: "http://localhost:2583".into(),
+            agent_contact_pilot: None,
             handle_domain: "vlpds.test".into(),
             service_did: "did:web:localhost".into(),
             jwt_secret: DEV_JWT_SECRET.into(),
@@ -374,6 +377,9 @@ impl Default for Config {
 }
 
 pub async fn build(cfg: Config) -> anyhow::Result<Arc<xrpc::App>> {
+    if let Some(mount) = &cfg.agent_contact_pilot {
+        mount.validate(cfg.dev_mode, &cfg.public_url)?;
+    }
     let ui = Arc::new(xrpc::WebUi::load(cfg.ui_dir.as_deref())?);
     let plan = crate::memory::init(cfg.memory_plan()?);
     let (caps, budget) = crate::caches::resolve(
@@ -673,6 +679,9 @@ pub async fn spawn(
     public: tokio::net::TcpListener,
     peer: Option<tokio::net::TcpListener>,
 ) -> anyhow::Result<(Arc<xrpc::App>, std::net::SocketAddr)> {
+    if let Some(mount) = &cfg.agent_contact_pilot {
+        mount.validate_listener(public.local_addr()?)?;
+    }
     anyhow::ensure!(
         peer.is_some() == cfg.peer_tls.is_some(),
         "a peer listener goes with peer TLS, and peer TLS with a peer listener"
@@ -773,6 +782,10 @@ const METRICS_PATHS: [&str; 2] = ["/metrics", "/debug/pprof/"];
 /// The peer listener's router, and the base of [`public_router`].
 pub fn router(app: &Arc<xrpc::App>) -> axum::Router {
     let r = with_forwarding(app, xrpc::router(app.clone()));
+    let r = match &app.config.agent_contact_pilot {
+        Some(mount) => r.merge(mount.routes()),
+        None => r,
+    };
     if app.config.metrics_listen.is_none() {
         return r;
     }

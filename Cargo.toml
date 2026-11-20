@@ -141,6 +141,12 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 name = "all"
 path = "tests/all/main.rs"
 
+# EXP-710's repository-backed discovery proof stays separate from public ingress
+# and the main suite; it creates only disposable loopback, memory-only repos.
+[[test]]
+name = "agent_contact_repository"
+path = "tests/agent_contact_repository.rs"
+
 # Argon2 overload shedding: its own binary because it saturates the
 # process-wide Argon2 permits (every other login in the process would shed)
 [[test]]

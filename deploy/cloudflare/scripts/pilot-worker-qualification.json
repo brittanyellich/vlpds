@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "nativeImageDigest": "sha256:2e254f9394937be2141e192b715f88867a349bbd85c80d9279e435282b11161d",
+  "nativeSourceRevision": "21117d08d00b6d1bb95430c0cc4a89eb5ec59785",
+  "workerChanges": "Fixed independent 600-second admission lease only; native binary/image untouched",
+  "files": {
+    "src/index.ts": "b64537be8587915466b55886b2c70d873e78423ce9ab738213b6def64192e0d6",
+    "src/runtime.ts": "43b3f4b5d557a22c2b32de13c3be3369d9dac96ebd38469c49b8ec030c98d4b7",
+    "package.json": "3d391009074156f9878278f0bc863e207199642384deea0e24694d29db9cd39f"
+  }
+}

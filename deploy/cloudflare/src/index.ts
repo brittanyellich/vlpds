@@ -1,12 +1,13 @@
 import { DurableObject } from "cloudflare:workers";
 import { permitted, forwarded, containerRequest } from "./routing.ts";
 import { OperatorGateway, operatorPath, secure } from "./operator.ts";
-import { agentEnvironment, runtimeEntrypoint } from "./runtime.ts";
+import { agentEnabled, agentEnvironment, runtimeEntrypoint } from "./runtime.ts";
 
 interface Env {
   PDS: DurableObjectNamespace<Pds>;
   PUBLIC_HOST: string;
   AGENT_A2A_ENABLED?: string;
+  AGENT_A2A_EXPIRES_AT?: string;
   AGENT_A2A_RUNTIME?: string;
   AGENT_A2A_SIGNED_CARD_JSON?: string;
   AGENT_A2A_CARD_KEY_MULTIBASE?: string;
@@ -65,7 +66,7 @@ export class Pds extends DurableObject<Env> {
     if (!c.running) {
       const env = this.environment();
       c.start({ image: c.images.pds, instance: "standard-3", enableInternet: true, env,
-        entrypoint: runtimeEntrypoint(this.env.AGENT_A2A_ENABLED === "true") });
+        entrypoint: runtimeEntrypoint(agentEnabled(this.env)) });
     }
     await c.setInactivityTimeout(INACTIVITY_MS);
     await this.ctx.storage.setAlarm(Date.now() + HEARTBEAT_MS);
@@ -167,7 +168,7 @@ export class Pds extends DurableObject<Env> {
         return secure(new Response("Sign-in unavailable. Start again from the operator homepage.", {status:502}));
       }
     }
-    if (!permitted(url, this.env.PUBLIC_HOST, this.env.HANDLE_DOMAIN, this.env.AGENT_A2A_ENABLED === "true")) return new Response("Not found", { status: 404 });
+    if (!permitted(url, this.env.PUBLIC_HOST, this.env.HANDLE_DOMAIN, agentEnabled(this.env))) return new Response("Not found", { status: 404 });
     if (this.env.ENABLED !== "true") return new Response("Deployment pending preflight", { status: 503 });
     return this.proxy(request);
   }
@@ -194,7 +195,7 @@ export default {
     const admin = !!env.ADMIN_HOST && operatorPath(url, env.ADMIN_HOST);
     const deploy = !!env.ADMIN_HOST && url.protocol === "https:" && !url.port &&
       url.hostname === env.ADMIN_HOST && DEPLOY_PATHS.has(url.pathname);
-    if (!admin && !deploy && !permitted(url, env.PUBLIC_HOST, env.HANDLE_DOMAIN, env.AGENT_A2A_ENABLED === "true")) return new Response("Not found", { status: 404 });
+    if (!admin && !deploy && !permitted(url, env.PUBLIC_HOST, env.HANDLE_DOMAIN, agentEnabled(env))) return new Response("Not found", { status: 404 });
     return env.PDS.getByName(INSTANCE).fetch(forwarded(request));
   },
 } satisfies ExportedHandler<Env>;

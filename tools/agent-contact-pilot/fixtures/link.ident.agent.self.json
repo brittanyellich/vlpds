@@ -1,0 +1,7 @@
+{
+  "uri": "at://did:plc:6tlvgafuonoighfrtpejff5m/link.ident.agent/self",
+  "value": {
+    "$type": "link.ident.agent",
+    "agentCardUrl": "http://127.0.0.1:25883/agents/did%3Aplc%3A6tlvgafuonoighfrtpejff5m/.well-known/agent-card.json"
+  }
+}

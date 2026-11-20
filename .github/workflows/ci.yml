@@ -63,6 +63,30 @@ jobs:
       # suite needs no MinIO or docker.
       - run: cargo test --locked --test all --test argon2_shed --test fresh_metrics
 
+  agent-contact:
+    name: Local agent contact pilot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "26.12.1"
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: agent-contact
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: npm --prefix tools/agent-contact-pilot test
+      - run: npm --prefix tools/agent-contact-pilot run check
+      - run: cargo test --locked --no-default-features --lib agent_contact_pilot
+      - name: Disposable repository and same-DID card acceptance (sequential)
+        run: cargo test --locked --no-default-features --test agent_contact_repository -- --test-threads=1
+      - run: cargo build --locked --no-default-features --bin vlpds
+      - name: Native default-off and signed routing acceptance
+        run: node tools/agent-contact-pilot/native-smoke.mjs target/debug/vlpds
+
   ui:
     name: UI and docs
     runs-on: ubuntu-24.04

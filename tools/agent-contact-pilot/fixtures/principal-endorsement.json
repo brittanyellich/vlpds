@@ -1,0 +1,7 @@
+{
+  "uri": "at://did:plc:exquicw7jew5vxerpgvc3x6w/link.ident.endorsement/did:plc:6tlvgafuonoighfrtpejff5m",
+  "value": {
+    "$type": "link.ident.endorsement",
+    "agent": "did:plc:6tlvgafuonoighfrtpejff5m"
+  }
+}

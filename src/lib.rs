@@ -1,6 +1,7 @@
 #![allow(clippy::type_complexity)]
 
 pub mod admin_proxy;
+pub mod agent_contact_pilot;
 pub mod appview_override;
 pub mod asn;
 pub mod auth;

@@ -1,0 +1,18 @@
+{
+  "lexicon": 1,
+  "id": "link.ident.agent",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "literal:self",
+      "description": "EXP-710 local draft only. Not registered, published, or an ownership/authorization proof.",
+      "record": {
+        "type": "object",
+        "required": ["agentCardUrl"],
+        "properties": {
+          "agentCardUrl": { "type": "string", "format": "uri", "maxLength": 2048 }
+        }
+      }
+    }
+  }
+}

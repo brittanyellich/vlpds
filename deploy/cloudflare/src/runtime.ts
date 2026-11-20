@@ -8,9 +8,16 @@ export const runtimeArgs = [
   '--backfill-cache-mb', '32', '--firehose-threads', '1',
 ];
 
-export interface AgentRuntimeConfig { AGENT_A2A_SIGNED_CARD_JSON?: string; AGENT_A2A_CARD_KEY_MULTIBASE?: string; AGENT_A2A_ENABLED?: string; AGENT_A2A_RUNTIME?: string; AGENT_A2A_CALLER_DID?: string; AGENT_A2A_BRIDGE_KEY?: string; AGENT_A2A_KODY_TOKEN?: string; AGENT_A2A_CAPACITY?: string }
+export interface AgentRuntimeConfig { AGENT_A2A_EXPIRES_AT?: string; AGENT_A2A_SIGNED_CARD_JSON?: string; AGENT_A2A_CARD_KEY_MULTIBASE?: string; AGENT_A2A_ENABLED?: string; AGENT_A2A_RUNTIME?: string; AGENT_A2A_CALLER_DID?: string; AGENT_A2A_BRIDGE_KEY?: string; AGENT_A2A_KODY_TOKEN?: string; AGENT_A2A_CAPACITY?: string }
+// A fixed edge lease closes new requests independently of Actions or token TTL.
+// Missing/malformed/expired/overlong leases are OFF, including after restart.
+export function agentEnabled(e: AgentRuntimeConfig, now = Math.floor(Date.now()/1000)): boolean {
+ if(e.AGENT_A2A_ENABLED !== "true" || !Number.isSafeInteger(now) || now<0 || !/^[1-9]\d{9}$/.test(e.AGENT_A2A_EXPIRES_AT ?? "")) return false;
+ const deadline=Number(e.AGENT_A2A_EXPIRES_AT);
+ return Number.isSafeInteger(deadline) && deadline>now && deadline<=now+600;
+}
 export function agentEnvironment(e: AgentRuntimeConfig): Record<string,string> {
- if (e.AGENT_A2A_ENABLED !== "true") return {};
+ if (!agentEnabled(e)) return {};
  const capacity=e.AGENT_A2A_CAPACITY ?? "1000";
  if(!e.AGENT_A2A_SIGNED_CARD_JSON || e.AGENT_A2A_SIGNED_CARD_JSON.length>8192 || !e.AGENT_A2A_CARD_KEY_MULTIBASE?.startsWith("z") || e.AGENT_A2A_CARD_KEY_MULTIBASE.length>128) throw new Error("Production signed Card required");
  try { JSON.parse(e.AGENT_A2A_SIGNED_CARD_JSON); } catch { throw new Error("Invalid signed Card JSON"); }

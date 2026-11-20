@@ -1,0 +1,103 @@
+name: Bounded identity-test pilot
+on:
+  workflow_dispatch:
+    inputs:
+      card_json:
+        description: Exact previously verified local signed Card file bytes (public metadata only)
+        type: string
+        required: true
+      credential_metadata:
+        description: Custodian metadata-only normalized API fields; NEVER the token value
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: crate-pds-cloudflare-production
+  cancel-in-progress: false
+jobs:
+  pilot:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: deploy/cloudflare
+    env:
+      PILOT_CARD_JSON: ${{ inputs.card_json }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '26.12.1'
+          cache: npm
+          cache-dependency-path: deploy/cloudflare/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm test && npm run typecheck && npm run test:runtime
+      - name: Fresh exact-artifact OFF preflight
+        env:
+          PILOT_CREDENTIAL_METADATA: ${{ inputs.credential_metadata }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VLPDS_DEPLOY_TOKEN: ${{ secrets.VLPDS_DEPLOY_TOKEN }}
+          DEPLOY_CONFIG: ${{ secrets.VLPDS_CLOUDFLARE_CONFIG_JSON }}
+        run: node scripts/pilot-runner.mjs preflight
+      - name: Provision only two pilot secrets while OFF
+        env:
+          VLPDS_AGENT_BRIDGE_KEY: ${{ secrets.VLPDS_AGENT_BRIDGE_KEY }}
+          VLPDS_AGENT_KODY_TOKEN: ${{ secrets.VLPDS_AGENT_KODY_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VLPDS_DEPLOY_TOKEN: ${{ secrets.VLPDS_DEPLOY_TOKEN }}
+          DEPLOY_CONFIG: ${{ secrets.VLPDS_CLOUDFLARE_CONFIG_JSON }}
+        run: node scripts/pilot-runner.mjs provision
+      - name: Activate guarded Otto-only pilot
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VLPDS_DEPLOY_TOKEN: ${{ secrets.VLPDS_DEPLOY_TOKEN }}
+          DEPLOY_CONFIG: ${{ secrets.VLPDS_CLOUDFLARE_CONFIG_JSON }}
+        run: node scripts/pilot-runner.mjs activate
+      - name: Publish sanitized activation-ready receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: exp710-activation-ready-${{ github.run_id }}
+          path: ${{ runner.temp }}/exp710-activation-ready.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Observe bounded acceptance window
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VLPDS_DEPLOY_TOKEN: ${{ secrets.VLPDS_DEPLOY_TOKEN }}
+          DEPLOY_CONFIG: ${{ secrets.VLPDS_CLOUDFLARE_CONFIG_JSON }}
+        run: node scripts/pilot-runner.mjs wait
+      - name: Close edge and stop active runtime even after failed acceptance
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VLPDS_DEPLOY_TOKEN: ${{ secrets.VLPDS_DEPLOY_TOKEN }}
+          DEPLOY_CONFIG: ${{ secrets.VLPDS_CLOUDFLARE_CONFIG_JSON }}
+        run: node scripts/pilot-runner.mjs disable
+      - name: Remove only pilot bindings after verified OFF
+        id: cleanup
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VLPDS_DEPLOY_TOKEN: ${{ secrets.VLPDS_DEPLOY_TOKEN }}
+          DEPLOY_CONFIG: ${{ secrets.VLPDS_CLOUDFLARE_CONFIG_JSON }}
+        run: node scripts/pilot-runner.mjs cleanup
+      - name: Retain sanitized OFF cleanup receipt
+        if: always() && steps.cleanup.outputs.receipt == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: exp710-off-cleaned-${{ github.run_id }}
+          path: ${{ runner.temp }}/exp710-off-cleaned.json
+          if-no-files-found: error
+          retention-days: 1

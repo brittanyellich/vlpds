@@ -1,0 +1,73 @@
+// Only the reviewed production Actions workflow may invoke this CLI. No profile
+// mint/revoke or public repo write is implemented here.
+import {readFileSync,writeFileSync,appendFileSync,existsSync,mkdtempSync,rmSync}from'node:fs';
+import {execFileSync}from'node:child_process';import{join,resolve}from'node:path';
+import{createHash}from'node:crypto';
+import{checkCandidateToken}from'./pilot-token-check.mjs';
+import{sealState,openState}from'./pilot-state.mjs';import{fileURLToPath}from'node:url';
+import{PILOT,normalizeCredentialMetadata}from'./pilot-activation-plan.mjs';
+import{preparePilotConfig}from'./pilot-config.mjs';import{PilotProvider}from'./pilot-provider.mjs';
+import{PilotLifecycle}from'./pilot-lifecycle.mjs';import{cloudflareSecretTransport}from'./pilot-secret-transport.mjs';
+const env=process.env,now=()=>Math.floor(Date.now()/1000),sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const mode=process.argv[2],root=resolve(fileURLToPath(new URL('..',import.meta.url)));
+let stateFile,receiptFile;
+const safeEmit=value=>console.log(JSON.stringify(value));
+async function main(){
+ if(!['preflight','provision','activate','wait','disable','cleanup'].includes(mode)||env.GITHUB_REPOSITORY!=='brittanyellich/vlpds'||env.GITHUB_REF!=='refs/heads/main'||env.GITHUB_RUN_ATTEMPT!=='1'||!/^\d+$/.test(env.GITHUB_RUN_ID??'')||!/^[a-f0-9]{40}$/.test(env.GITHUB_SHA??'')||!env.RUNNER_TEMP?.startsWith('/home/runner/work/_temp'))throw 0;
+ stateFile=join(env.RUNNER_TEMP,'exp710-pilot-state.json');receiptFile=join(env.RUNNER_TEMP,'exp710-activation-ready.json');
+ const card=env.PILOT_CARD_JSON;
+ if(typeof card!=='string'||createHash('sha256').update(card).digest('hex')!==PILOT.cardHash)throw 0;
+ // Do not rebuild or silently ship different Worker code/dependencies. The
+ // qualified source may differ only in workflow/operator scripts/tests/docs.
+ execFileSync('git',['diff','--exit-code',PILOT.revision,'HEAD','--','deploy/cloudflare/src','deploy/cloudflare/package-lock.json',':(exclude)deploy/cloudflare/src/index.ts',':(exclude)deploy/cloudflare/src/runtime.ts'],{cwd:resolve(root,'../..'),stdio:'pipe',env:{PATH:'/usr/bin:/bin'},timeout:10000});
+ const qualificationBytes=readFileSync(join(root,'scripts/pilot-worker-qualification.json'));
+ const qualification=JSON.parse(qualificationBytes);
+ if(qualification.version!==1 || qualification.nativeImageDigest!==PILOT.digest || qualification.nativeSourceRevision!==PILOT.revision || JSON.stringify(Object.keys(qualification.files).sort())!==JSON.stringify(['package.json','src/index.ts','src/runtime.ts']))throw 0;
+ for(const [file,hash]of Object.entries(qualification.files))if(createHash('sha256').update(readFileSync(join(root,file))).digest('hex')!==hash)throw 0;
+ const workerQualificationSha256=createHash('sha256').update(qualificationBytes).digest('hex');
+ const identity={workerQualificationSha256,repository:env.GITHUB_REPOSITORY,runId:Number(env.GITHUB_RUN_ID),head:env.GITHUB_SHA};
+ const save=s=>writeFileSync(stateFile,sealState(s,env.VLPDS_DEPLOY_TOKEN),{mode:0o600});
+ const load=()=>openState(readFileSync(stateFile),env.VLPDS_DEPLOY_TOKEN,identity);
+ const provider=new PilotProvider({account:env.CLOUDFLARE_ACCOUNT_ID,cfToken:env.CLOUDFLARE_API_TOKEN,deployToken:env.VLPDS_DEPLOY_TOKEN,fetchImpl:fetch,now});
+ const deploy=async (enabled,deadline)=>{
+  const config=preparePilotConfig({...env,DEPLOY_TOKEN:env.VLPDS_DEPLOY_TOKEN},card,enabled,deadline);
+  const tmp=mkdtempSync(join(env.RUNNER_TEMP,'exp710-config-'));
+  // Config's main path resolves relative to this file; use an absolute reviewed
+  // source path, same module as the qualified OFF Worker. Image remains pinned.
+  config.main=join(root,'src/index.ts');const path=join(tmp,'pilot.json');writeFileSync(path,JSON.stringify(config),{mode:0o600});
+  try {const output=execFileSync(process.execPath,[join(root,'node_modules/wrangler/bin/wrangler.js'),'deploy','--config',path,'--containers-rollout','none'],{
+    cwd:root,env:{PATH:'/usr/bin:/bin',HOME:tmp,TMPDIR:tmp,CLOUDFLARE_API_TOKEN:env.CLOUDFLARE_API_TOKEN,CLOUDFLARE_ACCOUNT_ID:env.CLOUDFLARE_ACCOUNT_ID,WRANGLER_SEND_METRICS:'false',WRANGLER_LOG:'info'},
+    stdio:'pipe',maxBuffer:262144,timeout:180000});const ids=[...output.toString('utf8').matchAll(/Current Version ID:\s*([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/g)];if(ids.length!==1)throw 0;return ids[0][1];}finally{rmSync(tmp,{recursive:true,force:true});}
+ };
+ const remove=async()=>{
+  // Null deletes only the two pilot bindings via the same documented bulk API.
+  const url=provider.api+'/secrets-bulk';let response;
+  try {response=await fetch(url,{method:'PATCH',redirect:'error',signal:AbortSignal.timeout(15000),headers:{Authorization:`Bearer ${env.CLOUDFLARE_API_TOKEN}`,'Content-Type':'application/merge-patch+json'},body:JSON.stringify({secrets:{AGENT_A2A_BRIDGE_KEY:null,AGENT_A2A_KODY_TOKEN:null}})});
+   if(response.status!==200)throw 0; // Independent binding readback follows.
+  }finally{await response?.body?.cancel().catch(()=>{});}
+ };
+ const lifecycle=new PilotLifecycle({provider,save,load,deploy,provision:cloudflareSecretTransport(fetch),introspect:(token,o)=>checkCandidateToken(token,{...o,fetchImpl:fetch}),remove,card,now,sleep,identity});
+ if(mode==='preflight'){
+  if(existsSync(stateFile))throw 0;
+  preparePilotConfig({...env,DEPLOY_TOKEN:env.VLPDS_DEPLOY_TOKEN},card,false);
+  const credential=normalizeCredentialMetadata(JSON.parse(env.PILOT_CREDENTIAL_METADATA),{now:now(),expectedOrg:PILOT.org});
+  await lifecycle.preflight({account:env.CLOUDFLARE_ACCOUNT_ID,credential});safeEmit({kind:'exp710-preflight',...identity,digest:PILOT.digest});
+ }else if(mode==='provision'){
+  await lifecycle.provisionSecrets({bridgeKey:env.VLPDS_AGENT_BRIDGE_KEY,profileToken:env.VLPDS_AGENT_KODY_TOKEN,cloudflareToken:env.CLOUDFLARE_API_TOKEN,account:env.CLOUDFLARE_ACCOUNT_ID});safeEmit({kind:'exp710-provisioned-off',...identity});
+ }else if(mode==='activate'){
+  const receipt=await lifecycle.activate();writeFileSync(receiptFile,JSON.stringify(receipt),{mode:0o600});safeEmit(receipt);
+ }else if(mode==='wait'){
+  const s=load();if(s.phase!=='active')throw 0;while(now()<s.deadline){try{const {meta}=await lifecycle.inspect(true,true,s.baseline,s.deadline);if(meta.id!==s.activeWorker)throw 0;}catch(e){if(now()>=s.deadline)break;throw e;}await sleep(Math.min(10000,(s.deadline-now())*1000));}safeEmit({kind:'exp710-window-ended',...identity});
+ }else if(mode==='disable'){
+  if(!existsSync(stateFile)){safeEmit({kind:'exp710-no-state-no-mutation',...identity});return;}
+  const s=load();if(s.phase==='preflight'){safeEmit({kind:'exp710-no-provision-no-mutation',...identity});return;}
+  await lifecycle.disable();safeEmit({kind:'exp710-disabled',...identity});
+ }else if(mode==='cleanup'){
+  if(!existsSync(stateFile))return;const s=load();if(s.phase==='preflight')return;
+  const receipt=await lifecycle.cleanup();receipt.checkedAt=now();receipt.maxExpiresAt=s.credential.maxExpiresAt;
+  writeFileSync(join(env.RUNNER_TEMP,'exp710-off-cleaned.json'),JSON.stringify(receipt),{mode:0o600});
+  if(env.GITHUB_OUTPUT)appendFileSync(env.GITHUB_OUTPUT,'receipt=true\n');
+  safeEmit(receipt);
+ }
+}
+main().catch(()=>{safeEmit({kind:'exp710-failed',phase:['preflight','provision','activate','wait','disable','cleanup'].includes(mode)?mode:'invalid',reconcile:true});process.exitCode=1;});

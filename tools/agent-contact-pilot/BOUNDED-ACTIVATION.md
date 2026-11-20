@@ -1,0 +1,138 @@
+# EXP-710 bounded activation candidate
+
+This workflow is a new production mutation path, not an extension of the status
+or restart-only workflows. Do not dispatch it until exact-head review/CI, merge,
+operator and Otto readiness, and approved credential custody are complete.
+
+The fixed artifact is Cloudflare platform digest
+`2e254f9394937be2141e192b715f88867a349bbd85c80d9279e435282b11161d`,
+Linux AMD64, native-profile-v1, qualified source21117d08. Guarded run44819495762
+passed its exact current/desired/running/OFF checks. This does not retroactively
+resolve the earlier unrelated8c710/fbf39 mapping. No image build, image push,
+account data change or public repository record write exists in this workflow.
+
+## Custody and prerequisites
+
+1. Freeze/review the workflow head. Require unchanged lockfile and Worker modules other than the separately
+   qualified lease-only index.ts/runtime.ts versus qualified21117d08. Pin
+   the exact reviewed Worker qualification file hashes before publishing. Read fresh authenticated current/desired/running,
+   exact original OFF Worker7572d63f-a93e-4bb3-876a-bba6348cba7e, current Card key,
+   public health/UI/Card404. Initial Worker must have no pilot secret bindings.
+2. Have Otto's reviewed caller harness ready first. It must keep operator unlock
+   and fresh service JWT local/private. No JWT or passphrase in workflow inputs,
+   receipts, logs, chat or artifacts. Only fixed read-only identity requests.
+3. Identity-test custodian mints an org-bound org:execute token for profile
+   prf_642a5cf465fa4528a8f7e075f29557c4,900-second sliding idle and3600-second
+   absolute maximum. Expected org is independently pinned from the prior revoked
+   actual fixture: c74cb336bbed5cca02db72fff3998b10f977c015aab112f0878d421d55d15ecf.
+   Verify again using available read-only owner metadata before mint. This is
+   separate from caller identity, endorsement proof and Card ownership.
+4. Keep the one-time value out of API output/logs. Via approved owner-controlled
+   stdin, set only GitHub production-environment secrets VLPDS_AGENT_KODY_TOKEN
+   and an independently random64-lowercase-hex VLPDS_AGENT_BRIDGE_KEY. Do not use
+   argv/env-file or repository files to transfer them. Any owner0600 temporary
+   custody files must be removed after transfer/revocation. Existing CF/deploy
+   secrets remain unchanged. Secret creation is separately audited by owner.
+5. Pass *metadata only*: id,created_at,expires_at,max_expires_at,idle_ttl_seconds,
+   profile_id,org_binding,org_id,scopes,status. ISO UTC timestamps are normalized;
+   unknown fields (including token) are rejected. Opaque token IDs are preserved
+   exactly for tokenGet/revoke. Fresh mint <=600seconds old at preflight; provision
+   must therefore begin promptly after mint. No implicit refresh or extension. Immediately before provision, call fixed
+   https://api.kody.codes/v1/tokens/current with the exact candidate bearer; reject
+   wrapper/unknown fields and compare authoritative id/org/profile/scopes/status/
+   absolute expiry to the custodian receipt. Sliding idle can move within the
+   server maximum, but it cannot move the fixed pilot deadline.
+6. card_json is the exact local signed artifact file bytes SHA256f02d7b8e...,
+   not a newly generated Card. Previously independent Node/native crypto checked
+   frozen unsigned JCS0239e2b2...; current published key must still match. HTTP
+   uses JSON serialization, so HTTP raw bytes need not match the local file hash.
+
+## Mutation and window
+
+Manual main-only run_attempt1, protected production environment, and the same
+production concurrency lock serialize this with deployment/restart operations.
+No secrets are passed to install/test/upload steps. Pilot token/key exist only
+in the provision step; the private fixed API transport receives them in memory.
+
+Private cross-step state has a domain-separated HMAC under the existing deploy
+secret; identity/phase/deadline/baseline tampering is rejected. This is not a
+security boundary against a compromised runner with access to process secrets.
+
+The pinned Wrangler4.158.0 implementation uses Workers secrets-bulk PATCH with
+application/merge-patch+json. Our adapter uses that same fixed account/script API
+with exactly two secret_text entries, deadline/body cap/no redirect/no retry and
+sanitized error. It performs no CLI execution, credential inheritance, secret
+file or raw log output. Wiping a Buffer does not zeroize JavaScript strings or
+provider plaintext custody. API success is insufficient: independent version and
+binding readback must remain OFF, with all ordinary bindings unchanged.
+
+Activation prepares the existing production config preserving storage, DO,
+routes and ordinary secrets, pins the same qualified image and adds only fixed
+Otto/Card/public agent vars. Pinned installed Wrangler publishes that reviewed
+Worker config with containers-rollout none. No runtime rebuild or image push.
+Native process configuration switches via one expected-image guarded restart.
+Ambiguous activation never gets an automatic second activation POST. OFF rollback
+is a distinct safety transition, not an activation retry.
+
+The acceptance deadline and fixed AGENT_A2A_EXPIRES_AT lease are preflight time+600seconds, inside the approved
+900idle/3600max credential envelope. At least300seconds must remain before
+activation begins. Read-only readiness polls retry only transient provider/boot
+failures; permanent configuration/image/Card drift stops immediately. While
+active, monitor exact image/Worker/Card/health repeatedly until the deadline.
+
+A successful activation step writes only a sanitized readiness artifact containing
+run/head/repository, exact digest and qualified revision, observed active Worker,
+fixed caller/recipient/profile, Card pin/hash/JCS and checkedAt/deadline. Otto must
+verify it through authenticated GitHub run/job/step/artifact APIs at the approved
+head and verify the live Card independently. A forwarded JSON body or boolean is
+not authority. The overall workflow can be in progress during the acceptance
+window; the named activation and receipt-upload steps must already have passed.
+
+## Acceptance and close
+
+Send one fixed SendMessage with a fresh <=60s Otto service JWT, then a deliberate
+fresh-JWT same-messageId/body/new-RPC-id request. Compare stable result/context and
+identityEvaluation metadata. Native proof produces relationship status; private
+Kody assertion is profile run provenance only. Do not claim measured exact CLI
+invocation count from cached replies alone. Service JWT auth has no jti replay
+store; earlier Ed25519 gateway replay401 tests do not apply to this native route.
+Stop on unresolved/conflicting decisions or transport ambiguity; no new-event
+workaround. No prompt/code/URL/profile/credential inputs are accepted.
+
+The workflow always attempts OFF Worker/config and separate guarded OFF restart,
+then requires health/UI/Card404 before removing only the two pilot CF bindings.
+It publishes a sanitized OFF receipt. Failed or ambiguous provision is reconciled
+by readback while OFF; no secret retry or needless process restart. Unexplained
+partial bindings/drift require operator reconciliation, not a bypass.
+
+The custodian must revoke the exact profile token immediately after acceptance,
+failure or rollback and verify tokenGet status revoked/active list. Delete only
+the newly created GitHub pilot secrets after revocation. The workflow lacks owner
+admin credentials and cannot perform token revocation itself; OFF receipt says
+revocation confirmation required. CF binding removal does not revoke the token.
+
+Runner loss/cancellation can prevent process cleanup and binding deletion.
+The fixed Worker lease independently closes both edge and DO admission of new
+Card/A2A requests at now>=deadline, including cached/replayed request paths.
+Missing/malformed/overlong leases fail closed; restarting after expiry selects the
+ordinary runtime. Already admitted in-flight work can finish within existing
+handler timeouts. Token use cannot renew the fixed lease. Lease expiry does not
+delete provider bindings or revoke Kody tokens; the custodian must revoke and the
+operator must reconcile OFF/cleanup on lost runner. Token absolute expiry also
+bounds new private Kody execution. This is not protection against provider clock
+compromise, privileged runner compromise or a separate operator changing vars.
+Preserve CAS/pending decisions, account data, keys, S3 and Durable Object identity.
+
+Only after accepted live evidence may the separately approved exact identity-test
+link.ident.agent/self pointer be written and discovery verified. This workflow
+has no account write credential and cannot publish it. Agree exact record value,
+perform compare-before-write and retain old value for rollback; no broader schema,
+profile, directory, enrollment or Spaces grant is included.
+
+## Local validation versus live proof
+
+Tests use synthetic tokens, simulated providers and injected transport. They prove
+sequencing, fixed destinations and guards, not real CF permission, secret API
+version semantics, Wrangler rollout-none behavior, live Kody execution or Otto
+acceptance. Exact live gates must pass; do not weaken them to make the first run
+succeed. No production credential was minted by these tests.

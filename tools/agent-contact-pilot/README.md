@@ -1,5 +1,10 @@
 # EXP-710 one-agent PDS contact pilot (local only)
 
+The newer default-off native production candidate and rollout gates are described
+in [NATIVE-ROLLOUT.md](NATIVE-ROLLOUT.md). The local-only workflow below remains
+separate; none of its loopback guards was relaxed. No production enablement or
+live record publication has occurred.
+
 This opt-in sidecar implements a stable per-agent Agent Card and authenticated
 A2A 1.0 JSON-RPC `SendMessage` route for one read-only skill. A disabled-by-default
 native PDS mount forwards only these two fixed routes to the local sidecar.

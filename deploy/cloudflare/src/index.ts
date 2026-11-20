@@ -1,11 +1,19 @@
 import { DurableObject } from "cloudflare:workers";
 import { permitted, forwarded, containerRequest } from "./routing.ts";
 import { OperatorGateway, operatorPath, secure } from "./operator.ts";
-import { runtimeArgs } from "./runtime.ts";
+import { agentEnvironment, runtimeEntrypoint } from "./runtime.ts";
 
 interface Env {
   PDS: DurableObjectNamespace<Pds>;
   PUBLIC_HOST: string;
+  AGENT_A2A_ENABLED?: string;
+  AGENT_A2A_RUNTIME?: string;
+  AGENT_A2A_SIGNED_CARD_JSON?: string;
+  AGENT_A2A_CARD_KEY_MULTIBASE?: string;
+  AGENT_A2A_CALLER_DID?: string;
+  AGENT_A2A_BRIDGE_KEY?: string;
+  AGENT_A2A_KODY_TOKEN?: string;
+  AGENT_A2A_CAPACITY?: string;
   ADMIN_HOST?: string;
   OPERATOR_DID?: string;
   HANDLE_DOMAIN: string;
@@ -57,7 +65,7 @@ export class Pds extends DurableObject<Env> {
     if (!c.running) {
       const env = this.environment();
       c.start({ image: c.images.pds, instance: "standard-3", enableInternet: true, env,
-        entrypoint: ["/usr/bin/tini", "--", "vlpds", ...runtimeArgs] });
+        entrypoint: runtimeEntrypoint(this.env.AGENT_A2A_ENABLED === "true") });
     }
     await c.setInactivityTimeout(INACTIVITY_MS);
     await this.ctx.storage.setAlarm(Date.now() + HEARTBEAT_MS);
@@ -83,6 +91,7 @@ export class Pds extends DurableObject<Env> {
       VLPDS_SLATEDB_MANIFEST_POLL: "60s", VLPDS_MEMORY_BUDGET_MB: "3072",
       VLPDS_CACHE_DIR: "/var/lib/vlpds/cache", VLPDS_DISK_CACHE_MB: "1024",
       VLPDS_METRICS_LISTEN: "0.0.0.0:9583", VLPDS_LOG_FORMAT: "json",
+      ...agentEnvironment(e),
     };
     for (const [key, value] of Object.entries(values)) {
       if (!value) throw new Error(`Missing required configuration: ${key}`);
@@ -158,7 +167,7 @@ export class Pds extends DurableObject<Env> {
         return secure(new Response("Sign-in unavailable. Start again from the operator homepage.", {status:502}));
       }
     }
-    if (!permitted(url, this.env.PUBLIC_HOST, this.env.HANDLE_DOMAIN)) return new Response("Not found", { status: 404 });
+    if (!permitted(url, this.env.PUBLIC_HOST, this.env.HANDLE_DOMAIN, this.env.AGENT_A2A_ENABLED === "true")) return new Response("Not found", { status: 404 });
     if (this.env.ENABLED !== "true") return new Response("Deployment pending preflight", { status: 503 });
     return this.proxy(request);
   }
@@ -185,7 +194,7 @@ export default {
     const admin = !!env.ADMIN_HOST && operatorPath(url, env.ADMIN_HOST);
     const deploy = !!env.ADMIN_HOST && url.protocol === "https:" && !url.port &&
       url.hostname === env.ADMIN_HOST && DEPLOY_PATHS.has(url.pathname);
-    if (!admin && !deploy && !permitted(url, env.PUBLIC_HOST, env.HANDLE_DOMAIN)) return new Response("Not found", { status: 404 });
+    if (!admin && !deploy && !permitted(url, env.PUBLIC_HOST, env.HANDLE_DOMAIN, env.AGENT_A2A_ENABLED === "true")) return new Response("Not found", { status: 404 });
     return env.PDS.getByName(INSTANCE).fetch(forwarded(request));
   },
 } satisfies ExportedHandler<Env>;

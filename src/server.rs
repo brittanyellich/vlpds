@@ -18,6 +18,8 @@ pub struct Config {
     pub public_url: String,
     /// Explicit dev-only loopback mount; None leaves contact routes absent.
     pub agent_contact_pilot: Option<crate::agent_contact_pilot::Mount>,
+    /// Explicit native A2A opt-in; absent keeps all production agent routes off.
+    pub agent_a2a: Option<crate::agent_a2a::NativeA2a>,
     pub handle_domain: String,
     pub service_did: String,
     pub jwt_secret: String,
@@ -270,6 +272,7 @@ impl Default for Config {
         Config {
             public_url: "http://localhost:2583".into(),
             agent_contact_pilot: None,
+            agent_a2a: None,
             handle_domain: "vlpds.test".into(),
             service_did: "did:web:localhost".into(),
             jwt_secret: DEV_JWT_SECRET.into(),
@@ -377,6 +380,13 @@ impl Default for Config {
 }
 
 pub async fn build(cfg: Config) -> anyhow::Result<Arc<xrpc::App>> {
+    anyhow::ensure!(
+        cfg.agent_a2a.is_none() || cfg.agent_contact_pilot.is_none(),
+        "Choose native A2A or dev pilot, not both"
+    );
+    if let Some(a2a) = &cfg.agent_a2a {
+        a2a.validate(cfg.dev_mode, &cfg.public_url)?;
+    }
     if let Some(mount) = &cfg.agent_contact_pilot {
         mount.validate(cfg.dev_mode, &cfg.public_url)?;
     }
@@ -781,7 +791,12 @@ const METRICS_PATHS: [&str; 2] = ["/metrics", "/debug/pprof/"];
 
 /// The peer listener's router, and the base of [`public_router`].
 pub fn router(app: &Arc<xrpc::App>) -> axum::Router {
-    let r = with_forwarding(app, xrpc::router(app.clone()));
+    let r = xrpc::router(app.clone());
+    let r = match &app.config.agent_a2a {
+        Some(a2a) => r.merge(a2a.routes(app.clone())),
+        None => r,
+    };
+    let r = with_forwarding(app, r);
     let r = match &app.config.agent_contact_pilot {
         Some(mount) => r.merge(mount.routes()),
         None => r,

@@ -1,6 +1,12 @@
 /** Only public PDS surfaces are reachable through the public Worker. */
-export function permitted(url: URL, host: string, handleDomain: string): boolean {
+export const agentCardPath = "/agents/did%3Aplc%3A6tlvgafuonoighfrtpejff5m/.well-known/agent-card.json";
+export const agentMessagePath = "/agents/did%3Aplc%3A6tlvgafuonoighfrtpejff5m/a2a/v1";
+export function permitted(url: URL, host: string, handleDomain: string, agentEnabled = false): boolean {
   if (url.protocol !== "https:" || url.port) return false;
+  if (url.hostname === host && [agentCardPath, agentMessagePath].includes(url.pathname)) {
+    return agentEnabled && url.search === "";
+  }
+  if (url.pathname.startsWith("/agents/") || url.pathname.startsWith("/private/agent-profile/")) return false;
   // Reject encodings rather than guessing how each downstream router decodes them.
   if (url.pathname.includes("%") || url.pathname.includes("\\")) return false;
   if (url.hostname !== host) {

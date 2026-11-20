@@ -1,0 +1,9 @@
+{
+	"name": "identity-test-private-profile-runtime",
+	"private": true,
+	"version": "0.0.0",
+	"type": "module",
+	"dependencies": {
+		"@kodycodes/cli": "3.46.2"
+	}
+}

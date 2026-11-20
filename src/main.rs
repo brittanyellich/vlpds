@@ -752,6 +752,9 @@ struct Args {
     /// exact IPv4 loopback listener only. Value is http://127.0.0.1:PORT.
     #[arg(long)]
     agent_contact_pilot: Option<String>,
+    /// Default-off native fixed-agent A2A configuration (owner-only file).
+    #[arg(long, env = "VLPDS_AGENT_A2A_CONFIG")]
+    agent_a2a_config: Option<std::path::PathBuf>,
     /// Most records one account's repo in one space may hold (--spaces).
     /// getRepo exports a space repo as a CAR with one index block, about
     /// 60 bytes per record.
@@ -1521,6 +1524,11 @@ async fn run(args: Args) -> anyhow::Result<()> {
         vlpds::xrpc::blobs::size_flags(args.max_blob_mb, args.max_blob_override_mb)?;
     let cfg = Config {
         public_url: args.public_url.clone(),
+        agent_a2a: args
+            .agent_a2a_config
+            .as_ref()
+            .map(|p| vlpds::agent_a2a::NativeA2a::load(p, &args.public_url, args.dev_mode))
+            .transpose()?,
         agent_contact_pilot: args
             .agent_contact_pilot
             .as_deref()

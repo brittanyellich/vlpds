@@ -144,6 +144,10 @@ path = "tests/all/main.rs"
 # EXP-710's repository-backed discovery proof stays separate from public ingress
 # and the main suite; it creates only disposable loopback, memory-only repos.
 [[test]]
+name = "agent_a2a_native"
+path = "tests/agent_a2a_native.rs"
+
+[[test]]
 name = "agent_contact_repository"
 path = "tests/agent_contact_repository.rs"
 

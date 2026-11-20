@@ -1,7 +1,13 @@
 #![allow(clippy::type_complexity)]
 
 pub mod admin_proxy;
+pub mod agent_a2a;
+pub mod agent_a2a_store;
+pub mod agent_card;
 pub mod agent_contact_pilot;
+pub mod agent_endorsement;
+pub mod agent_endorsement_fetch;
+pub mod agent_profile_bridge;
 pub mod appview_override;
 pub mod asn;
 pub mod auth;

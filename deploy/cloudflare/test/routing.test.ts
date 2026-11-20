@@ -43,3 +43,15 @@ test('container transport uses HTTP while retaining host, proxy scheme and strea
   assert.equal(internal.method, 'POST');
   assert.equal(await internal.text(), 'blob bytes');
 });
+
+ test('native agent encoding exception is exact, public-host-only and default off', () => {
+ const card='/agents/did%3Aplc%3A6tlvgafuonoighfrtpejff5m/.well-known/agent-card.json';
+ const post='/agents/did%3Aplc%3A6tlvgafuonoighfrtpejff5m/a2a/v1';
+ for(const path of [card,post]){
+  assert.equal(permitted(new URL(`https://${host}${path}`),host,'crate.social'),false);
+  assert.equal(permitted(new URL(`https://${host}${path}`),host,'crate.social',true),true);
+ }
+ for(const path of [post+'?x=1',post+'/',post.replaceAll('%3A',':'),'/private/agent-profile/assert',post.replaceAll('%3A','%3a'),post.replaceAll('%3A','%253A'),post.replace('6tlvgafuonoighfrtpejff5m','aaaaaaaaaaaaaaaaaaaaaaaa'),'/agents/%2e%2e/admin'])
+ assert.equal(permitted(new URL(`https://${host}${path}`),host,'crate.social',true),false,path);
+ assert.equal(permitted(new URL('https://ada.crate.social'+post),host,'crate.social',true),false);
+ });

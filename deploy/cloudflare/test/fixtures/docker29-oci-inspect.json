@@ -1,0 +1,59 @@
+{
+  "Ref": "ghcr.io/brittanyellich/vlpds@sha256:4064c0e4605e23f4be497abc9d49e7840404a9e4400eb7ea0eb9f9d92f2313ff",
+  "Descriptor": {
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "digest": "sha256:4064c0e4605e23f4be497abc9d49e7840404a9e4400eb7ea0eb9f9d92f2313ff",
+    "size": 1877,
+    "platform": {
+      "architecture": "amd64",
+      "os": "linux"
+    }
+  },
+  "Raw": "ewogICJzY2hlbWFWZXJzaW9uIjogMiwKICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubWFuaWZlc3QudjEranNvbiIsCiAgImNvbmZpZyI6IHsKICAgICJtZWRpYVR5cGUiOiAiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5jb25maWcudjEranNvbiIsCiAgICAiZGlnZXN0IjogInNoYTI1NjoyZjY2MjU0ZTQ1NzBmNDY0ZjRkM2RkNjJiNGU3ODQ2ZjRkYTQ3YmE3NTc5NDM0ZWQ5OTgzN2RhYzFhYjlhOTVjIiwKICAgICJzaXplIjogMzc1MQogIH0sCiAgImxheWVycyI6IFsKICAgIHsKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmxheWVyLnYxLnRhcitnemlwIiwKICAgICAgImRpZ2VzdCI6ICJzaGEyNTY6ZGQwNTFlMWI4YzkyZmYxMDFmYTMwNzFhYjk3ZWE0OTI0ODg1OTQyZjE1NjQ0ZTAxYzNkYzA5NTc2NGU4NjNlMyIsCiAgICAgICJzaXplIjogMjgyNDc5ODIKICAgIH0sCiAgICB7CiAgICAgICJtZWRpYVR5cGUiOiAiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5sYXllci52MS50YXIrZ3ppcCIsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OjM0ZmRjMzgxMjkzZDVlY2FiZTk5YWYwZWJlNzM5NjUxMjE4YjM5N2Q4YTRlZWFjOTc0ZDgwYjY5ZWNhYjViYWQiLAogICAgICAic2l6ZSI6IDU4ODUzNTUKICAgIH0sCiAgICB7CiAgICAgICJtZWRpYVR5cGUiOiAiYXBwbGljYXRpb24vdm5kLm9jaS5pbWFnZS5sYXllci52MS50YXIrZ3ppcCIsCiAgICAgICJkaWdlc3QiOiAic2hhMjU2OjRmNGZiNzAwZWY1NDQ2MWNmYTAyNTcxYWUwZGI5YTBkYzFlMGNkYjU1Nzc0ODRhNmQ3NWU2OGRjMzhlOGFjYzEiLAogICAgICAic2l6ZSI6IDMyCiAgICB9LAogICAgewogICAgICAibWVkaWFUeXBlIjogImFwcGxpY2F0aW9uL3ZuZC5vY2kuaW1hZ2UubGF5ZXIudjEudGFyK2d6aXAiLAogICAgICAiZGlnZXN0IjogInNoYTI1Njo2N2ZhMzEzMDRjNjEzMzc3ZWFkY2NlNTQwMmZiNmRiOTY2ODgzMTdjYjRhNjE5MGJlYmQzMWUzM2FkNTk0ZTYxIiwKICAgICAgInNpemUiOiAzNDI2OTcyMAogICAgfSwKICAgIHsKICAgICAgIm1lZGlhVHlwZSI6ICJhcHBsaWNhdGlvbi92bmQub2NpLmltYWdlLmxheWVyLnYxLnRhcitnemlwIiwKICAgICAgImRpZ2VzdCI6ICJzaGEyNTY6YTQ1ZjhhZjk1ZTFlNzJiMDQwYzEzYTcwNDE0Yzg3ZGQwZTNjOGM1NDEwMzNjMzIxYzc5ZDMxNWY2NzJiMjc1OSIsCiAgICAgICJzaXplIjogMjU0MzQ2MAogICAgfQogIF0sCiAgImFubm90YXRpb25zIjogewogICAgIm9yZy5vcGVuY29udGFpbmVycy5pbWFnZS5jcmVhdGVkIjogIjIwMjYtMTEtMjBUMTI6MzA6MzYuODQ5WiIsCiAgICAib3JnLm9wZW5jb250YWluZXJzLmltYWdlLmRlc2NyaXB0aW9uIjogIlZlcnkgTGFyZ2UgUERTLCBhIHdvcmxkLXNjYWxlLCBpbmNyZWRpYmx5IGVmZmljaWVudCwgaW5jcmVkaWJseSByZXNpbGllbnQsIGF0cHJvdG8gcGVyc29uYWwgZGF0YSBzZXJ2ZXIiLAogICAgIm9yZy5vcGVuY29udGFpbmVycy5pbWFnZS5saWNlbnNlcyI6ICJNSVQiLAogICAgIm9yZy5vcGVuY29udGFpbmVycy5pbWFnZS5yZXZpc2lvbiI6ICIwOTljNDM0OGI4MWVjMTdiZmUxZGVhNzE4ZGVlNTAxODcxOTY3MGUxIiwKICAgICJvcmcub3BlbmNvbnRhaW5lcnMuaW1hZ2Uuc291cmNlIjogImh0dHBzOi8vZ2l0aHViLmNvbS9icml0dGFueWVsbGljaC92bHBkcyIsCiAgICAib3JnLm9wZW5jb250YWluZXJzLmltYWdlLnRpdGxlIjogInZscGRzIiwKICAgICJvcmcub3BlbmNvbnRhaW5lcnMuaW1hZ2UudXJsIjogImh0dHBzOi8vZ2l0aHViLmNvbS9icml0dGFueWVsbGljaC92bHBkcyIsCiAgICAib3JnLm9wZW5jb250YWluZXJzLmltYWdlLnZlcnNpb24iOiAibWFpbiIKICB9Cn0=",
+  "OCIManifest": {
+    "schemaVersion": 2,
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "config": {
+      "mediaType": "application/vnd.oci.image.config.v1+json",
+      "digest": "sha256:2f66254e4570f464f4d3dd62b4e7846f4da47ba7579434ed99837dac1ab9a95c",
+      "size": 3751
+    },
+    "layers": [
+      {
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "digest": "sha256:dd051e1b8c92ff101fa3071ab97ea4924885942f15644e01c3dc095764e863e3",
+        "size": 28247982
+      },
+      {
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "digest": "sha256:34fdc381293d5ecabe99af0ebe739651218b397d8a4eeac974d80b69ecab5bad",
+        "size": 5885355
+      },
+      {
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "digest": "sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1",
+        "size": 32
+      },
+      {
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "digest": "sha256:67fa31304c613377eadcce5402fb6db96688317cb4a6190bebd31e33ad594e61",
+        "size": 34269720
+      },
+      {
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "digest": "sha256:a45f8af95e1e72b040c13a70414c87dd0e3c8c541033c321c79d315f672b2759",
+        "size": 2543460
+      }
+    ],
+    "annotations": {
+      "org.opencontainers.image.created": "2026-11-20T12:30:36.849Z",
+      "org.opencontainers.image.description": "Very Large PDS, a world-scale, incredibly efficient, incredibly resilient, atproto personal data server",
+      "org.opencontainers.image.licenses": "MIT",
+      "org.opencontainers.image.revision": "099c4348b81ec17bfe1dea718dee5018719670e1",
+      "org.opencontainers.image.source": "https://github.com/brittanyellich/vlpds",
+      "org.opencontainers.image.title": "vlpds",
+      "org.opencontainers.image.url": "https://github.com/brittanyellich/vlpds",
+      "org.opencontainers.image.version": "main"
+    }
+  }
+}

@@ -155,9 +155,12 @@ COPY --from=ui /src/ui/dist /usr/share/vlpds/ui
 # the binary on every commit.
 ARG VLPDS_GIT_REV=""
 ENV VLPDS_GIT_REV=${VLPDS_GIT_REV}
+LABEL org.opencontainers.image.revision=${VLPDS_GIT_REV} \
+      io.atagents.runtime=pds-runtime
 
 # Explicit opt-in artifact; no bridge or credential is enabled by selecting it.
 FROM pds-runtime AS agent-a2a
+LABEL io.atagents.runtime=agent-a2a
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 libatomic1 && rm -rf /var/lib/apt/lists/*
 COPY --from=agent-profile-build /usr/local/bin/node /usr/local/bin/node

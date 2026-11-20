@@ -179,3 +179,67 @@ revoked and active tokenList empty. One successful assertion was observed; exact
 CLI invocation count was not independently instrumented. This is profile-path
 acceptance on that immutable image, not native public HTTP or Otto acceptance.
 The final native candidate will record its own digest and component hashes.
+
+## Local deployment-workflow preparation (not applied)
+
+The follow-up `codex/exp-710-deploy-gates` change selects `pds-runtime` by default
+or `agent-a2a` explicitly. Preflight preserves the selected Docker build variable
+and source revision. The workflow builds once for linux/amd64, then checks the
+immutable image ID, source/runtime labels, non-root identity, entrypoint and native
+option. Ordinary images must exclude Node/profile files; agent images must contain
+the pinned module/lock hashes, CLI and baked workerd, and pass a network-disabled,
+read-only supervisor readiness check using synthetic credentials. This does not
+perform actual profile dispatch or qualify live A2A acceptance.
+
+The runner must provide Docker28+ platform-aware image export and Buildx raw
+manifest inspection; missing features fail before push. CI currently uses
+Docker28.0.4; verbose-manifest JSON is deliberately not used because Raw fields
+vary by CLI version. A captured actual OCI fixture exercises byte hashing. Only
+that inspected local image is pushed. The raw registry index and platform manifest
+bytes must match their expected digests (and the child descriptor size), and its config digest must equal
+the SHA256 of the inspected local image's exported config bytes. Docker 29 image
+IDs may be manifest digests, so the gate does not equate those IDs with configs. The prepared Worker configuration pins that platform
+digest instead of rebuilding it. Before a restart, the Worker-selected digest must
+equal the prepared reference exactly; any unexplained rewriting refuses restart.
+The public artifact receipt is retained by the workflow. This future gate does
+**not** resolve the earlier upload `8c710c7e...` versus running `fbf39e3f...` gap.
+
+Both image choices force the agent off. A true activation flag or agent secrets in
+plain vars are refused. No secret application or activation input is added here.
+This permits a separately approved capable-image/off rollout; it does not grant
+approval to deploy this local change, activate routes or publish contact records.
+
+### Proposed secret-transfer contract (design only)
+
+After an exact activation approval, the profile custodian would mint only an
+org-bound identity-test token with `org:execute`, explicit 900-second idle and
+3600-second absolute expiry, verifying the returned profile/scopes/expiry and
+recording its token ID without logging the value. A separate random 32-byte bridge
+key has independent custody and rotation. Neither value belongs in deployment
+JSON vars, a build argument, image, argv, source, artifacts or general job env.
+
+The supported destination is Cloudflare Worker secret bindings. A future reviewed
+production-workflow step should take only `VLPDS_AGENT_KODY_TOKEN` and
+`VLPDS_AGENT_BRIDGE_KEY` from protected GitHub production-environment secrets,
+scoped to that step, and stream an exact two-key JSON object to the pinned Wrangler
+secret-bulk process over stdin. Its child environment must exclude both input
+values; only the Cloudflare authentication needed for that process is retained.
+No temp secret file, stdout, shell interpolation or interactive local secret-put
+is allowed. That helper and gated step are not implemented or executed by this
+slice. Cloudflare secret updates can create Worker versions, so routes must be
+verified off before and after provisioning; secret provision is never activation.
+
+The existing runtime receives these bindings through its trusted environment,
+then the supervisor uses owner-only ephemeral files and removes the values from
+PDS/bridge child environments; the CLI receives only its allowlisted token env.
+The provider can access those plaintext secrets. After the bounded acceptance
+window, disable the feature and revoke the token, verify revocation, and remove
+only the new bindings through the approved workflow. Long-lived service and
+rotation require an explicit continuation plan. Rollback preserves account data,
+CAS decisions/pending reservations and retired Card pins.
+
+Remaining approvals: review/commit/push/PR for this local diff; exact staged
+artifact/off deployment after CI and provenance verification; implementation and
+approval of the secret-transfer step; then a separately approved activation with
+fixed Otto/agent, credentials, acceptance window and rollback. No production
+token, settings, deployment or repository publication was changed here.

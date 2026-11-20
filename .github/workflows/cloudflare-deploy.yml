@@ -8,6 +8,12 @@ on:
         type: choice
         required: true
         options: [deploy, rollback]
+      runtime:
+        description: Ordinary image or agent-capable image (A2A remains disabled)
+        type: choice
+        default: pds-runtime
+        required: true
+        options: [pds-runtime, agent-a2a]
       rollback_image:
         description: For rollback only, full registry.cloudflare.com/.../vlpds@sha256:... reference
         type: string
@@ -35,6 +41,7 @@ jobs:
       DEPLOY_TOKEN: ${{ secrets.VLPDS_DEPLOY_TOKEN }}
       DEPLOY_CONFIG: ${{ secrets.VLPDS_CLOUDFLARE_CONFIG_JSON }}
       OPERATION: ${{ inputs.operation }}
+      RUNTIME: ${{ inputs.runtime || 'pds-runtime' }}
       ROLLBACK_IMAGE: ${{ inputs.rollback_image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,12 +52,37 @@ jobs:
           cache-dependency-path: deploy/cloudflare/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npm test && npm run typecheck
+      - name: Select public artifact receipt path
+        run: echo "ARTIFACT_FILE=$RUNNER_TEMP/verified-artifact.json" >> "$GITHUB_ENV"
+      - name: Validate selection before build or registry writes
+        run: node scripts/prepare-deploy.mjs --preflight
       - name: Build expected UI entry for public verification
         if: inputs.operation == 'deploy'
         run: |
           npm ci --prefix ../../ui --no-audit --no-fund
           npm run build --prefix ../../ui
           echo "EXPECTED_UI_ASSET=$(node scripts/verify-ui.mjs --expected ../../ui/dist/index.html)" >> "$GITHUB_ENV"
+
+      - name: Build and verify selected runtime before publishing
+        if: inputs.operation == 'deploy'
+        run: |
+          set -euo pipefail
+          case "$RUNTIME" in pds-runtime|agent-a2a) ;; *) exit 1 ;; esac
+          local_image="vlpds:deploy-$GITHUB_SHA"
+          docker build --platform linux/amd64 --build-arg VLPDS_RUNTIME_STAGE="$RUNTIME" \
+            --build-arg VLPDS_GIT_REV="$GITHUB_SHA" -t "$local_image" ../..
+          node scripts/verify-artifact.mjs inspect "$local_image" "$ARTIFACT_FILE"
+          npx wrangler containers push "$local_image"
+          node scripts/verify-artifact.mjs pin "$local_image" "$ARTIFACT_FILE"
+
+      - name: Retain public artifact verification receipt
+        if: inputs.operation == 'deploy'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-runtime-${{ github.sha }}
+          path: ${{ runner.temp }}/verified-artifact.json
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Validate and prepare live configuration
         run: node scripts/prepare-deploy.mjs
@@ -64,9 +96,8 @@ jobs:
           node -e 'const fs=require("fs");let p=process.env.RUNNER_TEMP+"/before.json";if(fs.statSync(p).size){let s=JSON.parse(fs.readFileSync(p));console.log("Previously running image:",s.current)}'
 
       - name: Publish Worker and named image
-        # This app uses durable_object scheduling: publishing updates the image
-        # map but does not replace the running container. Do not use rollout
-        # none here, since it can leave the named image unchanged.
+        # Only the verified, digest-pinned image is published; Wrangler must not
+        # perform a second unverified build. Existing scheduling remains unchanged.
         run: npx wrangler deploy --config .ci-deployment.json
 
       - name: Switch container image gracefully
@@ -78,7 +109,7 @@ jobs:
             sleep 3
           done
           test -s "$RUNNER_TEMP/status.json"
-          desired=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1])).desired)' "$RUNNER_TEMP/status.json")
+          desired=$(node scripts/prepare-deploy.mjs --verify-desired "$RUNNER_TEMP/status.json")
           test -n "$desired" && test "$desired" != undefined
           if [ "$OPERATION" = rollback ]; then
             test "$desired" = "$ROLLBACK_IMAGE" || { echo 'Worker image map does not match requested rollback digest.' >&2; exit 1; }

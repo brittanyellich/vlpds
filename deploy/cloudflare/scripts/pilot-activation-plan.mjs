@@ -3,8 +3,8 @@
 export const PILOT = Object.freeze({
   digest: 'sha256:2e254f9394937be2141e192b715f88867a349bbd85c80d9279e435282b11161d',
   revision: '21117d08d00b6d1bb95430c0cc4a89eb5ec59785',
-  // Requalified by authenticated GET-only inspection44921363041 after cleanup.
-  offWorker: 'df75d444-fd52-4314-b686-6461b792f4b4',
+  // Requalified by authenticated GET-only inspection44933972045 after cleanup.
+  offWorker: '23ab139c-7cf7-423a-bbac-910dcbad8f92',
   caller: 'did:plc:vsgwub3c3pupqt3yhxfmecma',
   org: 'c74cb336bbed5cca02db72fff3998b10f977c015aab112f0878d421d55d15ecf',
   profile: 'prf_642a5cf465fa4528a8f7e075f29557c4',

@@ -5,6 +5,7 @@ import {publishPilotWorker}from'./pilot-publish.mjs';import{join,resolve}from'no
 import{preflightInputs}from'./pilot-preflight-inputs.mjs';
 import{checkCandidateToken}from'./pilot-token-check.mjs';
 import{provisionDiagnostic}from'./pilot-provision-diagnostic.mjs';
+import{createTransitionReporter}from'./pilot-transition-diagnostic.mjs';
 import{sealState,openState}from'./pilot-state.mjs';import{fileURLToPath}from'node:url';
 import{PILOT,normalizeCredentialMetadata}from'./pilot-activation-plan.mjs';
 import{preparePilotConfig}from'./pilot-config.mjs';import{PilotProvider}from'./pilot-provider.mjs';
@@ -19,6 +20,7 @@ async function main(){
  stateFile=context.stateFile;receiptFile=context.receiptFile;
  const {card,identity}=context;
  const reportProvision=mode==='provision'?provisionDiagnostic(identity,bytes=>writeFileSync(join(env.RUNNER_TEMP,'exp710-provision-diagnostic.json'),bytes,{mode:0o600})):()=>{};
+ const reportTransition=['activate','disable'].includes(mode)?createTransitionReporter(mode,identity,bytes=>writeFileSync(join(env.RUNNER_TEMP,`exp710-${mode}-diagnostic.json`),bytes,{mode:0o600}),()=>safeEmit({kind:'exp710-transition-diagnostic-unavailable',phase:mode})):()=>{};
  const save=s=>writeFileSync(stateFile,sealState(s,env.VLPDS_DEPLOY_TOKEN),{mode:0o600});
  const load=()=>openState(readFileSync(stateFile),env.VLPDS_DEPLOY_TOKEN,identity);
  const provider=new PilotProvider({account:env.CLOUDFLARE_ACCOUNT_ID,cfToken:env.CLOUDFLARE_API_TOKEN,deployToken:env.VLPDS_DEPLOY_TOKEN,fetchImpl:fetch,now});
@@ -37,7 +39,7 @@ async function main(){
    if(response.status!==200)throw 0; // Independent binding readback follows.
   }finally{await response?.body?.cancel().catch(()=>{});}
  };
- const lifecycle=new PilotLifecycle({provider,save,load,deploy,provision:cloudflareSecretTransport(fetch),introspect:(token,o)=>checkCandidateToken(token,{...o,fetchImpl:fetch,clock:now}),remove,card,now,sleep,identity,reportProvision});
+ const lifecycle=new PilotLifecycle({provider,save,load,deploy,provision:cloudflareSecretTransport(fetch),introspect:(token,o)=>checkCandidateToken(token,{...o,fetchImpl:fetch,clock:now}),remove,card,now,sleep,identity,reportProvision,reportActivation:mode==='activate'?reportTransition:()=>{},reportOff:mode==='disable'?reportTransition:()=>{}});
  if(mode==='preflight'){
   if(existsSync(stateFile))throw 0;
   preparePilotConfig({...env,DEPLOY_TOKEN:env.VLPDS_DEPLOY_TOKEN},card,false);

@@ -18,7 +18,7 @@ test('synthetic or drifted artifact/card evidence cannot yield activation plan',
  // Each independently corrupted prerequisite fails closed.
  for(const patch of [{cardSha256:'bad'},{checkedAt:0},{current:image+'x'},{enabled:true},{running:false},{agentSecretBindings:1},
  {platform:'linux/arm64'},{revision:'0'.repeat(40)},{workerVersion:'other'},
- {workerVersion:'7572d63f-a93e-4bb3-876a-bba6348cba7e'},{workerVersion:'37d6aa2e-607f-442f-88b7-54e6c2c5e86c'},{cardSignatureVerified:false},
+ {workerVersion:'df75d444-fd52-4314-b686-6461b792f4b4'},{workerVersion:'7572d63f-a93e-4bb3-876a-bba6348cba7e'},{workerVersion:'37d6aa2e-607f-442f-88b7-54e6c2c5e86c'},{cardSignatureVerified:false},
  {publicChecks:{health:200,ui:200,card:200}}]) assert.throws(()=>activationPlan({account,now,evidence:{...evidence,...patch}}),/gate refused/);
 });
 test('secret transport gets only fixed stdin keys, fixed args and isolated CF env; buffer wiped',async()=>{
@@ -45,6 +45,6 @@ test('opaque Kody IDs and ISO metadata normalize with exact org/profile/caps; va
  for(const patch of [{token:'NEVER_ACCEPT'},{status:'revoked'},{org_id:'other'},{scopes:['org:execute','secret:use']},{max_expires_at:iso(now+7200)},{created_at:iso(now-601)},{expires_at:iso(now-1)},{id:''}])assert.throws(()=>normalizeCredentialMetadata({...raw,...patch},{now,expectedOrg:PILOT.org}));
 });
 
-test('OFF baseline is exact cleaned Worker from authenticated inspection44921363041',()=>{
- assert.equal(PILOT.offWorker,'df75d444-fd52-4314-b686-6461b792f4b4');
+test('OFF baseline is exact cleaned Worker from authenticated inspection44933972045',()=>{
+ assert.equal(PILOT.offWorker,'23ab139c-7cf7-423a-bbac-910dcbad8f92');
 });

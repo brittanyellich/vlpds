@@ -2,16 +2,17 @@
 // sequencing and rollback decisions without any real provider or credential.
 import {PILOT,activationPlan,transferSecrets} from './pilot-activation-plan.mjs';
 import {checkBindings,ProviderPending} from './pilot-provider.mjs';
+import {transitionReason} from './pilot-transition-diagnostic.mjs';
 export class PilotLifecycle {
- constructor({provider,save,load,deploy,provision,introspect,remove,card,now,sleep,identity,reportProvision=()=>{}}) {
-  Object.assign(this,{provider,save,load,deploy,provision,introspect,remove,card,now,sleep,identity,reportProvision});
+ constructor({provider,save,load,deploy,provision,introspect,remove,card,now,sleep,identity,reportProvision=()=>{},reportActivation=()=>{},reportOff=()=>{}}) {
+  Object.assign(this,{provider,save,load,deploy,provision,introspect,remove,card,now,sleep,identity,reportProvision,reportActivation,reportOff});
  }
- async inspect(enabled,provisioned,baseline,deadline) {
-  const checkedAt=this.now();await this.provider.status();await this.provider.currentCardKey();
-  const meta=await this.provider.metadata();const ordinaryHash=checkBindings(meta,{enabled,baseline,provisioned,card:this.card,deadline});
-  const card=await this.provider.publicChecks(enabled);
+ async inspect(enabled,provisioned,baseline,deadline,mark=()=>{}) {
+  const checkedAt=this.now();mark('runtime-status');await this.provider.status();mark('card-authority');await this.provider.currentCardKey();
+  mark('worker-metadata');const meta=await this.provider.metadata();mark('worker-bindings');const ordinaryHash=checkBindings(meta,{enabled,baseline,provisioned,card:this.card,deadline});
+  mark('public-checks');const card=await this.provider.publicChecks(enabled);
   if(enabled && !this.sameCard(card.bytes,this.card))throw new Error('Served Card mismatch');
-  await this.provider.status();if(this.now()-checkedAt>30)throw new Error('Stale pilot checks');
+  mark('runtime-status-final');await this.provider.status();if(this.now()-checkedAt>30)throw new Error('Stale pilot checks');
   return {meta,ordinaryHash,checkedAt};
  }
  sameCard(bytes,card) {try {const normalize=v=>Array.isArray(v)?v.map(normalize):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,normalize(v[k])])):v;
@@ -47,42 +48,54 @@ export class PilotLifecycle {
   await step('persist-provisioned-state',async()=>{s.provisionWorker=meta.id;s.provisioned=true;s.phase='provisioned';await this.save(s);});
  }
 
+ async transitionStep(enabled,stage,run) {
+  const report=enabled?this.reportActivation:this.reportOff;report(stage,'started');
+  try{const result=await run();report(stage,'passed');return result;}catch(error){report(stage,'failed',{reason:transitionReason(error)});throw error;}
+ }
  async activate() {
-  const s=await this.load();if(s.phase!=='provisioned' || s.deadline-this.now()<300)throw new Error('Pilot phase refused');
-  const before=await this.inspect(false,true,s.baseline);if(before.meta.id!==s.provisionWorker || before.meta.scriptEtag!==s.offScriptEtag)throw new Error('Worker changed');
-  s.phase='activation-attempted';await this.save(s);const deployedVersion=await this.deploy(true,s.deadline);
-  // Edge metadata must be right before changing process configuration. The old
-  // process can still return Card404 until the deliberate restart.
-  const meta=await this.provider.metadata();if(meta.id!==deployedVersion)throw new Error('Published Worker mismatch');checkBindings(meta,{enabled:true,provisioned:true,baseline:s.baseline,card:this.card,deadline:s.deadline});
-  s.activeWorker=meta.id;await this.save(s);await this.provider.restart('activate');
-  await this.ready(true,s);if(s.deadline-this.now()<120)throw new Error('Insufficient acceptance window');s.phase='active';await this.save(s);
+  const step=(stage,run)=>this.transitionStep(true,stage,run);
+  const s=await step('load-state',()=>this.load());
+  await step('phase-lease',()=>{if(s.phase!=='provisioned'||s.deadline-this.now()<300)throw new Error('Pilot phase refused');});
+  await step('fresh-off-state',async()=>{const before=await this.inspect(false,true,s.baseline);if(before.meta.id!==s.provisionWorker||before.meta.scriptEtag!==s.offScriptEtag)throw new Error('Worker changed');});
+  await step('save-attempt',async()=>{s.phase='activation-attempted';await this.save(s);});
+  const deployedVersion=await step('publish-ack',()=>this.deploy(true,s.deadline));
+  const meta=await step('worker-config',async()=>{const m=await this.provider.metadata();if(m.id!==deployedVersion)throw new Error('Published Worker mismatch');checkBindings(m,{enabled:true,provisioned:true,baseline:s.baseline,card:this.card,deadline:s.deadline});return m;});
+  await step('save-worker',async()=>{s.activeWorker=meta.id;await this.save(s);});
+  await step('runtime-restart',()=>this.provider.restart('activate'));
+  await step('readiness',()=>this.ready(true,s));
+  await step('persist-active',async()=>{if(s.deadline-this.now()<120)throw new Error('Insufficient acceptance window');s.phase='active';await this.save(s);});
   return {version:1,kind:'exp710-activation-ready',...this.identity,digest:PILOT.digest,workerVersion:s.activeWorker,
     caller:PILOT.caller,recipient:'did:plc:6tlvgafuonoighfrtpejff5m',profile:PILOT.profile,artifactRevision:PILOT.revision,cardKey:PILOT.cardKey,cardArtifactSha256:PILOT.cardHash,
     checkedAt:this.now(),deadline:s.deadline,cardPayloadSha256:'0239e2b2eb803c6865f8f7f62203da37eeba64f11ceea25a05a54735d866bf43'};
  }
  async ready(enabled,s) {
-  for(let i=0;i<20;i++){try{const r=await this.inspect(enabled,true,s.baseline,s.deadline);
-    if(enabled && r.meta.id!==s.activeWorker)throw new Error('Active Worker differs');return;
-   }catch(e){if(!(e instanceof ProviderPending) || i===19)throw new Error('Pilot readiness failed');await this.sleep(3000);}}
+  const report=enabled?this.reportActivation:this.reportOff;
+  for(let i=0;i<20;i++){let check='not-started';try{const r=await this.inspect(enabled,true,s.baseline,s.deadline,value=>{check=value;});
+    if(enabled&&r.meta.id!==s.activeWorker)throw new Error('Active Worker differs');report('readiness-poll','passed',{attempt:i+1,check,reason:'none'});return;
+   }catch(e){const retry=e instanceof ProviderPending&&i<19;report('readiness-poll',retry?'pending':'failed',{attempt:i+1,check,reason:transitionReason(e)});if(!retry)throw new Error('Pilot readiness failed');await this.sleep(3000);}}
  }
  async disable() {
-  const s=await this.load();if(['cleaned','disabled'].includes(s.phase))return;
+  const step=(stage,run)=>this.transitionStep(false,stage,run);
+  const s=await step('load-state',()=>this.load());if(['cleaned','disabled'].includes(s.phase))return;
   if(['provision-attempted','provisioned'].includes(s.phase)) {
-   // Provisioning cannot enable routes. Reconcile a lost API acknowledgment by
-   // readback only; do not resend secrets or restart an already-OFF process.
-   await this.provider.status();const meta=await this.provider.metadata();
-   const count=meta.bindings.filter(b=>['AGENT_A2A_BRIDGE_KEY','AGENT_A2A_KODY_TOKEN'].includes(b.name)).length;
-   if(![0,2].includes(count))throw new Error('Partial pilot bindings; reconcile');
-   checkBindings(meta,{enabled:false,provisioned:count===2,baseline:s.baseline,card:this.card,deadline:s.deadline});
-   await this.provider.publicChecks(false);s.provisioned=count===2;s.phase='disabled';await this.save(s);return;
+   await step('reconcile-provisioned-off',async()=>{
+    await this.provider.status();const meta=await this.provider.metadata();
+    const count=meta.bindings.filter(b=>['AGENT_A2A_BRIDGE_KEY','AGENT_A2A_KODY_TOKEN'].includes(b.name)).length;
+    if(![0,2].includes(count))throw new Error('Partial pilot bindings; reconcile');
+    checkBindings(meta,{enabled:false,provisioned:count===2,baseline:s.baseline,card:this.card,deadline:s.deadline});
+    await this.provider.publicChecks(false);s.provisioned=count===2;
+   });
+   await step('persist-disabled',async()=>{s.phase='disabled';await this.save(s);});return;
   }
-  // Closing public edge is allowed even after ambiguous activation. This is a
-  // distinct rollback, never a replay of the activation POST.
-  s.phase='disable-attempted';await this.save(s);const deployedVersion=await this.deploy(false);
-  const meta=await this.provider.metadata();if(meta.id!==deployedVersion)throw new Error('OFF Worker mismatch');checkBindings(meta,{enabled:false,provisioned:true,baseline:s.baseline,card:this.card,deadline:s.deadline});
-  await this.provider.restart('disable');await this.ready(false,s);
-  s.phase='disabled';s.offWorker=meta.id;await this.save(s);
+  // Distinct OFF rollback after ambiguous activation; never replay activation.
+  await step('save-attempt',async()=>{s.phase='disable-attempted';await this.save(s);});
+  const deployedVersion=await step('publish-ack',()=>this.deploy(false));
+  const meta=await step('worker-config',async()=>{const m=await this.provider.metadata();if(m.id!==deployedVersion)throw new Error('OFF Worker mismatch');checkBindings(m,{enabled:false,provisioned:true,baseline:s.baseline,card:this.card,deadline:s.deadline});return m;});
+  await step('runtime-restart',()=>this.provider.restart('disable'));
+  await step('readiness',()=>this.ready(false,s));
+  await step('persist-disabled',async()=>{s.phase='disabled';s.offWorker=meta.id;await this.save(s);});
  }
+
  async cleanup() {
   const s=await this.load();if(s.phase!=='disabled')throw new Error('Cleanup requires verified OFF');
   await this.inspect(false,s.provisioned!==false,s.baseline);s.phase='cleanup-attempted';await this.save(s);if(s.provisioned!==false)await this.remove();

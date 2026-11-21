@@ -58,7 +58,7 @@ test('ambiguous OFF publish cannot authorize restart or secret cleanup',async()=
 
 // Synthetic provider checks exercise the real orchestration, not live authority.
 test('old and unrelated OFF Workers cannot allocate a new pilot state',async()=>{
- for(const id of ['7572d63f-a93e-4bb3-876a-bba6348cba7e','37d6aa2e-607f-442f-88b7-54e6c2c5e86c','00000000-0000-0000-0000-000000000000']){
+ for(const id of ['df75d444-fd52-4314-b686-6461b792f4b4','7572d63f-a93e-4bb3-876a-bba6348cba7e','37d6aa2e-607f-442f-88b7-54e6c2c5e86c','00000000-0000-0000-0000-000000000000']){
   const f=fixture(),metadata=f.provider.metadata;f.provider.metadata=async()=>({...await metadata(),id});
   await assert.rejects(f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential}),/Initial OFF Worker differs/);
   assert.equal(f.state,undefined);assert.ok(!f.events.some(e=>e.startsWith('save:')||e.startsWith('deploy:')||e.startsWith('restart:')));
@@ -74,4 +74,42 @@ test('lease expiring during introspection cannot persist attempt or transfer bin
  const f=fixture();await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});
  f.lifecycle.introspect=async(_token,o)=>{f.advance(600);return o.expected;};
  await assert.rejects(f.lifecycle.provisionSecrets(secrets),/Pilot lease expired/);assert.equal(f.state.phase,'preflight');assert.ok(!f.events.includes('provision'));
+});
+
+test('restart timeout is localized and never retried; distinct OFF still required',async()=>{
+ const {transitionDiagnostic}=await import('../scripts/pilot-transition-diagnostic.mjs');const f=fixture();let trace,t=0;
+ await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});await f.lifecycle.provisionSecrets(secrets);
+ f.lifecycle.reportActivation=transitionDiagnostic('activate',{...f.lifecycle.identity,workerQualificationSha256:'b'.repeat(64)},s=>trace=JSON.parse(s),()=>t);
+ const restart=f.provider.restart;f.provider.restart=async phase=>{if(phase==='activate'){f.events.push('restart:activate');t+=75000;throw new ProviderPending('Provider unavailable');}return restart(phase);};
+ await assert.rejects(f.lifecycle.activate());assert.equal(trace.steps.at(-1).stage,'runtime-restart');assert.equal(trace.steps.at(-1).durationMs,75000);assert.equal(trace.steps.at(-1).reason,'request-unavailable');assert.equal(trace.polls.length,0);assert.equal(f.events.filter(e=>e==='restart:activate').length,1);assert.notEqual(f.state.phase,'active');
+ await f.lifecycle.disable();await f.lifecycle.cleanup();assert.equal(f.state.phase,'cleaned');
+});
+test('twenty pending Card checks are localized as readiness failure without extra restart',async()=>{
+ const {transitionDiagnostic}=await import('../scripts/pilot-transition-diagnostic.mjs');const f=fixture();let trace;
+ await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});await f.lifecycle.provisionSecrets(secrets);
+ f.lifecycle.reportActivation=transitionDiagnostic('activate',{...f.lifecycle.identity,workerQualificationSha256:'b'.repeat(64)},s=>trace=JSON.parse(s),()=>f.lifecycle.now()*1000);
+ const checks=f.provider.publicChecks;f.provider.publicChecks=async enabled=>{if(enabled)throw new ProviderPending('Card pending');return checks(enabled);};
+ await assert.rejects(f.lifecycle.activate(),/Pilot readiness failed/);assert.equal(trace.steps.at(-1).stage,'readiness');assert.equal(trace.polls.length,20);assert.ok(trace.polls.every(p=>p.check==='public-checks'&&p.reason==='card-pending'));assert.equal(trace.polls.at(-1).status,'failed');assert.equal(trace.steps.at(-1).durationMs,57000);assert.equal(f.events.filter(e=>e==='restart:activate').length,1);assert.notEqual(f.state.phase,'active');
+});
+test('publish failure and applied Worker mismatch are separate boundaries before restart',async()=>{
+ for(const scenario of ['publish','worker']){
+  const f=fixture(),stages=[];await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});await f.lifecycle.provisionSecrets(secrets);f.lifecycle.reportActivation=(stage,status)=>stages.push({stage,status});
+  if(scenario==='publish')f.lifecycle.deploy=async()=>{throw new Error('PRIVATE_DATA');};else{const metadata=f.provider.metadata;f.provider.metadata=async()=>({...await metadata(),...(f.enabled?{id:'wrong'}:{})});}
+  await assert.rejects(f.lifecycle.activate());assert.equal(stages.at(-1).stage,scenario==='publish'?'publish-ack':'worker-config');assert.equal(stages.at(-1).status,'failed');assert.ok(!f.events.some(e=>e.startsWith('restart:')));assert.ok(!JSON.stringify(stages).includes('PRIVATE_DATA'));
+ }
+});
+test('OFF restart failure is observable and cannot authorize binding cleanup',async()=>{
+ const f=fixture(),stages=[];await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});await f.lifecycle.provisionSecrets(secrets);await f.lifecycle.activate();f.lifecycle.reportOff=(stage,status)=>stages.push({stage,status});
+ const restart=f.provider.restart;f.provider.restart=async phase=>{if(phase==='disable')throw new ProviderPending('Provider unavailable');return restart(phase);};
+ await assert.rejects(f.lifecycle.disable());assert.deepEqual(stages.at(-1),{stage:'runtime-restart',status:'failed'});await assert.rejects(f.lifecycle.cleanup(),/verified OFF/);assert.ok(!f.events.includes('remove'));
+});
+test('diagnostic disk failure does not prevent verified OFF and cleanup',async()=>{
+ const {bestEffortTransition}=await import('../scripts/pilot-transition-diagnostic.mjs');const f=fixture();
+ await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});await f.lifecycle.provisionSecrets(secrets);await f.lifecycle.activate();
+ f.lifecycle.reportOff=bestEffortTransition(()=>{throw new Error('DISK_FULL');});await f.lifecycle.disable();await f.lifecycle.cleanup();assert.equal(f.enabled,false);assert.equal(f.state.phase,'cleaned');
+});
+test('diagnostic initialization failure cannot prevent OFF and cleanup',async()=>{
+ const {createTransitionReporter}=await import('../scripts/pilot-transition-diagnostic.mjs');const f=fixture();
+ await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});await f.lifecycle.provisionSecrets(secrets);await f.lifecycle.activate();
+ f.lifecycle.reportOff=createTransitionReporter('disable',{runId:0},()=>{});await f.lifecycle.disable();await f.lifecycle.cleanup();assert.equal(f.enabled,false);assert.equal(f.state.phase,'cleaned');
 });

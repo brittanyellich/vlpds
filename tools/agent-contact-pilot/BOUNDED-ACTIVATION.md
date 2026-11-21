@@ -16,7 +16,7 @@ account data change or public repository record write exists in this workflow.
 1. Freeze/review the workflow head. Require unchanged lockfile and Worker modules other than the separately
    qualified lease-only index.ts/runtime.ts versus qualified21117d08. Pin
    the exact reviewed Worker qualification file hashes before publishing. Read fresh authenticated current/desired/running,
-   exact requalified clean OFF Workerdf75d444-fd52-4314-b686-6461b792f4b4, current Card key,
+   exact requalified clean OFF Worker23ab139c-7cf7-423a-bbac-910dcbad8f92, current Card key,
    public health/UI/Card404. Initial Worker must have no pilot secret bindings.
 2. Have Otto's reviewed caller harness ready first. It must keep operator unlock
    and fresh service JWT local/private. No JWT or passphrase in workflow inputs,
@@ -139,8 +139,8 @@ succeed. No production credential was minted by these tests.
 
 ## Requalified baseline after cleanup
 
-The initial OFF Worker pin is now exactly
-`df75d444-fd52-4314-b686-6461b792f4b4`. Authenticated read-only inspection
+At PR25, the initial OFF Worker pin became
+`df75d444-fd52-4314-b686-6461b792f4b4` (historical; superseded below). Authenticated read-only inspection
 [44921363041](https://github.com/brittanyellich/vlpds/actions/runs/44921363041)
 from main `4d2799bba77b2bc4c5099cbd5e8ac01f85220b92` passed with no deletion
 attempt. Its single sanitized artifact14712634862 has ZIP SHA256
@@ -164,3 +164,18 @@ A future approved run must pass its exact new merged main SHA explicitly to
 that consumer and authenticate that run's own fresh readiness artifact; prior
 heads, inspection receipts and cached readiness cannot authorize a new prompt.
 No token, activation or live request is part of preparing this update.
+
+### Current baseline after run44933594641
+
+The earlier df75 baseline above is historical. Initial pilot pin is now exactly
+`23ab139c-7cf7-423a-bbac-910dcbad8f92`, verified by authenticated GET-only
+inspection [44933972045](https://github.com/brittanyellich/vlpds/actions/runs/44933972045)
+at approved source3c4fd31. Sanitized artifact14718319506 ZIP SHA256
+`de5ac56667876f4d4c79fa88acd4a2870493739ed1ff16ce5e17a6cf6ca37bc9`
+proves OFF/no lease, exact23 binding types and unchanged script88f6..., with the
+qualified image2e254 running and health/UI200/Card404. The original7572,
+provisioned37d6 and previous clean df75 Worker IDs are rejected. Qualification
+253b25..., native image, caller/Card/credential caps and all other gates remain
+unchanged. This immutable baseline update grants no live window or credential
+operation; a future run still needs fresh checks and explicit approval. Otto
+needs the future exact merged head, with no initial-OFF-pin consumer code change.

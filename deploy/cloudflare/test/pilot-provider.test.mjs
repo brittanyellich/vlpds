@@ -29,3 +29,11 @@ test('current Card authority is fixed DID/key/controller/type and exact current 
  assert.equal(await provider(doc).currentCardKey(),PILOT.cardKey);
  for(const change of[x=>x.deactivated=true,x=>x.id='other',x=>x.verificationMethod[0].type='other',x=>x.verificationMethod[0].controller='other',x=>x.service[0].serviceEndpoint='https://other.invalid',x=>x.service.push(x.service[0])]){const d=structuredClone(doc);change(d);await assert.rejects(provider(d).currentCardKey());}
 });
+
+test('fixed DID accepts observed DID-LD media type; administrative JSON still rejects it',async()=>{
+ const did='did:plc:6tlvgafuonoighfrtpejff5m',doc={id:did,verificationMethod:[{id:did+'#card-signing',controller:did,type:'Multikey',publicKeyMultibase:PILOT.cardKey}],service:[{id:'#atproto_pds',type:'AtprotoPersonalDataServer',serviceEndpoint:'https://pds.crate.social'}]};
+ const p=new PilotProvider({...opts,fetchImpl:async()=>new Response(JSON.stringify(doc),{headers:{'content-type':'Application/DID+LD+JSON; charset=utf-8'}})});
+ assert.equal(await p.currentCardKey(),PILOT.cardKey);await assert.rejects(p.status());
+ const bad=new PilotProvider({...opts,fetchImpl:async()=>new Response(JSON.stringify({...doc,id:'other'}),{headers:{'content-type':'application/did+ld+json'}})});await assert.rejects(bad.currentCardKey());
+ const html=new PilotProvider({...opts,fetchImpl:async()=>new Response(JSON.stringify(doc),{headers:{'content-type':'text/html'}})});await assert.rejects(html.currentCardKey());
+});

@@ -1,0 +1,52 @@
+name: Reconcile only temporary pilot bindings
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Inspect OFF state, or delete only the two known temporary pilot bindings after exact gates
+        type: choice
+        required: true
+        default: inspect
+        options: [inspect, cleanup]
+      exclusive_window:
+        description: Owner confirms no dashboard/API/CLI Worker or secret changes during this cleanup (API has no version CAS)
+        type: boolean
+        required: true
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: crate-pds-cloudflare-production
+  cancel-in-progress: false
+jobs:
+  reconcile:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: deploy/cloudflare
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '26.12.1'
+      - name: Gate OFF state and reconcile only known bindings
+        env:
+          OPERATION: ${{ inputs.operation }}
+          EXCLUSIVE_WINDOW_CONFIRMED: ${{ inputs.exclusive_window }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VLPDS_DEPLOY_TOKEN: ${{ secrets.VLPDS_DEPLOY_TOKEN }}
+        run: node scripts/pilot-binding-cleanup.mjs "$OPERATION"
+      - name: Retain sanitized reconciliation receipt only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: exp710-binding-reconciliation-${{ github.run_id }}
+          path: ${{ runner.temp }}/exp710-binding-reconciliation.json
+          if-no-files-found: error
+          retention-days: 1

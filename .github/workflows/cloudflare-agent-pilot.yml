@@ -55,6 +55,14 @@ jobs:
           VLPDS_DEPLOY_TOKEN: ${{ secrets.VLPDS_DEPLOY_TOKEN }}
           DEPLOY_CONFIG: ${{ secrets.VLPDS_CLOUDFLARE_CONFIG_JSON }}
         run: node scripts/pilot-runner.mjs provision
+      - name: Retain sanitized provisioning stages
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: exp710-provision-diagnostic-${{ github.run_id }}
+          path: ${{ runner.temp }}/exp710-provision-diagnostic.json
+          if-no-files-found: warn
+          retention-days: 1
       - name: Activate guarded Otto-only pilot
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

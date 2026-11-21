@@ -1,0 +1,46 @@
+name: Read-only pilot preflight diagnostic
+on:
+  workflow_dispatch:
+    inputs:
+      card_json:
+        description: Exact approved signed Card file bytes; public metadata only, never credentials
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: crate-pds-cloudflare-production
+  cancel-in-progress: false
+jobs:
+  diagnose:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: production
+    defaults:
+      run:
+        working-directory: deploy/cloudflare
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '26.12.1'
+      - name: Run only sanitized GET diagnostics
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VLPDS_DEPLOY_TOKEN: ${{ secrets.VLPDS_DEPLOY_TOKEN }}
+          DEPLOY_CONFIG: ${{ secrets.VLPDS_CLOUDFLARE_CONFIG_JSON }}
+          PILOT_CARD_JSON: ${{ inputs.card_json }}
+        run: node scripts/pilot-preflight-diagnostic.mjs
+      - name: Retain only sanitized diagnostic receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: exp710-preflight-diagnostic-${{ github.run_id }}
+          path: ${{ runner.temp }}/exp710-preflight-diagnostic.json
+          if-no-files-found: error
+          retention-days: 1

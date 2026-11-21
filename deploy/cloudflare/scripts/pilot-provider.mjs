@@ -25,10 +25,10 @@ export class PilotProvider {
    response=await this.fetchImpl(url,{method,headers:{'Accept-Encoding':'identity','Cache-Control':'no-store',...headers,...auth},body,redirect:'error',signal:AbortSignal.timeout(timeout)});
    const reader=response.body.getReader(),chunks=[];let size=0;
    try {while(true){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>limit)throw 0;chunks.push(value);}}finally{await reader.cancel().catch(()=>{});}
-   const bytes=Buffer.concat(chunks);return {status:response.status,type:response.headers.get('content-type')?.split(';')[0],bytes};
+   const bytes=Buffer.concat(chunks);return {status:response.status,type:response.headers.get('content-type')?.split(';')[0].trim().toLowerCase(),bytes};
   }catch(e){if(e instanceof TypeError || ['AbortError','TimeoutError'].includes(e?.name))throw new ProviderPending('Provider unavailable');throw safeError();}finally{await response?.body?.cancel().catch(()=>{});}
  }
- async json(url,options){const r=await this.request(url,options);if([502,503,504].includes(r.status))throw new ProviderPending('Provider pending');if(r.status!==200 || r.type!=='application/json')throw safeError();try{return JSON.parse(r.bytes);}catch{throw safeError();}}
+ async json(url,options){const r=await this.request(url,options);if([502,503,504].includes(r.status))throw new ProviderPending('Provider pending');const types=url===DID_URL?['application/json','application/did+ld+json']:['application/json'];if(r.status!==200 || !types.includes(r.type))throw safeError();try{return JSON.parse(r.bytes);}catch{throw safeError();}}
  async currentCardKey(){const d=await this.json(DID_URL,{limit:32768});
   if(d.id!==AGENT || d.deactivated!==undefined && d.deactivated!==false || !Array.isArray(d.verificationMethod) || d.verificationMethod.length>64 || !Array.isArray(d.service) || d.service.length>64)throw safeError();
   const keys=d.verificationMethod.filter(k=>k.id===AGENT+'#card-signing'),pds=d.service.filter(s=>['#atproto_pds',AGENT+'#atproto_pds'].includes(s.id));

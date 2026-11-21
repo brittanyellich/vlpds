@@ -2,7 +2,7 @@
 // mint/revoke or public repo write is implemented here.
 import {readFileSync,writeFileSync,appendFileSync,existsSync,mkdtempSync,rmSync}from'node:fs';
 import {execFileSync}from'node:child_process';import{join,resolve}from'node:path';
-import{createHash}from'node:crypto';
+import{preflightInputs}from'./pilot-preflight-inputs.mjs';
 import{checkCandidateToken}from'./pilot-token-check.mjs';
 import{sealState,openState}from'./pilot-state.mjs';import{fileURLToPath}from'node:url';
 import{PILOT,normalizeCredentialMetadata}from'./pilot-activation-plan.mjs';
@@ -13,19 +13,10 @@ const mode=process.argv[2],root=resolve(fileURLToPath(new URL('..',import.meta.u
 let stateFile,receiptFile;
 const safeEmit=value=>console.log(JSON.stringify(value));
 async function main(){
- if(!['preflight','provision','activate','wait','disable','cleanup'].includes(mode)||env.GITHUB_REPOSITORY!=='brittanyellich/vlpds'||env.GITHUB_REF!=='refs/heads/main'||env.GITHUB_RUN_ATTEMPT!=='1'||!/^\d+$/.test(env.GITHUB_RUN_ID??'')||!/^[a-f0-9]{40}$/.test(env.GITHUB_SHA??'')||!env.RUNNER_TEMP?.startsWith('/home/runner/work/_temp'))throw 0;
- stateFile=join(env.RUNNER_TEMP,'exp710-pilot-state.json');receiptFile=join(env.RUNNER_TEMP,'exp710-activation-ready.json');
- const card=env.PILOT_CARD_JSON;
- if(typeof card!=='string'||createHash('sha256').update(card).digest('hex')!==PILOT.cardHash)throw 0;
- // Do not rebuild or silently ship different Worker code/dependencies. The
- // qualified source may differ only in workflow/operator scripts/tests/docs.
- execFileSync('git',['diff','--exit-code',PILOT.revision,'HEAD','--','deploy/cloudflare/src','deploy/cloudflare/package-lock.json',':(exclude)deploy/cloudflare/src/index.ts',':(exclude)deploy/cloudflare/src/runtime.ts'],{cwd:resolve(root,'../..'),stdio:'pipe',env:{PATH:'/usr/bin:/bin'},timeout:10000});
- const qualificationBytes=readFileSync(join(root,'scripts/pilot-worker-qualification.json'));
- const qualification=JSON.parse(qualificationBytes);
- if(qualification.version!==1 || qualification.nativeImageDigest!==PILOT.digest || qualification.nativeSourceRevision!==PILOT.revision || JSON.stringify(Object.keys(qualification.files).sort())!==JSON.stringify(['package.json','src/index.ts','src/runtime.ts']))throw 0;
- for(const [file,hash]of Object.entries(qualification.files))if(createHash('sha256').update(readFileSync(join(root,file))).digest('hex')!==hash)throw 0;
- const workerQualificationSha256=createHash('sha256').update(qualificationBytes).digest('hex');
- const identity={workerQualificationSha256,repository:env.GITHUB_REPOSITORY,runId:Number(env.GITHUB_RUN_ID),head:env.GITHUB_SHA};
+ if(!['preflight','provision','activate','wait','disable','cleanup'].includes(mode))throw 0;
+ const context=preflightInputs(env,mode);
+ stateFile=context.stateFile;receiptFile=context.receiptFile;
+ const {card,identity}=context;
  const save=s=>writeFileSync(stateFile,sealState(s,env.VLPDS_DEPLOY_TOKEN),{mode:0o600});
  const load=()=>openState(readFileSync(stateFile),env.VLPDS_DEPLOY_TOKEN,identity);
  const provider=new PilotProvider({account:env.CLOUDFLARE_ACCOUNT_ID,cfToken:env.CLOUDFLARE_API_TOKEN,deployToken:env.VLPDS_DEPLOY_TOKEN,fetchImpl:fetch,now});

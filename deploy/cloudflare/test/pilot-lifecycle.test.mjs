@@ -41,3 +41,17 @@ test('late readiness never emits an activation-ready receipt',async()=>{
  const deploy=f.lifecycle.deploy;f.lifecycle.deploy=async(...args)=>{const version=await deploy(...args);f.advance(500);return version;};
  await assert.rejects(f.lifecycle.activate(),/Insufficient acceptance window/);assert.notEqual(f.state.phase,'active');
 });
+
+test('ambiguous activation publish never restarts; distinct verified OFF can still clean',async()=>{
+ const f=fixture();await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});await f.lifecycle.provisionSecrets(secrets);
+ const deploy=f.lifecycle.deploy;f.lifecycle.deploy=async(...args)=>{await deploy(...args);throw new Error('ACK_UNAVAILABLE');};
+ await assert.rejects(f.lifecycle.activate(),/ACK_UNAVAILABLE/);assert.equal(f.state.phase,'activation-attempted');assert.ok(!f.events.some(e=>e.startsWith('restart:')));
+ await assert.rejects(f.lifecycle.cleanup(),/verified OFF/);
+ f.lifecycle.deploy=deploy;await f.lifecycle.disable();await f.lifecycle.cleanup();assert.equal(f.state.phase,'cleaned');assert.equal(f.events.filter(e=>e==='restart:activate').length,0);
+});
+test('ambiguous OFF publish cannot authorize restart or secret cleanup',async()=>{
+ const f=fixture();await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});await f.lifecycle.provisionSecrets(secrets);await f.lifecycle.activate();
+ const deploy=f.lifecycle.deploy;f.lifecycle.deploy=async(...args)=>{await deploy(...args);throw new Error('ACK_UNAVAILABLE');};
+ await assert.rejects(f.lifecycle.disable(),/ACK_UNAVAILABLE/);await assert.rejects(f.lifecycle.cleanup(),/verified OFF/);
+ assert.equal(f.state.phase,'disable-attempted');assert.ok(!f.events.includes('restart:disable'));assert.ok(!f.events.includes('remove'));
+});

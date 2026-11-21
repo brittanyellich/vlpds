@@ -1,7 +1,7 @@
 // Only the reviewed production Actions workflow may invoke this CLI. No profile
 // mint/revoke or public repo write is implemented here.
 import {readFileSync,writeFileSync,appendFileSync,existsSync,mkdtempSync,rmSync}from'node:fs';
-import {execFileSync}from'node:child_process';import{join,resolve}from'node:path';
+import {publishPilotWorker}from'./pilot-publish.mjs';import{join,resolve}from'node:path';
 import{preflightInputs}from'./pilot-preflight-inputs.mjs';
 import{checkCandidateToken}from'./pilot-token-check.mjs';
 import{sealState,openState}from'./pilot-state.mjs';import{fileURLToPath}from'node:url';
@@ -26,9 +26,7 @@ async function main(){
   // Config's main path resolves relative to this file; use an absolute reviewed
   // source path, same module as the qualified OFF Worker. Image remains pinned.
   config.main=join(root,'src/index.ts');const path=join(tmp,'pilot.json');writeFileSync(path,JSON.stringify(config),{mode:0o600});
-  try {const output=execFileSync(process.execPath,[join(root,'node_modules/wrangler/bin/wrangler.js'),'deploy','--config',path,'--containers-rollout','none'],{
-    cwd:root,env:{PATH:'/usr/bin:/bin',HOME:tmp,TMPDIR:tmp,CLOUDFLARE_API_TOKEN:env.CLOUDFLARE_API_TOKEN,CLOUDFLARE_ACCOUNT_ID:env.CLOUDFLARE_ACCOUNT_ID,WRANGLER_SEND_METRICS:'false',WRANGLER_LOG:'info'},
-    stdio:'pipe',maxBuffer:262144,timeout:180000});const ids=[...output.toString('utf8').matchAll(/Current Version ID:\s*([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/g)];if(ids.length!==1)throw 0;return ids[0][1];}finally{rmSync(tmp,{recursive:true,force:true});}
+  try {return publishPilotWorker({root,tmp,configPath:path,account:env.CLOUDFLARE_ACCOUNT_ID,token:env.CLOUDFLARE_API_TOKEN});}finally{rmSync(tmp,{recursive:true,force:true});}
  };
  const remove=async()=>{
   // Null deletes only the two pilot bindings via the same documented bulk API.

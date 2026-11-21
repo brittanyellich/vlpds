@@ -55,3 +55,12 @@ test('ambiguous OFF publish cannot authorize restart or secret cleanup',async()=
  await assert.rejects(f.lifecycle.disable(),/ACK_UNAVAILABLE/);await assert.rejects(f.lifecycle.cleanup(),/verified OFF/);
  assert.equal(f.state.phase,'disable-attempted');assert.ok(!f.events.includes('restart:disable'));assert.ok(!f.events.includes('remove'));
 });
+
+// Synthetic provider checks exercise the real orchestration, not live authority.
+test('old and unrelated OFF Workers cannot allocate a new pilot state',async()=>{
+ for(const id of ['7572d63f-a93e-4bb3-876a-bba6348cba7e','37d6aa2e-607f-442f-88b7-54e6c2c5e86c','00000000-0000-0000-0000-000000000000']){
+  const f=fixture(),metadata=f.provider.metadata;f.provider.metadata=async()=>({...await metadata(),id});
+  await assert.rejects(f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential}),/Initial OFF Worker differs/);
+  assert.equal(f.state,undefined);assert.ok(!f.events.some(e=>e.startsWith('save:')||e.startsWith('deploy:')||e.startsWith('restart:')));
+ }
+});

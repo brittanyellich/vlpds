@@ -16,7 +16,7 @@ account data change or public repository record write exists in this workflow.
 1. Freeze/review the workflow head. Require unchanged lockfile and Worker modules other than the separately
    qualified lease-only index.ts/runtime.ts versus qualified21117d08. Pin
    the exact reviewed Worker qualification file hashes before publishing. Read fresh authenticated current/desired/running,
-   exact original OFF Worker7572d63f-a93e-4bb3-876a-bba6348cba7e, current Card key,
+   exact requalified clean OFF Workerdf75d444-fd52-4314-b686-6461b792f4b4, current Card key,
    public health/UI/Card404. Initial Worker must have no pilot secret bindings.
 2. Have Otto's reviewed caller harness ready first. It must keep operator unlock
    and fresh service JWT local/private. No JWT or passphrase in workflow inputs,
@@ -136,3 +136,31 @@ sequencing, fixed destinations and guards, not real CF permission, secret API
 version semantics, Wrangler rollout-none behavior, live Kody execution or Otto
 acceptance. Exact live gates must pass; do not weaken them to make the first run
 succeed. No production credential was minted by these tests.
+
+## Requalified baseline after cleanup
+
+The initial OFF Worker pin is now exactly
+`df75d444-fd52-4314-b686-6461b792f4b4`. Authenticated read-only inspection
+[44921363041](https://github.com/brittanyellich/vlpds/actions/runs/44921363041)
+from main `4d2799bba77b2bc4c5099cbd5e8ac01f85220b92` passed with no deletion
+attempt. Its single sanitized artifact14712634862 has ZIP SHA256
+`3b19afcc31e4e08d3918524f74d6177177f488fe1b2f51bbfe21619bade51919`.
+It confirms the qualified current/desired image running, explicit OFF, no lease,
+exactly23 binding types, health/UI200 and Card404. Worker script ETag is
+`88f6a917a64c75dda70dd40bb76cc74c8607790400fd50349095ec7fe615dc42`;
+binding name/type SHA256 is
+`0fc25600babf6b573a96519018b704a676c59723f09f83ba89de0b27f3c0c5ad`.
+This is historical baseline evidence, not fresh pilot readiness or permission.
+The immutable Worker version identifies this exact script/config; the runner
+still reads fresh provider metadata and all original preflight gates. Neither
+the prior7572 baseline nor provisioned37d6 Worker remains accepted.
+
+This pin update changes no runtime image, Worker source, Card, caller, profile,
+credential cap, deadline, rollback or cleanup rule. The native image stays2e254;
+Worker qualification stays
+`253b25c2baa4983042d803787b60ec0be9838c253b4860761257d0795b345e36`.
+Otto's consumer does not pin the initial OFF Worker and needs no code change.
+A future approved run must pass its exact new merged main SHA explicitly to
+that consumer and authenticate that run's own fresh readiness artifact; prior
+heads, inspection receipts and cached readiness cannot authorize a new prompt.
+No token, activation or live request is part of preparing this update.

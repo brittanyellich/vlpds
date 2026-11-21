@@ -4,6 +4,7 @@ import {readFileSync,writeFileSync,appendFileSync,existsSync,mkdtempSync,rmSync}
 import {publishPilotWorker}from'./pilot-publish.mjs';import{join,resolve}from'node:path';
 import{preflightInputs}from'./pilot-preflight-inputs.mjs';
 import{checkCandidateToken}from'./pilot-token-check.mjs';
+import{provisionDiagnostic}from'./pilot-provision-diagnostic.mjs';
 import{sealState,openState}from'./pilot-state.mjs';import{fileURLToPath}from'node:url';
 import{PILOT,normalizeCredentialMetadata}from'./pilot-activation-plan.mjs';
 import{preparePilotConfig}from'./pilot-config.mjs';import{PilotProvider}from'./pilot-provider.mjs';
@@ -17,6 +18,7 @@ async function main(){
  const context=preflightInputs(env,mode);
  stateFile=context.stateFile;receiptFile=context.receiptFile;
  const {card,identity}=context;
+ const reportProvision=mode==='provision'?provisionDiagnostic(identity,bytes=>writeFileSync(join(env.RUNNER_TEMP,'exp710-provision-diagnostic.json'),bytes,{mode:0o600})):()=>{};
  const save=s=>writeFileSync(stateFile,sealState(s,env.VLPDS_DEPLOY_TOKEN),{mode:0o600});
  const load=()=>openState(readFileSync(stateFile),env.VLPDS_DEPLOY_TOKEN,identity);
  const provider=new PilotProvider({account:env.CLOUDFLARE_ACCOUNT_ID,cfToken:env.CLOUDFLARE_API_TOKEN,deployToken:env.VLPDS_DEPLOY_TOKEN,fetchImpl:fetch,now});
@@ -35,7 +37,7 @@ async function main(){
    if(response.status!==200)throw 0; // Independent binding readback follows.
   }finally{await response?.body?.cancel().catch(()=>{});}
  };
- const lifecycle=new PilotLifecycle({provider,save,load,deploy,provision:cloudflareSecretTransport(fetch),introspect:(token,o)=>checkCandidateToken(token,{...o,fetchImpl:fetch}),remove,card,now,sleep,identity});
+ const lifecycle=new PilotLifecycle({provider,save,load,deploy,provision:cloudflareSecretTransport(fetch),introspect:(token,o)=>checkCandidateToken(token,{...o,fetchImpl:fetch,clock:now}),remove,card,now,sleep,identity,reportProvision});
  if(mode==='preflight'){
   if(existsSync(stateFile))throw 0;
   preparePilotConfig({...env,DEPLOY_TOKEN:env.VLPDS_DEPLOY_TOKEN},card,false);

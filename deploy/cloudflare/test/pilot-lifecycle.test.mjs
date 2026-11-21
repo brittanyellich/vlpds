@@ -64,3 +64,14 @@ test('old and unrelated OFF Workers cannot allocate a new pilot state',async()=>
   assert.equal(f.state,undefined);assert.ok(!f.events.some(e=>e.startsWith('save:')||e.startsWith('deploy:')||e.startsWith('restart:')));
  }
 });
+
+test('provision failure reports precise safe stage before any CF write',async()=>{
+ const f=fixture(),stages=[];f.lifecycle.reportProvision=(stage,status)=>stages.push({stage,status});
+ await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});f.lifecycle.introspect=async()=>{throw new Error('PRIVATE_DATA');};
+ await assert.rejects(f.lifecycle.provisionSecrets(secrets));assert.deepEqual(stages.at(-1),{stage:'candidate-introspection',status:'failed'});assert.equal(f.state.phase,'preflight');assert.ok(!f.events.includes('provision'));assert.ok(!JSON.stringify(stages).includes('PRIVATE_DATA'));
+});
+test('lease expiring during introspection cannot persist attempt or transfer bindings',async()=>{
+ const f=fixture();await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});
+ f.lifecycle.introspect=async(_token,o)=>{f.advance(600);return o.expected;};
+ await assert.rejects(f.lifecycle.provisionSecrets(secrets),/Pilot lease expired/);assert.equal(f.state.phase,'preflight');assert.ok(!f.events.includes('provision'));
+});

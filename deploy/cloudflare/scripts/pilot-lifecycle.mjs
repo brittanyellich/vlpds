@@ -3,8 +3,8 @@
 import {PILOT,activationPlan,transferSecrets} from './pilot-activation-plan.mjs';
 import {checkBindings,ProviderPending} from './pilot-provider.mjs';
 export class PilotLifecycle {
- constructor({provider,save,load,deploy,provision,introspect,remove,card,now,sleep,identity}) {
-  Object.assign(this,{provider,save,load,deploy,provision,introspect,remove,card,now,sleep,identity});
+ constructor({provider,save,load,deploy,provision,introspect,remove,card,now,sleep,identity,reportProvision=()=>{}}) {
+  Object.assign(this,{provider,save,load,deploy,provision,introspect,remove,card,now,sleep,identity,reportProvision});
  }
  async inspect(enabled,provisioned,baseline,deadline) {
   const checkedAt=this.now();await this.provider.status();await this.provider.currentCardKey();
@@ -29,15 +29,24 @@ export class PilotLifecycle {
   await this.save(state);return plan;
  }
  async provisionSecrets(secrets) {
-  const s=await this.load();if(s.phase!=='preflight' || this.now()>=s.deadline)throw new Error('Pilot phase refused');
-  await this.inspect(false,false,s.baseline);
-  if(typeof this.introspect!=='function')throw new Error('Candidate introspection required');
+  const step=async(stage,run)=>{this.reportProvision(stage,'started');try{const result=await run();this.reportProvision(stage,'passed');return result;}catch(error){this.reportProvision(stage,'failed',error);throw error;}};
+  const s=await step('load-private-state',()=>this.load());
+  await step('phase-and-lease',()=>{if(s.phase!=='preflight'||this.now()>=s.deadline)throw new Error('Pilot phase refused');});
+  await step('fresh-off-state',()=>this.inspect(false,false,s.baseline));
   const candidate=secrets.profileToken;
-  s.credential=await this.introspect(candidate,{expected:s.credential,deadline:s.deadline,now:this.now()});
-  s.phase='provision-attempted';await this.save(s); // Persist before any mutation.
-  await transferSecrets({...secrets,profileToken:candidate},this.provision);
-  const {meta}=await this.inspect(false,true,s.baseline);if(meta.scriptEtag!==s.offScriptEtag)throw new Error('Provision changed script');s.provisionWorker=meta.id;s.provisioned=true;s.phase='provisioned';await this.save(s);
+  s.credential=await step('candidate-introspection',()=>{
+   if(typeof this.introspect!=='function')throw new Error('Candidate introspection required');
+   return this.introspect(candidate,{expected:s.credential,deadline:s.deadline,now:this.now()});
+  });
+  await step('persist-provision-attempt',async()=>{
+   if(this.now()>=s.deadline)throw new Error('Pilot lease expired');
+   s.phase='provision-attempted';await this.save(s); // Persist before any mutation.
+  });
+  await step('transfer-two-bindings',()=>transferSecrets({...secrets,profileToken:candidate},this.provision));
+  const {meta}=await step('verify-provisioned-off',async()=>{const result=await this.inspect(false,true,s.baseline);if(result.meta.scriptEtag!==s.offScriptEtag)throw new Error('Provision changed script');return result;});
+  await step('persist-provisioned-state',async()=>{s.provisionWorker=meta.id;s.provisioned=true;s.phase='provisioned';await this.save(s);});
  }
+
  async activate() {
   const s=await this.load();if(s.phase!=='provisioned' || s.deadline-this.now()<300)throw new Error('Pilot phase refused');
   const before=await this.inspect(false,true,s.baseline);if(before.meta.id!==s.provisionWorker || before.meta.scriptEtag!==s.offScriptEtag)throw new Error('Worker changed');

@@ -430,3 +430,169 @@ async fn synthetic_production_did_card_is_rejected_by_live_key_and_latched() {
     vlpds::server::shutdown(&b.app).await;
     println!("Synthetic same-production-DID Card rejected against live public key; retirement persisted in disposable PDS; no live key or record writes");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn card_readiness_distinguishes_absent_inactive_and_invalid_trust_in_disposable_storage() {
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
+    use tower::ServiceExt;
+    use vlpds::{
+        agent_a2a::NativeA2a, agent_contact_pilot::CARD_PATH, agent_endorsement::AGENT, agent_profile_bridge::Bridge,
+    };
+    let s = TestServer::spawn_lone(|c| {
+        c.workers = 1;
+        c.shards = 1;
+    })
+    .await;
+    let cfg = NativeA2a::new(
+        &s.url,
+        "did:plc:vsgwub3c3pupqt3yhxfmecma",
+        Bridge::new("http://127.0.0.1:19099", vec![7; 32]).unwrap(),
+        true,
+    )
+    .unwrap();
+    let router = cfg.routes(s.app.clone());
+    let request = || Request::builder().uri(CARD_PATH).body(Body::empty()).unwrap();
+    let missing = router.clone().oneshot(request()).await.unwrap();
+    assert_eq!(missing.status(), 404);
+    let body: J = serde_json::from_slice(&to_bytes(missing.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["error"], "Agent unavailable");
+    // Metadata rows exist only in this in-memory fixture; no signing/account
+    // authority is asserted and no live DID/repo/key is modified.
+    let p = s.app.partition(AGENT).unwrap_or_else(|_| panic!("Fixture partition missing"));
+    for status in [Some("deactivated"), Some("takendown"), Some("suspended"), None] {
+        let account = vlpds::state::Account {
+            did: AGENT.into(),
+            handle: "synthetic.vlpds.test".into(),
+            status: status.map(str::to_string),
+            ..Default::default()
+        };
+        p.db.put(vlpds::state::account_key(AGENT), serde_json::to_vec(&account).unwrap()).await.unwrap();
+        let response = router.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), if status.is_none() { 200 } else { 404 });
+    }
+    // This active fixture has deliberately invalid signed Card bytes. Trust
+    // fails locally before any public DID fetch, yielding a distinct503.
+    let directory = std::env::temp_dir().join(unique_name("card-readiness"));
+    std::fs::create_dir(&directory).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let write = |name: &str, bytes: &[u8]| {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(directory.join(name)).unwrap().write_all(bytes).unwrap();
+    };
+    let key = p256::ecdsa::SigningKey::from_bytes((&[7u8; 32]).into()).unwrap();
+    let mut multikey = vec![0x80, 0x24];
+    multikey.extend_from_slice(key.verifying_key().to_sec1_point(true).as_bytes());
+    let pin = format!("z{}", bs58::encode(multikey).into_string());
+    write("key", hex::encode([7u8; 32]).as_bytes());
+    write("card", b"{}");
+    write("config", &serde_json::to_vec(&json!({"enabled":true,"caller_did":"did:plc:vsgwub3c3pupqt3yhxfmecma","bridge_origin":"http://127.0.0.1:19099","bridge_key_file":directory.join("key"),"signed_card_file":directory.join("card"),"card_key_multibase":pin})).unwrap());
+    let signed = NativeA2a::load(&directory.join("config"), &s.url, true).unwrap();
+    let refused = signed.routes(s.app.clone()).oneshot(request()).await.unwrap();
+    assert_eq!(refused.status(), 503);
+    let body: J = serde_json::from_slice(&to_bytes(refused.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["error"], "Signed Card trust unavailable");
+    std::fs::remove_dir_all(directory).unwrap();
+    vlpds::server::shutdown(&s.app).await;
+}
+
+#[test]
+#[ignore = "Explicit offline verification of the local public signed Card artifact; no resolver/network"]
+fn frozen_pilot_card_matches_production_origin_audience_and_signature_offline() {
+    let path = std::env::var("VLPDS_FROZEN_CARD_PATH").expect("Public signed artifact path");
+    let card: J = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let pin = "zDnaeyNSrMXCKbWdCmMWCcPv8qCCXGzQs3JLwH4KUWcq8ogna";
+    vlpds::agent_card::verify(&card, pin, "https://pds.crate.social", "did:web:pds.crate.social").unwrap();
+    assert!(vlpds::agent_card::verify(&card, pin, "http://pds.crate.social", "did:web:pds.crate.social").is_err());
+    assert!(vlpds::agent_card::verify(&card, pin, "https://pds.crate.social", "did:web:other.invalid").is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "Explicit public read-only PLC authority check, frozen public Card and disposable active account only"]
+async fn frozen_card_get_over_http_with_disposable_active_account_and_public_authority() {
+    use vlpds::{agent_a2a::NativeA2a, agent_contact_pilot::CARD_PATH, agent_endorsement::AGENT};
+    let directory = std::env::temp_dir().join(unique_name("card-http"));
+    std::fs::create_dir(&directory).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let write = |name: &str, bytes: &[u8]| {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(directory.join(name)).unwrap().write_all(bytes).unwrap();
+    };
+    let card = std::fs::read(std::env::var("VLPDS_FROZEN_CARD_PATH").expect("Public signed artifact path")).unwrap();
+    write("card", &card);
+    write("key", hex::encode([7u8; 32]).as_bytes());
+    write("config", &serde_json::to_vec(&json!({"enabled":true,"caller_did":"did:plc:vsgwub3c3pupqt3yhxfmecma","bridge_origin":"http://127.0.0.1:19099","bridge_key_file":directory.join("key"),"signed_card_file":directory.join("card"),"card_key_multibase":"zDnaeyNSrMXCKbWdCmMWCcPv8qCCXGzQs3JLwH4KUWcq8ogna"})).unwrap());
+    let cfg = NativeA2a::load(&directory.join("config"), "https://pds.crate.social", false).unwrap();
+    let s = TestServer::spawn_lone(|c| {
+        c.workers = 1;
+        c.shards = 1;
+        c.public_url = "https://pds.crate.social".into();
+        c.service_did = "did:web:pds.crate.social".into();
+        c.agent_a2a = Some(cfg);
+    })
+    .await;
+    let p = s.app.partition(AGENT).unwrap_or_else(|_| panic!("Fixture partition missing"));
+    let account =
+        vlpds::state::Account { did: AGENT.into(), handle: "synthetic.vlpds.test".into(), ..Default::default() };
+    p.db.put(vlpds::state::account_key(AGENT), serde_json::to_vec(&account).unwrap()).await.unwrap();
+    // Real native HTTP router + unchanged guarded public resolver; no profile call.
+    let response = reqwest::Client::new().get(format!("{}{CARD_PATH}", s.url)).send().await.unwrap();
+    let status = response.status();
+    let received: J = response.json().await.unwrap();
+    vlpds::server::shutdown(&s.app).await;
+    std::fs::remove_dir_all(directory).unwrap();
+    assert_eq!(status, 200, "Native Card HTTP status; response intentionally not logged");
+    assert_eq!(received, serde_json::from_slice::<J>(&card).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "Explicit disposable local S3 fixture seed for unchanged release-image Card HTTP test"]
+async fn seed_disposable_s3_active_card_account() {
+    use vlpds::agent_endorsement::AGENT;
+    let endpoint = std::env::var("VLPDS_CARD_FIXTURE_S3").expect("Explicit local S3 emulator");
+    assert!(endpoint.starts_with("http://127.0.0.1:"));
+    let s = TestServer::spawn_lone(|c| {
+        c.workers = 1;
+        c.shards = 1;
+        c.public_url = "https://pds.crate.social".into();
+        c.service_did = "did:web:pds.crate.social".into();
+        c.prefix = "exp710-card-fixture".into();
+        c.s3 = Some(vlsync_store::store::S3Config {
+            endpoint,
+            bucket: "exp710-fixture".into(),
+            access_key: "synthetic".into(),
+            secret_key: "synthetic".into(),
+            region: "us-east-1".into(),
+        });
+    })
+    .await;
+    let p = s.app.partition(AGENT).unwrap_or_else(|_| panic!("Fixture partition missing"));
+    let account =
+        vlpds::state::Account { did: AGENT.into(), handle: "synthetic.vlpds.test".into(), ..Default::default() };
+    p.db.put(vlpds::state::account_key(AGENT), serde_json::to_vec(&account).unwrap()).await.unwrap();
+    vlpds::server::shutdown(&s.app).await;
+}

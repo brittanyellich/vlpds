@@ -16,7 +16,7 @@ account data change or public repository record write exists in this workflow.
 1. Freeze/review the workflow head. Require unchanged lockfile and Worker modules other than the separately
    qualified lease-only index.ts/runtime.ts versus qualified21117d08. Pin
    the exact reviewed Worker qualification file hashes before publishing. Read fresh authenticated current/desired/running,
-   exact requalified clean OFF Worker23ab139c-7cf7-423a-bbac-910dcbad8f92, current Card key,
+   exact requalified clean OFF Worker05c661c2-dbe6-4131-a1a5-54ced81cad0d, current Card key,
    public health/UI/Card404. Initial Worker must have no pilot secret bindings.
 2. Have Otto's reviewed caller harness ready first. It must keep operator unlock
    and fresh service JWT local/private. No JWT or passphrase in workflow inputs,
@@ -165,16 +165,16 @@ that consumer and authenticate that run's own fresh readiness artifact; prior
 heads, inspection receipts and cached readiness cannot authorize a new prompt.
 No token, activation or live request is part of preparing this update.
 
-### Current baseline after run44933594641
+### Current baseline after run44938309648
 
 The earlier df75 baseline above is historical. Initial pilot pin is now exactly
-`23ab139c-7cf7-423a-bbac-910dcbad8f92`, verified by authenticated GET-only
-inspection [44933972045](https://github.com/brittanyellich/vlpds/actions/runs/44933972045)
-at approved source3c4fd31. Sanitized artifact14718319506 ZIP SHA256
-`de5ac56667876f4d4c79fa88acd4a2870493739ed1ff16ce5e17a6cf6ca37bc9`
+`05c661c2-dbe6-4131-a1a5-54ced81cad0d`, verified by authenticated GET-only
+inspection [44938702703](https://github.com/brittanyellich/vlpds/actions/runs/44938702703)
+at approved source3974297. Sanitized artifact14721200224 ZIP SHA256
+`c27b9d9e7d19a381d1546f27a842c12076b5c3e26b8d027cd7a3c837b6307a24`
 proves OFF/no lease, exact23 binding types and unchanged script88f6..., with the
 qualified image2e254 running and health/UI200/Card404. The original7572,
-provisioned37d6 and previous clean df75 Worker IDs are rejected. Qualification
+provisioned37d6 and previous clean df75 and23ab Worker IDs are rejected. Qualification
 253b25..., native image, caller/Card/credential caps and all other gates remain
 unchanged. This immutable baseline update grants no live window or credential
 operation; a future run still needs fresh checks and explicit approval. Otto

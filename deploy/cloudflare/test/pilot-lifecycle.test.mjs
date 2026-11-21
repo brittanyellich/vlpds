@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import{PilotLifecycle}from'../scripts/pilot-lifecycle.mjs';import{PILOT}from'../scripts/pilot-activation-plan.mjs';import{ProviderPending}from'../scripts/pilot-provider.mjs';
+import{PilotLifecycle}from'../scripts/pilot-lifecycle.mjs';import{PILOT}from'../scripts/pilot-activation-plan.mjs';import{ProviderPending,CardPending}from'../scripts/pilot-provider.mjs';
 function fixture(){
  let state,enabled=false,provisioned=false,version=PILOT.offWorker,time=1800000000;const events=[];
  const card='{"synthetic":true}',identity={repository:'brittanyellich/vlpds',runId:123,head:'a'.repeat(40)};
@@ -88,8 +88,9 @@ test('twenty pending Card checks are localized as readiness failure without extr
  const {transitionDiagnostic}=await import('../scripts/pilot-transition-diagnostic.mjs');const f=fixture();let trace;
  await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});await f.lifecycle.provisionSecrets(secrets);
  f.lifecycle.reportActivation=transitionDiagnostic('activate',{...f.lifecycle.identity,workerQualificationSha256:'b'.repeat(64)},s=>trace=JSON.parse(s),()=>f.lifecycle.now()*1000);
- const checks=f.provider.publicChecks;f.provider.publicChecks=async enabled=>{if(enabled)throw new ProviderPending('Card pending');return checks(enabled);};
- await assert.rejects(f.lifecycle.activate(),/Pilot readiness failed/);assert.equal(trace.steps.at(-1).stage,'readiness');assert.equal(trace.polls.length,20);assert.ok(trace.polls.every(p=>p.check==='public-checks'&&p.reason==='card-pending'));assert.equal(trace.polls.at(-1).status,'failed');assert.equal(trace.steps.at(-1).durationMs,57000);assert.equal(f.events.filter(e=>e==='restart:activate').length,1);assert.notEqual(f.state.phase,'active');
+ const checks=f.provider.publicChecks;f.provider.publicChecks=async enabled=>{if(enabled)throw new CardPending(503,Buffer.from('{"error":"Signed Card trust unavailable"}'),'application/json');return checks(enabled);};
+ await assert.rejects(f.lifecycle.activate(),/Pilot readiness failed/);assert.equal(trace.steps.at(-1).stage,'readiness');assert.equal(trace.polls.length,20);assert.ok(trace.polls.every(p=>p.check==='public-checks'&&p.reason==='card-http-503-trust-unavailable'));assert.equal(trace.polls.at(-1).status,'failed');assert.equal(trace.steps.at(-1).durationMs,57000);assert.equal(f.events.filter(e=>e==='restart:activate').length,1);assert.notEqual(f.state.phase,'active');
+ await f.lifecycle.disable();await f.lifecycle.cleanup();assert.equal(f.state.phase,'cleaned');
 });
 test('publish failure and applied Worker mismatch are separate boundaries before restart',async()=>{
  for(const scenario of ['publish','worker']){

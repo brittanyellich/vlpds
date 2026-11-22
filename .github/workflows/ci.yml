@@ -61,7 +61,19 @@ jobs:
       - run: cargo test --locked --lib
       # Every test boots an in-process server on the in-memory store, so the
       # suite needs no MinIO or docker.
-      - run: cargo test --locked --test all --test argon2_shed --test fresh_metrics
+      - name: Test sanitized integration reporter
+        run: python3 -m unittest discover -s .github/scripts -p test_rust_integration_test_report.py
+      - name: Rust integration tests with sanitized failure report
+        id: integration
+        run: python3 .github/scripts/rust_integration_test_report.py
+      - name: Retain only sanitized integration failure report
+        if: failure() && steps.integration.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-integration-test-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rust-integration-test-result.json
+          if-no-files-found: warn
+          retention-days: 1
 
   agent-contact:
     name: Local agent contact pilot

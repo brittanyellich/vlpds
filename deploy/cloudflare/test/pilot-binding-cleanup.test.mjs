@@ -1,6 +1,11 @@
 import test from'node:test';import assert from'node:assert/strict';import{readFileSync}from'node:fs';
 import{reconcileBindings,deleteOnlyPilotBindings,CLEANUP}from'../scripts/pilot-binding-cleanup.mjs';import{PILOT}from'../scripts/pilot-activation-plan.mjs';
 const pairs=[["ADMIN_HOST","plain_text"],["ADMIN_TOKEN","secret_text"],["AGENT_A2A_ENABLED","plain_text"],["AGENT_A2A_RUNTIME","plain_text"],["CF_ACCOUNT_ID","secret_text"],["DEPLOY_TOKEN","secret_text"],["EMAIL_API_TOKEN","secret_text"],["EMAIL_API_URL","secret_text"],["EMAIL_FROM_ADDRESS","secret_text"],["ENABLED","plain_text"],["HANDLE_DOMAIN","plain_text"],["INTERNAL_TOKEN","secret_text"],["JWT_SECRET","secret_text"],["KEK","secret_text"],["OPERATOR_DID","plain_text"],["PDS","durable_object_namespace"],["PLC_RECOVERY_DID_KEY","secret_text"],["PLC_ROTATION_KEY_HEX","secret_text"],["PUBLIC_HOST","plain_text"],["S3_ACCESS_KEY","secret_text"],["S3_BUCKET","plain_text"],["S3_PREFIX","plain_text"],["S3_SECRET_KEY","secret_text"]];
+test('cleanup pin matches authenticated OFF inspection and refuses the prior incident Worker',async()=>{
+ assert.equal(CLEANUP.worker,'7495c31c-de99-40f5-a4a6-748026fd9425');
+ const f=fixture({worker:'37d6aa2e-607f-442f-88b7-54e6c2c5e86c'});const result=await reconcileBindings({...f,operation:'cleanup',exclusiveWindow:true});
+ assert.equal(result.result,'failed');assert.equal(result.failedStage,'expected-worker');assert.equal(f.calls,0);
+});
 function fixture({enabled=false,worker=CLEANUP.worker,script=CLEANUP.script,clean=false,changeAfter=false}={}){
  let provisioned=!clean,calls=0,time=0;const events=[];
  const bindings=()=>[...pairs.map(([name,type])=>({name,type,...(type==='plain_text'?{text:name==='AGENT_A2A_ENABLED'?String(enabled):name==='AGENT_A2A_RUNTIME'?'native-profile-v1':'synthetic'}:{})})),...(provisioned?['AGENT_A2A_BRIDGE_KEY','AGENT_A2A_KODY_TOKEN'].map(name=>({name,type:'secret_text'})):[])];

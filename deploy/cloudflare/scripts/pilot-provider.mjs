@@ -63,7 +63,9 @@ export class PilotProvider {
  }
  async restart(phase){if(!['activate','disable'].includes(phase) || this.postPhases.has(phase))throw safeError();await this.status();this.postPhases.add(phase);
   const r=await this.request('https://admin.crate.social/_deploy/restart',{method:'POST',headers:{'X-Deploy-Image':this.image},limit:4096,timeout:75000});
-  let a;try{a=JSON.parse(r.bytes);}catch{throw safeError();}if(r.status!==202 || a.desired!==this.image || a.starting!==true || a.restarted!==true)throw safeError();
+  // The Worker cold-starts when already stopped; restarted=false is a valid ACK.
+  // Full phase readiness still follows, and no POST is replayed.
+  let a;try{a=JSON.parse(r.bytes);}catch{throw safeError();}if(r.status!==202 || a.desired!==this.image || a.starting!==true || typeof a.restarted!=='boolean')throw safeError();
  }
 }
 export function checkBindings(meta,{enabled,baseline,provisioned,card,deadline}) {

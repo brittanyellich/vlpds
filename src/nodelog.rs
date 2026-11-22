@@ -1374,6 +1374,56 @@ mod tests {
     use vlsync_firehose::log::{first_free, prefix_hole, read_head, Head};
     use vlsync_store::segment::SegmentBuilder;
 
+    /// Force the loader to finish before registration, rather than relying on
+    /// scheduler timing: its one-shot save is rejected and not retried. With
+    /// registration first, the same real loader/send/sequencer path emits the
+    /// replacement row. This is why Node must register before spawning it.
+    #[tokio::test]
+    async fn seeded_writeback_needs_sink_registered_before_loader() {
+        for registered_first in [false, true] {
+            let store = Store::memory(None);
+            let shard = ShardId(70_031);
+            let db = Arc::new(crate::partition::open_db(&store, shard, None).await.unwrap());
+            let key = crate::totals::key(7);
+            let row = crate::totals::Totals::default().encode();
+            db.put(&key, &row[..row.len() - 3]).await.unwrap();
+            let sink = Arc::new(ShardSink {
+                id: shard,
+                epoch: 1,
+                db: db.clone(),
+                apply_lock: Default::default(),
+                applied: Default::default(),
+                recent: Default::default(),
+                barrier: Default::default(),
+                totals: Mutex::new(crate::totals::ShardTotals::unloaded()),
+            });
+            let sinks = ShardSinks::default();
+            if registered_first {
+                sinks.insert(sink.clone());
+            }
+            let (tx, mut rx) = mpsc::channel(1);
+            crate::totals::spawn_load(&sink, "seed-order-fixture", tx);
+            let entry = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+            assert!(sink.totals.lock().sum().is_some(), "counts are already loaded");
+            let mut open = Open::new("seed-order-fixture");
+            open.push(&Watermark::new(1, seq_floor(vlatproto::tid::now_micros())), &sinks, entry);
+            if registered_first {
+                let mutations = open.muts.get(&shard).unwrap();
+                let saved = mutations.iter().find(|m| m.key.as_ref() == key.as_slice()).unwrap();
+                assert!(crate::totals::Totals::decode_row(saved.val.as_ref().unwrap()).unwrap().1);
+                assert_eq!(sink.totals.lock().unsaved_entries(), 0);
+            } else {
+                assert!(open.muts.is_empty(), "unregistered sink drops the save");
+                sinks.insert(sink.clone());
+                assert_eq!(sink.totals.lock().unsaved_entries(), 1, "late registration does not save it");
+                assert!(rx.recv().await.is_none(), "loader exits without retrying");
+            }
+            sinks.remove(shard);
+            drop(sink);
+            db.close().await.unwrap();
+        }
+    }
+
     fn seg_bytes(log: &str, ord: u64, shard: ShardId, epoch: u64, key: &str) -> Vec<u8> {
         let mut b = SegmentBuilder::new();
         let m = Mutation { key: Bytes::from(key.to_string()), val: Some(Bytes::from_static(b"v")) };

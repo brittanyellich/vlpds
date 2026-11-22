@@ -305,8 +305,11 @@ impl ShardHost for Node {
                 barrier: Default::default(),
                 totals: Mutex::new(crate::totals::ShardTotals::unloaded()),
             });
+            // The loader can send its one-shot seed writeback on another
+            // runtime thread immediately. Register first or the sequencer
+            // rejects that entry as not held, leaving seeded rows unsaved.
+            self.log.sinks.insert(sink.clone());
             crate::totals::spawn_load(&sink, &self.cluster.cfg.node_id, self.log.tx.clone());
-            self.log.sinks.insert(sink);
             self.table.set(
                 shard,
                 Some(Arc::new(Partition {

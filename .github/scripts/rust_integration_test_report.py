@@ -18,6 +18,9 @@ CATEGORIES = {
     "dependency-download-failure": b"failed to download",
 }
 FAILED = re.compile(rb"^test ([A-Za-z_][A-Za-z0-9_:]{0,511}) \.\.\. FAILED\s*$")
+PANIC_LOCATION = re.compile(
+    rb"^thread '[^\r\n']{1,512}'(?: \([0-9]{1,20}\))? panicked at "
+    rb"(tests/[A-Za-z0-9_/-]{1,240}\.rs):([1-9][0-9]{0,6}):([1-9][0-9]{0,6}):\r?\n$")
 TEST_FUNCTION = re.compile(
     r"^\s*#\[(?:tokio::)?test(?:\([^\]]*\))?\]\s*"
     r"(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?"
@@ -34,8 +37,22 @@ def source_functions(root):
     return {name: name for name in names}
 
 
-def report(stream, code, known):
-    categories, failed = set(), set()
+def source_locations(root):
+    # Only checked-out test files, never paths copied from subprocess output.
+    tests = (root / "tests").resolve()
+    paths = {}
+    tracked = subprocess.check_output(["git", "-C", str(root), "ls-files", "-z", "--", "tests"])
+    for raw in tracked.split(b"\0"):
+        relative = raw.decode("utf-8")
+        path = root / relative
+        if (path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(tests)
+                and re.fullmatch(r"tests/[A-Za-z0-9_/-]{1,240}\.rs", relative)):
+            paths[relative] = len(path.read_text(encoding="utf-8").splitlines())
+    return paths
+
+
+def report(stream, code, known, locations=None):
+    categories, failed, observed_locations = set(), set(), set()
     stream.seek(0)
     while True:
         line = stream.readline(65537)
@@ -53,9 +70,17 @@ def report(stream, code, known):
             leaf = match[1].decode("ascii").split("::")[-1]
             if leaf in known and len(failed) < 128:
                 failed.add(known[leaf])
+        location = PANIC_LOCATION.fullmatch(line)
+        if location and len(observed_locations) < 128:
+            path = location[1].decode("ascii")
+            number = int(location[2])
+            if path in (locations or {}) and number <= locations[path]:
+                observed_locations.add((path, number))
     return {"version": 1, "kind": "rust-integration-test-result",
             "result": "passed" if code == 0 else "failed", "exitCode": code,
             "categories": sorted(categories), "observedTestFunctionLabels": sorted(failed),
+            "observedPanicLocations": [{"path": path, "line": number} for path, number in sorted(observed_locations)],
+            "locationsAreUnverifiedCandidates": True,
             "rawOutputRetained": False}
 
 
@@ -88,6 +113,11 @@ def run_gate(root, output, capture):
 def main():
     root = Path(__file__).resolve().parents[2]
     try:
+        known, locations = source_functions(root), source_locations(root)
+        index_unavailable = False
+    except Exception:
+        known, locations, index_unavailable = {}, {}, True
+    try:
         output = tempfile.TemporaryFile()
         captured = True
     except OSError:
@@ -96,13 +126,14 @@ def main():
     with output:
         code, truncated, unavailable = run_gate(root, output, captured)
         try:
-            if unavailable:
+            if unavailable or index_unavailable:
                 raise OSError("Capture unavailable")
-            result = report(output, code, source_functions(root))
+            result = report(output, code, known, locations)
         except Exception:
             result = {"version": 1, "kind": "rust-integration-test-result",
                       "result": "passed" if code == 0 else "failed", "exitCode": code,
                       "categories": ["report-unavailable"], "observedTestFunctionLabels": [],
+                      "observedPanicLocations": [], "locationsAreUnverifiedCandidates": True,
                       "rawOutputRetained": False}
     result["labelsAreUnverifiedCandidates"] = True
     result["captureTruncated"] = truncated

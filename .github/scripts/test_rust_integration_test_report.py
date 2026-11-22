@@ -11,6 +11,55 @@ import rust_integration_test_report as reporter
 
 
 class ReporterTests(unittest.TestCase):
+    def test_panic_locations_are_source_bounded_and_unverified(self):
+        raw = (b"thread 'PRIVATE_NAME' (42) panicked at tests/all/example.rs:2:3:\nPRIVATE_VALUE\n"
+               b"thread 'other' panicked at tests/all/example.rs:2:9:\n")
+        result = reporter.report(io.BytesIO(raw), 101, {}, {'tests/all/example.rs': 3})
+        self.assertEqual(result['observedPanicLocations'], [{'path': 'tests/all/example.rs', 'line': 2}])
+        self.assertTrue(result['locationsAreUnverifiedCandidates'])
+        self.assertNotIn('PRIVATE', json.dumps(result))
+        self.assertEqual(set(result['observedPanicLocations'][0]), {'path', 'line'})
+
+    def test_malformed_unknown_truncated_and_out_of_range_locations_are_excluded(self):
+        headers = [
+            b"tests/all/example.rs:0:1:\n", b"tests/all/example.rs:4:1:\n",
+            b"tests/all/example.rs:1:0:\n", b"tests/all/example.rs:1:1:",
+            b"tests/all/example.rs:1:1: PRIVATE\n", b"tests/all/example.rs:999999999:1:\n",
+            b"/private/SECRET.rs:1:1:\n", b"tests/../SECRET.rs:1:1:\n",
+            b"tests/all/unknown.rs:1:1:\n", b"tests/all/example.rs:1:1:\xff\n"]
+        for header in headers:
+            result = reporter.report(io.BytesIO(b"thread 'x' panicked at " + header), 101, {}, {'tests/all/example.rs': 3})
+            self.assertEqual(result['observedPanicLocations'], [], header)
+
+    def test_long_and_many_location_lines_are_bounded(self):
+        raw = b"x" * 70000 + b"thread 'x' panicked at tests/all/example.rs:1:1:\n"
+        raw += b''.join(f"thread 'x' panicked at tests/all/example.rs:{i}:1:\n".encode() for i in range(1, 201))
+        result = reporter.report(io.BytesIO(raw), 101, {}, {'tests/all/example.rs': 200})
+        self.assertEqual(len(result['observedPanicLocations']), 128)
+
+    def test_source_location_index_excludes_external_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'tests').mkdir()
+            (root / 'tests' / 'example.rs').write_text('one\ntwo\n')
+            (root / 'outside.rs').write_text('PRIVATE\n')
+            (root / 'tests' / 'external.rs').symlink_to(root / 'outside.rs')
+            (root / 'tests' / 'untracked.rs').write_text('PRIVATE\n')
+            with patch.object(reporter.subprocess, 'check_output', return_value=b'tests/example.rs\0tests/external.rs\0'):
+                self.assertEqual(reporter.source_locations(root), {'tests/example.rs': 2})
+
+    def test_indexes_are_snapshotted_before_the_child_runs(self):
+        order = []
+        def index(*args):
+            order.append('index')
+            return {}
+        def run(*args):
+            order.append('child')
+            return 101, False, False
+        with patch.object(reporter, 'source_functions', side_effect=index), patch.object(reporter, 'source_locations', side_effect=index), patch.object(reporter, 'run_gate', side_effect=run), patch('builtins.print'), patch.dict('os.environ', {'RUNNER_TEMP': ''}):
+            self.assertEqual(reporter.main(), 101)
+        self.assertEqual(order, ['index', 'index', 'child'])
+
     def test_names_are_source_derived_and_raw_text_is_excluded(self):
         raw = b'test module::known_test ... FAILED\ntest PRIVATE_TOKEN ... FAILED\npanic: PRIVATE_TOKEN\nerror: test result: FAILED\n'
         result = reporter.report(io.BytesIO(raw), 101, {"known_test": "known_test"})

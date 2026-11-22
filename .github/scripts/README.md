@@ -21,6 +21,15 @@ The workflow retains only this JSON on integration failure. This adds evidence,
 not a retry or a test workaround. Unit fixtures verify redaction, output bounds,
 source name validation, exact command and exit preservation.
 
+`observedPanicLocations` adds at most 128 distinct repository test file/line
+pairs from complete Rust panic header lines. Paths must exist in the Git-tracked
+test-source index snapshotted before Cargo runs, remain inside `tests/`, and use the restricted source-path
+alphabet; line numbers must be in that file. Thread names, column numbers and
+panic messages/values are never emitted. Partial headers, unknown paths,
+out-of-range lines and oversized lines are excluded. Like function labels,
+these locations can be spoofed by child output: `locationsAreUnverifiedCandidates`
+is always true. They do not establish assertion causality or affect the gate.
+
 EXP-710 main `ea95d19` failed the integration step twice with only exit101 in
 structured annotations and no artifacts. Its PR and main trees/workflows match;
 cache save policy differs by event, but no cause is established. The same targets

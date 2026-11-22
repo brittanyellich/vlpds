@@ -9,8 +9,10 @@ is retained for one day and must be authenticated by run/head/artifact digest
 before use. Dispatch requires separate approval; Git delivery is not dispatch.
 
 The projection models Wrangler 4.158.0 precedence: CLI override, configuration,
-then deferred with 300 seconds. The pilot publisher currently has no CLI
-override. Immediate mode discards maximum delay; deferred defaults an omitted
+then deferred with 300 seconds. The pilot ON/OFF publisher now supplies the
+explicit `immediate` CLI override shared through `pilot-update-mode.mjs`.
+The projection reports that selection without invoking the publisher; it is
+not proof of a production deployment. Immediate mode discards maximum delay; deferred defaults an omitted
 delay to 300. Unsupported or malformed strategy values refuse the projection.
 This describes the current configuration input, not historical deployment
 bytes or proof of the version executing in a particular Durable Object.

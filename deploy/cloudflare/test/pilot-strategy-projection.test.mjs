@@ -7,7 +7,7 @@ test('projection assumptions match pinned publisher',()=>{
  const pkg=JSON.parse(readFileSync(new URL('../package.json',import.meta.url),'utf8'));
  assert.equal(pkg.devDependencies.wrangler,'4.158.0');
  const publisher=readFileSync(new URL('../scripts/pilot-publish.mjs',import.meta.url),'utf8');
- assert.equal(publisher.includes('--durable-objects-code-update-mode'),false);
+ assert.ok(publisher.includes("'--durable-objects-code-update-mode',PILOT_UPDATE_MODE"));
 });
 test('pinned Wrangler default and config selection',()=>{
  assert.deepEqual(projectStrategy('{}'),{source:'wrangler-default',mode:'deferred',maxDelaySeconds:300});
@@ -29,6 +29,7 @@ test('receipt allowlists fields and never emits unrelated sensitive fields',()=>
  const receipt=strategyReceipt(env);
  assert.deepEqual(Object.keys(receipt).sort(),['version','kind','readOnly','repo','head','runId','runAttempt','wranglerVersion','source','mode','maxDelaySeconds'].sort());
  assert.equal(JSON.stringify(receipt).includes('SENSITIVE'),false);
- assert.equal(receipt.maxDelaySeconds,120);
+ assert.equal(receipt.maxDelaySeconds,null);
+ assert.equal(receipt.mode,'immediate');assert.equal(receipt.source,'cli');
  for(const [key,value] of [['GITHUB_REPOSITORY','other/repo'],['GITHUB_REF','refs/heads/other'],['GITHUB_SHA','bad'],['GITHUB_RUN_ATTEMPT','2'],['GITHUB_RUN_ID','bad']])assert.throws(()=>strategyReceipt({...env,[key]:value}),/Strategy projection refused/);
 });

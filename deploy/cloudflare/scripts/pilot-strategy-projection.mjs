@@ -2,6 +2,7 @@
 import {writeFileSync} from 'node:fs';
 import {join,isAbsolute} from 'node:path';
 import {pathToFileURL} from 'node:url';
+import {PILOT_UPDATE_MODE} from './pilot-update-mode.mjs';
 
 const refused=()=>new Error('Strategy projection refused');
 export function projectStrategy(bytes,{cliMode}={}) {
@@ -31,8 +32,8 @@ export function strategyReceipt(env) {
  try {
   if(env.GITHUB_ACTIONS!=='true'||env.GITHUB_REPOSITORY!=='brittanyellich/vlpds'||env.GITHUB_REF!=='refs/heads/main'||
    !/^[a-f0-9]{40}$/.test(env.GITHUB_SHA??'')||!/^[1-9][0-9]{0,19}$/.test(env.GITHUB_RUN_ID??'')||env.GITHUB_RUN_ATTEMPT!=='1')throw 0;
-  // The current pilot publish command supplies no strategy CLI override.
-  return {version:1,kind:'exp710-strategy-projection',readOnly:true,repo:'brittanyellich/vlpds',head:env.GITHUB_SHA,runId:env.GITHUB_RUN_ID,runAttempt:1,wranglerVersion:'4.158.0',...projectStrategy(env.DEPLOY_CONFIG)};
+  // Match the pilot ON/OFF publisher's explicit CLI override without invoking it.
+  return {version:1,kind:'exp710-strategy-projection',readOnly:true,repo:'brittanyellich/vlpds',head:env.GITHUB_SHA,runId:env.GITHUB_RUN_ID,runAttempt:1,wranglerVersion:'4.158.0',...projectStrategy(env.DEPLOY_CONFIG,{cliMode:{mode:PILOT_UPDATE_MODE}})};
  }catch{throw refused();}
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){

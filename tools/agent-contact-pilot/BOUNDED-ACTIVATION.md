@@ -16,7 +16,7 @@ account data change or public repository record write exists in this workflow.
 1. Freeze/review the workflow head. Require unchanged lockfile and Worker modules other than the separately
    qualified lease-only index.ts/runtime.ts versus qualified21117d08. Pin
    the exact reviewed Worker qualification file hashes before publishing. Read fresh authenticated current/desired/running,
-   exact requalified clean OFF Worker05c661c2-dbe6-4131-a1a5-54ced81cad0d, current Card key,
+   exact requalified clean OFF Worker8d335d21-6498-43ae-a42d-56c02368782e, current Card key,
    public health/UI/Card404. Initial Worker must have no pilot secret bindings.
 2. Have Otto's reviewed caller harness ready first. It must keep operator unlock
    and fresh service JWT local/private. No JWT or passphrase in workflow inputs,
@@ -165,7 +165,7 @@ that consumer and authenticate that run's own fresh readiness artifact; prior
 heads, inspection receipts and cached readiness cannot authorize a new prompt.
 No token, activation or live request is part of preparing this update.
 
-### Current baseline after run44938309648
+### Historical baseline after run44938309648
 
 The earlier df75 baseline above is historical. Initial pilot pin is now exactly
 `05c661c2-dbe6-4131-a1a5-54ced81cad0d`, verified by authenticated GET-only
@@ -179,3 +179,40 @@ provisioned37d6 and previous clean df75 and23ab Worker IDs are rejected. Qualifi
 unchanged. This immutable baseline update grants no live window or credential
 operation; a future run still needs fresh checks and explicit approval. Otto
 needs the future exact merged head, with no initial-OFF-pin consumer code change.
+
+### Current baseline and pilot deployment adoption policy
+
+The initial OFF pin is now `8d335d21-6498-43ae-a42d-56c02368782e`, from
+authenticated GET-only containment inspection44974048656 after readiness run
+44973744829. Artifact14735007003 ZIP SHA256
+`f134d5623a8fc59bfbb93dd026c9d25779d0399ed61c6c3087c97dacce83fbe2`
+verified OFF/no lease, 23 original binding types (hash0fc256...), unchanged
+script88f6..., qualified2e254 desired/current/running and health/UI200/Card404.
+The former05c pin and unrelated versions are rejected. This is historical
+containment evidence; every future run still requires fresh exact checks.
+
+Pilot ON and OFF publishes share `publishPilotWorker`, which explicitly passes
+`--durable-objects-code-update-mode immediate` to pinned Wrangler4.158.0.
+It overrides config/default only for those deployments; ordinary deploy and
+cleanup commands and the protected config are unchanged. The read-only strategy
+projection shares the same constant and reports CLI selection without deploying.
+Prior projection44985746171 established default deferred300 at that revision;
+it does not prove historical Card failure causality.
+
+Cloudflare applies this strategy to every Durable Object class exported by the
+Worker (currently Pds). Immediate adoption resets active objects and may interrupt
+in-flight requests, including ordinary PDS traffic. It is not proof that the
+container process restarted or received fresh mode/trust configuration: retain
+the guarded image restart, signed Card readiness, 600s lease, rollback and
+independent OFF/binding verification. OFF publish also uses immediate adoption,
+including after failed ON readiness. Ambiguous publish/restart still stops without
+retry and requires supported reconciliation; lease expiry alone is not cleanup.
+
+Production use requires explicit approval for one bounded readiness-only window
+on the future exact merged head, including Worker-wide ON/OFF resets and possible
+request interruption, one scoped temporary candidate and bridge binding, guarded
+restart, lease and mandatory OFF/revocation/cleanup. No Otto, discovery, native
+image substitution or native race-fix rollout is implied. Git delivery or this
+runbook alone does not authorize dispatch, credentials or production changes.
+
+Reference: https://developers.cloudflare.com/durable-objects/deployments/durable-objects-code-updates/

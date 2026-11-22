@@ -1,14 +1,23 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync,writeFileSync,statSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';
 import {parsePublishAcknowledgement,publishPilotWorker} from '../scripts/pilot-publish.mjs';
+import {execFileSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 const id='01234567-89ab-cdef-0123-456789abcdef';
 const entry={type:'deploy',version:1,worker_name:'crate-pds',version_id:id,timestamp:'2026-11-21T00:00:00.000Z'};
 const session={type:'wrangler-session',version:1,wrangler_version:'4.158.0'};
 const bytes=(x,s=session)=>Buffer.from(JSON.stringify(s)+'\n'+JSON.stringify(x)+'\n');
+test('pinned Wrangler accepts immediate flag in help-only invocation without credentials',()=>{
+ const tmp=mkdtempSync(join(tmpdir(),'exp710-wrangler-help-'));
+ try {
+  const output=execFileSync(process.execPath,[fileURLToPath(new URL('../node_modules/wrangler/bin/wrangler.js',import.meta.url)),'deploy','--durable-objects-code-update-mode','immediate','--help'],{cwd:tmp,env:{PATH:'/usr/bin:/bin',HOME:tmp,TMPDIR:tmp,WRANGLER_SEND_METRICS:'false'},timeout:15000,stdio:'pipe'});
+  assert.match(output.toString(),/durable-objects-code-update-mode/);
+ }finally{rmSync(tmp,{recursive:true,force:true});}
+});
 test('structured acknowledgement succeeds without human log marker',()=>{
  const tmp=mkdtempSync(join(tmpdir(),'exp710-publish-'));let calls=0;
  try{assert.equal(publishPilotWorker({root:'/fixture',tmp,configPath:'/fixture/config',account:'synthetic',token:'SYNTHETIC',execute:(_b,args,o)=>{
-  calls++;assert.deepEqual(args.slice(1),['deploy','--name','crate-pds','--config','/fixture/config','--containers-rollout','none']);assert.equal(o.env.WRANGLER_LOG,'info');assert.equal(statSync(o.env.WRANGLER_OUTPUT_FILE_PATH).mode&0o777,0o600);
+  calls++;assert.deepEqual(args.slice(1),['deploy','--name','crate-pds','--config','/fixture/config','--containers-rollout','none','--durable-objects-code-update-mode','immediate']);assert.equal(o.env.WRANGLER_LOG,'info');assert.equal(statSync(o.env.WRANGLER_OUTPUT_FILE_PATH).mode&0o777,0o600);
   writeFileSync(o.env.WRANGLER_OUTPUT_FILE_PATH,bytes(entry));return Buffer.alloc(0);
  }}),id);assert.equal(calls,1);}finally{rmSync(tmp,{recursive:true,force:true});}
 });

@@ -16,7 +16,7 @@ account data change or public repository record write exists in this workflow.
 1. Freeze/review the workflow head. Require unchanged lockfile and Worker modules other than the separately
    qualified lease-only index.ts/runtime.ts versus qualified21117d08. Pin
    the exact reviewed Worker qualification file hashes before publishing. Read fresh authenticated current/desired/running,
-   exact requalified clean OFF Worker8d335d21-6498-43ae-a42d-56c02368782e, current Card key,
+   exact requalified clean OFF Worker6495e4a6-b189-4a6f-98aa-48fb75118e19, current Card key,
    public health/UI/Card404. Initial Worker must have no pilot secret bindings.
 2. Have Otto's reviewed caller harness ready first. It must keep operator unlock
    and fresh service JWT local/private. No JWT or passphrase in workflow inputs,
@@ -180,7 +180,7 @@ unchanged. This immutable baseline update grants no live window or credential
 operation; a future run still needs fresh checks and explicit approval. Otto
 needs the future exact merged head, with no initial-OFF-pin consumer code change.
 
-### Current baseline and pilot deployment adoption policy
+### Baseline before readiness44997993394 and pilot deployment adoption policy
 
 The initial OFF pin is now `8d335d21-6498-43ae-a42d-56c02368782e`, from
 authenticated GET-only containment inspection44974048656 after readiness run
@@ -216,3 +216,30 @@ image substitution or native race-fix rollout is implied. Git delivery or this
 runbook alone does not authorize dispatch, credentials or production changes.
 
 Reference: https://developers.cloudflare.com/durable-objects/deployments/durable-objects-code-updates/
+
+### Current baseline after readiness and scoped cleanup
+
+Readiness-only run44997993394 at source62eca0c served the exact frozen signed Card
+and completed its bounded window. OFF publish/config passed, but guarded OFF
+restart acknowledgement failed; cleanup was therefore refused. No Otto login,
+service JWT, SendMessage, profile call or discovery publication occurred. The
+candidate was revoked and both temporary GitHub secrets/private custody removed.
+
+Independent inspection44999046705 verified OFF/no lease and qualified2e254 healthy
+with the two retired Cloudflare bindings still present. With an operator-confirmed
+write freeze, cleanup-only run45005941773 at source127f45c deleted only those two
+bindings and verified fresh before/after snapshots. Authenticated artifact14748036180
+ZIP SHA256 `eba61d4df9d5cf455b4326dda2bafdd3b4c86a6ee441e50c22512a7842260123`
+establishes current clean Worker `6495e4a6-b189-4a6f-98aa-48fb75118e19`, original
+23 binding types/hash0fc256..., unchanged script88f6..., explicit OFF/no lease,
+qualified2e254 desired/current/running and public health/UI200/Card404. This is
+configuration/admission and runtime-health evidence, not attestation that the
+failed guarded restart produced a fresh native OFF process.
+
+The former8d335 initial pin and provisioned7495 incident Worker are rejected.
+All other image, qualification, caller/Card, credential, lease and rollback gates
+are unchanged. This baseline delivery grants no new credential, live window or
+Otto permission. A future run requires fresh checks, its exact reviewed merged
+head and a new authenticated readiness receipt; the expired readiness-only receipt
+cannot authorize later acceptance. Resolve the OFF acknowledgement issue before
+treating another live run as an assured end-to-end acceptance path.

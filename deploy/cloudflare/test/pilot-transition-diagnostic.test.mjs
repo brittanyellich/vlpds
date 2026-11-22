@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync} from 'node:fs';
-import {transitionDiagnostic,transitionReason} from '../scripts/pilot-transition-diagnostic.mjs';import {ProviderPending} from '../scripts/pilot-provider.mjs';
+import {transitionDiagnostic,transitionReason} from '../scripts/pilot-transition-diagnostic.mjs';import {ProviderPending,CardPending,CARD_PENDING_REASONS} from '../scripts/pilot-provider.mjs';
 const identity={repository:'brittanyellich/vlpds',runId:123,head:'a'.repeat(40),workerQualificationSha256:'b'.repeat(64)};
 test('transition timings and reason codes exclude arbitrary input and errors',()=>{
  let output,t=0;const report=transitionDiagnostic('activate',identity,s=>output=s,()=>t);
@@ -30,4 +30,15 @@ test('diagnostic initialization failure is also best-effort',async()=>{
  const {createTransitionReporter}=await import('../scripts/pilot-transition-diagnostic.mjs');let notices=0;
  const report=createTransitionReporter('disable',{...identity,runId:0},()=>{},()=>notices++);
  assert.doesNotThrow(()=>report('load-state','started'));assert.equal(notices,1);
+});
+
+test('exact Card observations survive fixed-code reporting, never raw response or altered reason',()=>{
+ for(const status of [404,502,503,504]){
+  let output;const error=new CardPending(status,Buffer.from('PRIVATE_RESPONSE'));
+  const report=transitionDiagnostic('activate',identity,s=>output=s,()=>0);
+  report('readiness-poll','failed',{attempt:1,check:'public-checks',reason:transitionReason(error)});
+  assert.equal(JSON.parse(output).polls[0].reason,`card-http-${status}-other`);assert.ok(!output.includes('PRIVATE_RESPONSE'));
+ }
+ for(const reason of CARD_PENDING_REASONS){let out;const report=transitionDiagnostic('activate',identity,s=>out=s,()=>0);report('readiness-poll','failed',{attempt:1,check:'public-checks',reason});assert.equal(JSON.parse(out).polls[0].reason,reason);}
+ const error=new CardPending(404,Buffer.from('{}'));error.reason='PRIVATE_RESPONSE';assert.equal(transitionReason(error),'card-pending');
 });

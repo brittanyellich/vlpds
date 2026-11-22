@@ -1,8 +1,9 @@
-import {ProviderPending} from './pilot-provider.mjs';
+import {ProviderPending,CardPending,CARD_PENDING_REASONS} from './pilot-provider.mjs';
 const stages=['load-state','phase-lease','fresh-off-state','save-attempt','publish-ack','worker-config','save-worker','runtime-restart','readiness','persist-active','reconcile-provisioned-off','persist-disabled'];
 const checks=['runtime-status','card-authority','worker-metadata','worker-bindings','public-checks','runtime-status-final','not-started'];
-const reasons=['none','request-unavailable','upstream-pending','runtime-starting','ui-pending','card-pending','provider-pending','gate-refused'];
+const reasons=['none','request-unavailable','upstream-pending','runtime-starting','ui-pending','card-pending','provider-pending','gate-refused',...CARD_PENDING_REASONS];
 export function transitionReason(error){
+ if(error instanceof CardPending&&CARD_PENDING_REASONS.includes(error.reason))return error.reason;
  if(!(error instanceof ProviderPending))return 'gate-refused';
  return ({'Provider unavailable':'request-unavailable','Provider pending':'upstream-pending','Container pending':'runtime-starting','UI pending':'ui-pending','Card pending':'card-pending'})[error.message]??'provider-pending';
 }

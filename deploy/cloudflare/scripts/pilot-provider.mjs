@@ -5,6 +5,21 @@ const DID_URL='https://plc.directory/'+AGENT;
 const fixedPublic='https://pds.crate.social';
 export const CARD_PATH='/agents/did%3Aplc%3A6tlvgafuonoighfrtpejff5m/.well-known/agent-card.json';
 export class ProviderPending extends Error {}
+export const CARD_PENDING_REASONS=Object.freeze(['card-http-404-other','card-http-502-other','card-http-503-other','card-http-504-other','card-http-404-agent-unavailable','card-http-503-trust-unavailable']);
+export class CardPending extends ProviderPending {
+ constructor(status,bytes,contentType){
+  super('Card pending');
+  if(![404,502,503,504].includes(status))throw new Error('Invalid Card observation');
+  let label='other';
+  // Only JSON with exact native-looking error shapes becomes an observed label.
+  // This is not an independent native-origin attestation. Never retain body text.
+  try{const value=contentType==='application/json'?JSON.parse(bytes):null;if(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===1){
+   if(status===404&&value.error==='Agent unavailable')label='agent-unavailable';
+   if(status===503&&value.error==='Signed Card trust unavailable')label='trust-unavailable';
+  }}catch{/* non-JSON or unrelated response remains an HTTP-only observation */}
+  this.reason=`card-http-${status}-${label}`;
+ }
+}
 const safeError=()=>new Error('Pilot provider gate failed');
 export class PilotProvider {
  constructor({account,cfToken,deployToken,fetchImpl,now=()=>Math.floor(Date.now()/1000)}) {
@@ -44,7 +59,7 @@ export class PilotProvider {
  }
  async publicChecks(enabled){const health=await this.json(fixedPublic+'/xrpc/_health',{limit:4096});if(typeof health.version!=='string' || !health.version)throw safeError();
   const ui=await this.request(fixedPublic+'/account/spaces',{limit:131072});if([502,503,504].includes(ui.status))throw new ProviderPending('UI pending');if(ui.status!==200 || ui.type!=='text/html' || !ui.bytes.toString().includes('/assets/index-D5JRYEyV.js'))throw safeError();
-  const card=await this.request(fixedPublic+CARD_PATH,{limit:8192});if([502,503,504].includes(card.status) || enabled && card.status===404)throw new ProviderPending('Card pending');if(card.status!==(enabled?200:404))throw safeError();return card;
+  const card=await this.request(fixedPublic+CARD_PATH,{limit:8192});if([502,503,504].includes(card.status) || enabled && card.status===404)throw new CardPending(card.status,card.bytes,card.type);if(card.status!==(enabled?200:404))throw safeError();return card;
  }
  async restart(phase){if(!['activate','disable'].includes(phase) || this.postPhases.has(phase))throw safeError();await this.status();this.postPhases.add(phase);
   const r=await this.request('https://admin.crate.social/_deploy/restart',{method:'POST',headers:{'X-Deploy-Image':this.image},limit:4096,timeout:75000});

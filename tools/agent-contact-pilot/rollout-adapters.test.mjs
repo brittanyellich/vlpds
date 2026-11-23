@@ -46,3 +46,49 @@ test('portable temporary directory is canonical, private and removed',async()=>{
  try{assert.equal(await realpath(dir),dir);assert.equal((await lstat(dir)).mode&0o077,0);assert.equal(await claimRun(dir,identity),true);}
  finally{await rm(dir,{recursive:true,force:true});}
 });
+
+async function launchFixture(){
+ const {writeFile}=await import('node:fs/promises');const {prepareObservedLauncher}=await import('./rollout-launch.mjs');
+ const dir=await privateTemporaryDirectory('exp710-launch-plan-');await mkdir(join(dir,'portable_agent'),{mode:0o700});
+ const pins={};for(const name of ['otto_readiness.py','run_otto_acceptance.py','otto_acceptance_operator.py','otto_acceptance.py','service_auth_check.py']){
+  const bytes=Buffer.from('# SYNTHETIC inert source only\n');await writeFile(join(dir,'portable_agent',name),bytes,{mode:0o600});pins[name]=createHash('sha256').update(bytes).digest('hex');
+ }
+ const f=fixture();let reads=0;const get=f.api.get;f.api.get=async(...args)=>{reads++;return get(...args);};
+ const options={authorization:{scope:'local-qualification',liveExecutionEnabled:false,approvedHead:identity.head,baselineWorker:PILOT.offWorker},identity,source:dir,python:'/usr/bin/python3',pins,output:join(dir,'receipt.json'),claimDirectory:dir,api:f.api,mode:'fixture',clock:()=>1054,watch:{...f.options,intervalMs:1,maxWaitMs:100}};
+ return{...f,dir,options,prepareObservedLauncher,reads:()=>reads};
+}
+test('exact observer wires real pinned launcher arguments as nonexecutable data once',async()=>{
+ const f=await launchFixture();try{
+  const r=await f.prepareObservedLauncher(f.options);assert.equal(r.liveExecutionEnabled,false);assert.equal(r.plan.liveExecutionEnabled,false);assert.equal(r.independentlyRecheckRequired,true);
+  assert.deepEqual(r.plan.args,['-m','portable_agent.run_otto_acceptance',String(identity.runId),identity.head,f.options.output]);assert.equal(r.proof.artifactId,42);
+  const before=f.reads();await assert.rejects(f.prepareObservedLauncher(f.options),/Duplicate/);assert.equal(f.reads(),before);
+ }finally{await rm(f.dir,{recursive:true,force:true});}
+});
+for(const patch of [{mode:'live'},{authorization:{scope:'live',liveExecutionEnabled:true}},{authorization:{scope:'local-qualification',liveExecutionEnabled:false,approvedHead:'b'.repeat(40),baselineWorker:PILOT.offWorker}}])test('launch capability and wrong head refused before observation',async()=>{
+ const f=await launchFixture();try{await assert.rejects(f.prepareObservedLauncher({...f.options,...patch}),/qualification refused/);assert.equal(f.reads(),0);}finally{await rm(f.dir,{recursive:true,force:true});}
+});
+for(const now of [999,1121,1421])test(`planner stale/future/short window refuses ${now}`,async()=>{
+ const f=await launchFixture();try{await assert.rejects(f.prepareObservedLauncher({...f.options,clock:()=>now}),/window refused/);}finally{await rm(f.dir,{recursive:true,force:true});}
+});
+test('historical receipt can only produce inert archive qualification',async()=>{
+ const f=await launchFixture();f.run.status='completed';f.run.conclusion='success';try{
+  const r=await f.prepareObservedLauncher({...f.options,mode:'historical',clock:()=>99999999,watch:{...f.options.watch,archive:false}});assert.equal(r.historical,true);assert.equal(r.liveExecutionEnabled,false);
+ }finally{await rm(f.dir,{recursive:true,force:true});}
+});
+test('watch options cannot convert completed history into fresh proof',async()=>{
+ const f=await launchFixture();f.run.status='completed';f.run.conclusion='success';try{await assert.rejects(f.prepareObservedLauncher({...f.options,watch:{...f.options.watch,archive:true}}));}finally{await rm(f.dir,{recursive:true,force:true});}
+});
+
+test('fixture executor rejects forged, historical and repeated capabilities before any Terminal',async()=>{
+ const {executePrivateLauncherFixture}=await import('./rollout-launch.mjs');
+ await assert.rejects(executePrivateLauncherFixture({qualificationOnly:true},'/unused'),/executor refused/);
+ const f=await launchFixture();try{
+  f.run.status='completed';f.run.conclusion='success';const history=await f.prepareObservedLauncher({...f.options,mode:'historical'});
+  await assert.rejects(executePrivateLauncherFixture(history,f.dir),/executor refused/);
+ }finally{await rm(f.dir,{recursive:true,force:true});}
+ const g=await launchFixture();try{
+  const prepared=await g.prepareObservedLauncher(g.options);
+  await assert.rejects(executePrivateLauncherFixture(prepared,g.dir,{bundle:{rehearsalOnly:false}}),/inputs refused/);
+  await assert.rejects(executePrivateLauncherFixture(prepared,g.dir),/executor refused/);
+ }finally{await rm(g.dir,{recursive:true,force:true});}
+});

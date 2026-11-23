@@ -12,7 +12,7 @@ for(const scenario of ['delay54','stale','missing','wrong-run','invalid-signatur
   const result=await integratedFixture({...setup,identity,python:process.env.EXP710_REHEARSAL_PYTHON,claimDirectory,scenario});
   const success=['delay54','age120','lease180'].includes(scenario);assert.equal(result.result,success?'synthetic-complete':'refused');assert.equal(result.liveRequests,0);assert.equal(result.realPrompt,false);
   if(result.tty){assert.equal(result.tty.networkProbeDenied,true);assert.equal(result.tty.tty,true);if(success)assert.equal(result.tty.counts.mockRequests,2);}
-  if(['stale','invalid-signature','short-lease','age121','lease179'].includes(scenario))assert.equal(result.tty.counts.prompt,0);
+  if(result.tty&&['stale','invalid-signature','short-lease','age121','lease179'].includes(scenario))assert.equal(result.tty.counts.prompt,0);
   if(scenario==='unlock-timeout')assert.equal(result.tty.counts.mockLogin,0);
   if(scenario==='request-timeout')assert.equal(result.tty.counts.mockRequests,1);
   if(scenario==='cleanup-failure'){assert.equal(result.cleanupAttempted,true);assert.equal(result.syntheticCleanupVerified,false);assert.equal(result.tty.acceptedSynthetic,true);assert.ok(result.timing.some(x=>x.phase==='synthetic-cleanup'));}

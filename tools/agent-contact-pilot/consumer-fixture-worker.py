@@ -7,6 +7,9 @@ import json
 import os
 import socket
 import sys
+import termios
+import select
+import signal
 import zipfile
 from pathlib import Path
 
@@ -37,6 +40,7 @@ from test_otto_acceptance import synthetic_card
 clock = bundle['now']
 counts = {'prompt': 0, 'mockLogin': 0, 'mockRequests': 0}
 phase = 'readiness'
+private_input = {'echoDisabled': False, 'echoRestored': False, 'inputMatched': False, 'timedOut': False, 'stopped': False}
 class GitHub:
     async def json(self, path):
         if path.endswith('/jobs?per_page=100'): return bundle['jobs']
@@ -49,6 +53,38 @@ def prompt(_):
     phase = 'unlock'; counts['prompt'] += 1
     clock += bundle['unlockSeconds']
     if bundle['unlockSeconds'] > 60: raise TimeoutError('Synthetic unlock timeout')
+    if bundle.get('entry') == 'operator-cli-fixture':
+        fd = sys.stdin.fileno()
+        original = termios.tcgetattr(fd)
+        changed = original.copy()
+        changed[3] &= ~(termios.ECHO | termios.ECHONL)
+        previous_signal = signal.getsignal(signal.SIGTERM)
+        def stop(*_):
+            private_input['stopped'] = True
+            raise InterruptedError('Synthetic fixture stopped')
+        signal.signal(signal.SIGTERM, stop)
+        try:
+            termios.tcsetattr(fd, termios.TCSAFLUSH, changed)
+            private_input['echoDisabled'] = not bool(termios.tcgetattr(fd)[3] & (termios.ECHO | termios.ECHONL))
+            ready = output.parent / 'operator-ready.json'
+            mark = os.open(ready, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(mark, 'w') as stream:
+                json.dump({'echoDisabled': private_input['echoDisabled'], 'pid': os.getpid()}, stream)
+            # Fixed synthetic label and input only; neither is captured.
+            sys.stderr.write('EXP-710 SYNTHETIC EXECUTOR INPUT (hidden): ')
+            sys.stderr.flush()
+            if not select.select([fd], [], [], bundle['privateInputSeconds'])[0]:
+                private_input['timedOut'] = True
+                raise TimeoutError('Synthetic private input timeout')
+            value = os.read(fd, 256)
+            private_input['inputMatched'] = value.rstrip(b'\r\n') == b'SYNTHETIC_ONLY'
+            value = None
+            if not private_input['inputMatched']:
+                raise ValueError('Synthetic input refused')
+        finally:
+            termios.tcsetattr(fd, termios.TCSANOW, original)
+            private_input['echoRestored'] = termios.tcgetattr(fd) == original
+            signal.signal(signal.SIGTERM, previous_signal)
     return 'SYNTHETIC_ONLY_PASSWORD'
 
 async def main():
@@ -73,9 +109,25 @@ async def main():
             body = json.loads(request.content)
             return httpx.Response(200, json={'jsonrpc':'2.0','id':body['id'],'result':{'message':{'role':'ROLE_AGENT','messageId':'stable','contextId':'stable','metadata':{'identityEvaluation':{'atUnix':100,'commitCid':'synthetic-commit','recordCid':'synthetic-record'}},'parts':[{'data':{'agentDid':AGENT,'principalDid':PRINCIPAL,'status':'verified'}}]}}})
         receipt = output.parent / 'synthetic-acceptance.json'
+        if bundle.get('entry') == 'operator-cli-fixture':
+            args = bundle['launcherArgs']
+            if len(args) != 5 or args[:2] != ['-m', 'portable_agent.run_otto_acceptance'] or args[2] != str(bundle['run']['id']) or args[3] != bundle['run']['head_sha'] or Path(args[4]).parent != output.parent:
+                raise ValueError('Fixture launch plan refused')
+            receipt = Path(args[4])
         try:
-            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-                result = await operator.run_private_acceptance(client, GitHub(), bundle['run']['id'], bundle['run']['head_sha'], int(clock), receipt, prompt=prompt, clock=lambda: clock)
+            if bundle.get('entry') == 'operator-cli-fixture':
+                from portable_agent import run_otto_acceptance as cli
+                original_client = httpx.AsyncClient
+                patch.setattr(cli, 'GitHub', GitHub)
+                patch.setattr(cli.httpx, 'AsyncClient', lambda **_: original_client(transport=httpx.MockTransport(handler)))
+                patch.setattr(cli.time, 'time', lambda: clock)
+                async def private_runner(*args):
+                    return await operator.run_private_acceptance(*args, prompt=prompt, clock=lambda: clock)
+                patch.setattr(cli, 'run_private_acceptance', private_runner)
+                result = await cli.main(int(args[2]), args[3], receipt)
+            else:
+                async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                    result = await operator.run_private_acceptance(client, GitHub(), bundle['run']['id'], bundle['run']['head_sha'], int(clock), receipt, prompt=prompt, clock=lambda: clock)
             accepted = result == {'receiptWritten': True, 'result': 'PASS'}
         except Exception:
             accepted = False
@@ -84,7 +136,7 @@ async def main():
             with socket.socket() as probe: probe.connect(('127.0.0.1', 9))
         except RuntimeError: pass
         else: raise AssertionError('Network guard did not fail closed')
-        result = {'rehearsal':True,'tty':True,'liveRequests':0,'realPrompt':False,'acceptedSynthetic':accepted,'counts':counts,'lastPhase':phase,'networkProbeDenied':network_denied == 1,'proofAgeSeconds':clock-bundle['checkedAt'],'remainingLeaseSeconds':bundle['deadline']-clock}
+        result = {'rehearsal':True,'tty':True,'liveRequests':0,'realPrompt':False,'acceptedSynthetic':accepted,'counts':counts,'lastPhase':phase,'networkProbeDenied':network_denied == 1,'proofAgeSeconds':clock-bundle['checkedAt'],'remainingLeaseSeconds':bundle['deadline']-clock,'cliMainExercised':bundle.get('entry')=='operator-cli-fixture','privateInput':private_input}
         fd = os.open(output, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600)
         with os.fdopen(fd, 'w') as stream: json.dump(result, stream)
 asyncio.run(main())

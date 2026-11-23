@@ -14,7 +14,7 @@
     "portable_agent/__init__.py": "14113725bd080f331a2dd5fcdaeb96ddec84c370d6a56c2d5fe3e7e31c42694b",
     "tests/test_otto_acceptance.py": "a00aa2fe4d21637628d6099e13115d2c6fc97a51fded34e594606ca91b01e00b",
     "interpreterSha256": "83deb939c9034c3e85a377eeb04e7d9992f8881652a22289cd0eeeb83b98a565",
-    "consumer-fixture-worker.py": "0f0839ff1af7a561f524c2c3df4359873ec838dac46cfbd033acc352d60a90db"
+    "consumer-fixture-worker.py": "2bac923a55e469bc37d4d0226535af07c4cf796929efa60389ff0861b16a8c2c"
   },
   "interpreterQualification": "Local macOS interpreter hash; qualify an explicit interpreter before rehearsal. Do not treat as a portable runtime pin.",
   "proposedBaselineWorker": "3a077816-ba04-47a2-b562-7d6b01dc6eaa"

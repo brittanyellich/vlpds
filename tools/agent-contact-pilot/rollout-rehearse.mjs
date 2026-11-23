@@ -1,10 +1,11 @@
+import{privateTemporaryDirectory}from'./rollout-private-temp.mjs';
 // Single-process read-only observer -> pinned launch plan -> inert private TTY.
 // Archive rehearsal cannot pass live freshness, prompt, authenticate or send HTTP.
 import{mkdtemp,chmod,rm}from'node:fs/promises';
 import{github,watchReceipt}from'./rollout-observer.mjs';
 import{claimRun,verifiedLauncherPlan,rehearseTerminal}from'./rollout-terminal.mjs';
 export async function rehearseObservedRun({identity,source,python,pins,claimDirectory,terminalApp=false,api=github(identity.runId,identity.head)}){
- const directory=await mkdtemp('/private/tmp/exp710-observer-rehearsal-');await chmod(directory,0o700);const timing=[];
+ const directory=await privateTemporaryDirectory('exp710-observer-rehearsal-');await chmod(directory,0o700);const timing=[];
  const phase=async(name,fn)=>{const started=performance.now();try{return await fn();}finally{timing.push({phase:name,milliseconds:performance.now()-started});}};
  try{
   if(!await claimRun(claimDirectory,identity))throw Error('Duplicate rehearsal');

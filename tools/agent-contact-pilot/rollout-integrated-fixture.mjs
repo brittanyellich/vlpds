@@ -1,3 +1,4 @@
+import{privateTemporaryDirectory}from'./rollout-private-temp.mjs';
 // Fixture-only observer -> reviewed consumer copy -> inert private Terminal.
 import{mkdtemp,chmod,rm,writeFile,lstat}from'node:fs/promises';
 import{createHash}from'node:crypto';
@@ -7,7 +8,7 @@ import{PILOT}from'../../deploy/cloudflare/scripts/pilot-activation-plan.mjs';
 export async function integratedFixture({source,python,pins,fixturePins,claimDirectory,identity,scenario='delay54',terminalApp=false}){
  const allowed=['delay54','stale','missing','wrong-run','invalid-signature','unlock-timeout','request-timeout','short-lease','cleanup-failure','age120','age121','lease180','lease179'];
  if(!allowed.includes(scenario))throw Error('Fixture scenario refused');
- const directory=await mkdtemp('/private/tmp/exp710-integrated-');await chmod(directory,0o700);const timing=[];let phase='qualification';let launcherPlanVerified=false;
+ const directory=await privateTemporaryDirectory('exp710-integrated-');await chmod(directory,0o700);const timing=[];let phase='qualification';let launcherPlanVerified=false;
  const timed=async(name,fn)=>{phase=name;const start=performance.now();try{return await fn();}finally{timing.push({phase:name,milliseconds:performance.now()-start});}};
  try{
   await timed('pinned-launch-plan',()=>verifiedLauncherPlan({source,python,pins,identity,output:directory+'/never-live.json'}));launcherPlanVerified=true;

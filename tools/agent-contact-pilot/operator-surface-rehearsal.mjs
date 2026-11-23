@@ -1,3 +1,4 @@
+import{privateTemporaryDirectory}from'./rollout-private-temp.mjs';
 // Automated synthetic operator presentation. Never read/capture terminal contents.
 import{mkdtemp,chmod,writeFile,readFile,rm,realpath}from'node:fs/promises';
 import{join}from'node:path';import{fileURLToPath}from'node:url';import{createHash}from'node:crypto';
@@ -5,7 +6,7 @@ import{childBytes}from'./rollout-observer.mjs';
 const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
 export async function operatorSurfaceRehearsal({python,interpreterSha256,provideInput=true,shellMarkers=true}){
  const expectedInput=provideInput;const binary=await realpath(python);if(createHash('sha256').update(await readFile(binary)).digest('hex')!==interpreterSha256)throw Error('Interpreter refused');
- const root=await mkdtemp('/private/tmp/exp710-operator-surface-');await chmod(root,0o700);let windowId;const start=performance.now();
+ const root=await privateTemporaryDirectory('exp710-operator-surface-');await chmod(root,0o700);let windowId;const start=performance.now();
  try{
   const worker=join(root,'surface.py');await writeFile(worker,await readFile(fileURLToPath(new URL('./operator-surface-fixture.py',import.meta.url))),{mode:0o600,flag:'wx'});
   const command=['/usr/bin/sandbox-exec','-p','(version 1)(allow default)(deny network*)',python,'-I',worker,root,provideInput?'5':'0.5'].map(quote).join(' ');

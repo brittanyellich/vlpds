@@ -1,0 +1,21 @@
+{
+  "scope": "fixture-only; live execution disabled",
+  "consumerRepository": "bluesky-social/agent-cli",
+  "consumerPullRequest": 130,
+  "consumerCommit": "8b73fcee9352466d3eb04beed7c9eb658ba995ec",
+  "launcherPins": {
+    "otto_readiness.py": "63b08b289ac1f20f1f585734db6314a8b7875d520fed59a372372c25732cb1d1",
+    "run_otto_acceptance.py": "86c4b917239d14efdbf8d72f66baa6ecbc4c90171b17530bab3fdd690e4f2d24",
+    "otto_acceptance_operator.py": "fe6e4b75d993b3e38dc1259a5ccef0a816e0728e07ecfe34c850153f1c98fa32",
+    "otto_acceptance.py": "581279416b0a62439764a0c6fd830249652476d10203662f8f895288c1c87d57",
+    "service_auth_check.py": "f9a0130cb7814a64120bc74cb923499fd1432eccc0f8952743b28d4de65b772b"
+  },
+  "fixturePins": {
+    "portable_agent/__init__.py": "14113725bd080f331a2dd5fcdaeb96ddec84c370d6a56c2d5fe3e7e31c42694b",
+    "tests/test_otto_acceptance.py": "a00aa2fe4d21637628d6099e13115d2c6fc97a51fded34e594606ca91b01e00b",
+    "interpreterSha256": "83deb939c9034c3e85a377eeb04e7d9992f8881652a22289cd0eeeb83b98a565",
+    "consumer-fixture-worker.py": "0f0839ff1af7a561f524c2c3df4359873ec838dac46cfbd033acc352d60a90db"
+  },
+  "interpreterQualification": "Local macOS interpreter hash; qualify an explicit interpreter before rehearsal. Do not treat as a portable runtime pin.",
+  "proposedBaselineWorker": "3a077816-ba04-47a2-b562-7d6b01dc6eaa"
+}

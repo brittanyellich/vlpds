@@ -1,0 +1,11 @@
+# EXP-710 qualification only
+
+Consumer source: https://github.com/bluesky-social/agent-cli/pull/130. The consumer owns the separate 120-second proof age and 180-second minimum remaining lease policy. `rollout-qualification.json` records the five launcher hashes and fixture inputs tested together. The earlier timing-only patch has been superseded by that source PR.
+
+The rollout-owned `rehearseRolloutLaunch` entry accepts only `mode: "fixture-only"`, `liveExecutionEnabled: false`, an exact approved head, and the proposed baseline Worker pin. It creates an exclusive run claim, verifies the five consumer hashes, observes an exact fixture run and artifact, then copies only fixture imports into an owner-only temporary directory. The live CLI is omitted; OS network access is denied. Terminal.app uses the qualified shell-entry wrapper and closes only its returned owned window. No real operator input is read during rehearsal.
+
+For local qualification, provide `EXP710_REHEARSAL_SETUP` pointing at a private setup JSON containing `source`, `pins` and `fixturePins`, plus `EXP710_REHEARSAL_PYTHON` pointing at the qualified Python environment. `source` is the reviewed consumer checkout; `pins` equals `launcherPins` in the manifest. Requalify `fixturePins.interpreterSha256` for the actual interpreter. Run `npm --prefix tools/agent-contact-pilot test`. The fixture worker also requires its recorded hash. Without this environment, macOS integration cases explicitly skip; ordinary CI is not evidence of those cases passing.
+
+Measured locally: 17 integrated cases passed, including the observed 54-second delivery delay, proof/lease boundaries, wrong or missing proof, signature refusal, duplicate prevention, operator/request timeout, invalid interpreter/worker and cleanup failure. A complete inert Terminal acceptance took about 0.91 seconds in the consumer phase. Publish availability and real operator unlock latency remain unmeasured. Synthetic time advances are not production latency measurements.
+
+The baseline proposal comes from authenticated rollback readback run 45064585481 after activation 45063222759. It is a strict fresh-state pin, not evidence of future state. No merge, deployment, credential operation, workflow dispatch, live integration or new hosted run is authorized by qualification PR delivery.

@@ -6,7 +6,8 @@
     "node": ">=26"
   },
   "scripts": {
-    "test": "node --test pilot.test.mjs signed-card.test.mjs card-resolver.test.mjs private-dispatch.test.mjs production/bridge.test.mjs",
-    "check": "node --check pilot.mjs && node --check run.mjs && node --check pilot.test.mjs && node --check discovery.mjs && node --check native-smoke.mjs && node --check signed-card.mjs && node --check signed-card.test.mjs && node --check fixtures/signed-card-worker.mjs && node --check card-resolver.mjs && node --check card-resolver.test.mjs && node --check private-dispatch.mjs && node --check private-dispatch.test.mjs && node --check production/bridge.mjs && node --check production/run-bridge.mjs && node --check production/supervisor.mjs"
+    "test": "node --test pilot.test.mjs signed-card.test.mjs card-resolver.test.mjs private-dispatch.test.mjs production/bridge.test.mjs rollout-dry-run.test.mjs rollout-adapters.test.mjs rollout-integrated-fixture.test.mjs",
+    "check": "node --check pilot.mjs && node --check run.mjs && node --check pilot.test.mjs && node --check discovery.mjs && node --check native-smoke.mjs && node --check signed-card.mjs && node --check signed-card.test.mjs && node --check fixtures/signed-card-worker.mjs && node --check card-resolver.mjs && node --check card-resolver.test.mjs && node --check private-dispatch.mjs && node --check private-dispatch.test.mjs && node --check production/bridge.mjs && node --check production/run-bridge.mjs && node --check production/supervisor.mjs && node --check rollout-dry-run.mjs && node --check rollout-dry-run.test.mjs && node --check rollout-observer.mjs && node --check rollout-terminal.mjs && node --check rollout-adapters.test.mjs && node --check rollout-rehearse.mjs && node --check rollout-integrated-fixture.mjs && node --check rollout-integrated-fixture.test.mjs",
+    "test:rehearsal:fixture": "node --test rollout-integrated-fixture.test.mjs"
   }
 }

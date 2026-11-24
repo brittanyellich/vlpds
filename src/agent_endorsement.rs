@@ -28,7 +28,23 @@ pub struct TrustedSnapshot<'a> {
 /// Fixed-pair reciprocal declaration + principal signed endorsement. No fetch,
 /// JS, Kody invocation, account credential, caller authorization or card proof.
 pub fn verify(snapshot: &TrustedSnapshot<'_>, car: &[u8], fetched_record: Option<&J>) -> Result<Outcome, String> {
+    verify_pair(AGENT, PRINCIPAL, snapshot, car, fetched_record)
+}
+
+/// Verify an expected agent/principal pair against trusted DID and repository
+/// snapshots. Callers must derive the expected pair from their authorization
+/// context; public proof alone grants no access to private state.
+pub fn verify_pair(
+    agent: &str,
+    principal: &str,
+    snapshot: &TrustedSnapshot<'_>,
+    car: &[u8],
+    fetched_record: Option<&J>,
+) -> Result<Outcome, String> {
     let fail = |s: &str| Err(s.to_string());
+    if agent == principal || !vlatproto::syntax::valid_did(agent) || !vlatproto::syntax::valid_did(principal) {
+        return fail("Invalid agent and principal pair");
+    }
     if car.is_empty() || car.len() > MAX_CAR_BYTES {
         return fail("Endorsement CAR byte limit");
     }
@@ -40,22 +56,22 @@ pub fn verify(snapshot: &TrustedSnapshot<'_>, car: &[u8], fetched_record: Option
             return fail("Deactivated or invalid DID metadata");
         }
     }
-    if snapshot.agent_document["id"] != AGENT || snapshot.principal_document["id"] != PRINCIPAL {
-        return fail("Fixed DID pair mismatch");
+    if snapshot.agent_document["id"] != agent || snapshot.principal_document["id"] != principal {
+        return fail("DID pair mismatch");
     }
-    let declaration = format!("https://ident.link/agent-of/{PRINCIPAL}");
+    let declaration = format!("https://ident.link/agent-of/{principal}");
     let aliases = snapshot.agent_document["alsoKnownAs"].as_array().ok_or("Missing reciprocal declaration")?;
     if aliases.len() > 128 || !aliases.iter().all(J::is_string) || !aliases.iter().any(|v| v == &declaration) {
         return fail("Missing reciprocal declaration");
     }
-    let key_id = format!("{PRINCIPAL}#atproto");
+    let key_id = format!("{principal}#atproto");
     let methods = snapshot.principal_document["verificationMethod"].as_array().ok_or("Missing principal key")?;
     if methods.len() > 128 {
         return fail("Too many verification methods");
     }
     let mut matching = methods.iter().filter(|m| m["id"] == key_id);
     let method = matching.next().ok_or("Missing principal key")?;
-    if matching.next().is_some() || method["controller"] != PRINCIPAL || method["type"] != "Multikey" {
+    if matching.next().is_some() || method["controller"] != principal || method["type"] != "Multikey" {
         return fail("Ambiguous or uncontrolled principal key");
     }
     let key = method["publicKeyMultibase"].as_str().ok_or("Missing principal multikey")?;
@@ -84,8 +100,8 @@ pub fn verify(snapshot: &TrustedSnapshot<'_>, car: &[u8], fetched_record: Option
     if commit.get("version") != Some(&vlatproto::cbor::Value::Int(3)) {
         return fail("Unsupported repository commit version");
     }
-    let path = format!("link.ident.endorsement/{AGENT}");
-    let (root, included) = crate::oauth::lexicon::verify_record_inclusion(car, PRINCIPAL, key, &path)?;
+    let path = format!("link.ident.endorsement/{agent}");
+    let (root, included) = crate::oauth::lexicon::verify_record_inclusion(car, principal, key, &path)?;
     let Some((cid, value)) = included else {
         if fetched_record.is_some() {
             return fail("Fetched record conflicts with signed absence");
@@ -96,13 +112,13 @@ pub fn verify(snapshot: &TrustedSnapshot<'_>, car: &[u8], fetched_record: Option
     if serde_json::to_vec(record).map_err(|e| e.to_string())?.len() > 4096 {
         return fail("Record JSON byte limit");
     }
-    let uri = format!("at://{PRINCIPAL}/{path}");
+    let uri = format!("at://{principal}/{path}");
     if record["uri"] != uri
         || record["cid"] != cid.to_string()
         || record["value"] != value
-        || value != json!({"$type":"link.ident.endorsement","agent":AGENT})
+        || value != json!({"$type":"link.ident.endorsement","agent":agent})
     {
-        return fail("Signed endorsement does not match fixed record read");
+        return fail("Signed endorsement does not match record read");
     }
     Ok(Outcome::Verified { commit: root, record: cid })
 }

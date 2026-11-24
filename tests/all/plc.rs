@@ -803,3 +803,60 @@ async fn audit_log_for_hosted_accounts_only() {
     plc.set_down(true);
     s.xrpc.get("vlpds.identity.getPlcAuditLog", &[("did", &a.did)], &Auth::None).await.err_status(500);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ident_link_observation_for_existing_accounts() {
+    use vlpds::xrpc::agent_binding::{observe, PairStatus};
+
+    const COLLECTION: &str = "link.ident.endorsement";
+    let plc = MockPlc::start().await;
+    let s = pds(&plc, &new_key(), "did:web:pds.test", None).await;
+    let principal = s.create_account("proofowner").await;
+    let agent = s.create_account("proofagent").await;
+    assert_eq!(observe(&s.app, &agent.did, &principal.did).await.status, PairStatus::Undeclared);
+
+    let mut aliases = plc.data(&agent.did).unwrap()["alsoKnownAs"].clone();
+    aliases.as_array_mut().unwrap().push(json!(format!("https://ident.link/agent-of/{}", principal.did)));
+    s.xrpc.post_empty("com.atproto.identity.requestPlcOperationSignature", &agent.auth()).await.ok();
+    let token = s.mail_token(&agent.email).await.unwrap();
+    let operation = s
+        .xrpc
+        .post("com.atproto.identity.signPlcOperation", &json!({"token": token, "alsoKnownAs": aliases}), &agent.auth())
+        .await
+        .ok()["operation"]
+        .clone();
+    s.xrpc.post("com.atproto.identity.submitPlcOperation", &json!({"operation": operation}), &agent.auth()).await.ok();
+
+    let (head, _) = s.latest_commit(&principal.did).await;
+    assert_eq!(observe(&s.app, &agent.did, &principal.did).await.status, PairStatus::SignedAbsent { commit: head });
+
+    let endorsement = s
+        .xrpc
+        .post(
+            "com.atproto.repo.createRecord",
+            &json!({"repo": principal.did, "collection": COLLECTION, "rkey": agent.did, "validate": false,
+            "record": {"$type": COLLECTION, "agent": agent.did}}),
+            &principal.auth(),
+        )
+        .await
+        .ok();
+    let observed = observe(&s.app, &agent.did, &principal.did).await;
+    assert_eq!((&observed.agent, &observed.principal), (&agent.did, &principal.did));
+    let PairStatus::Verified { commit, record } = observed.status else {
+        panic!("expected signed endorsement, got {observed:?}");
+    };
+    assert_eq!(commit, s.latest_commit(&principal.did).await.0);
+    assert_eq!(record.to_string(), endorsement["cid"].as_str().unwrap());
+
+    s.xrpc
+        .post(
+            "com.atproto.repo.deleteRecord",
+            &json!({"repo": principal.did, "collection": COLLECTION, "rkey": agent.did}),
+            &principal.auth(),
+        )
+        .await
+        .ok();
+    assert!(matches!(observe(&s.app, &agent.did, &principal.did).await.status, PairStatus::SignedAbsent { .. }));
+    plc.set_down(true);
+    assert_eq!(observe(&s.app, &agent.did, &principal.did).await.status, PairStatus::Unavailable);
+}

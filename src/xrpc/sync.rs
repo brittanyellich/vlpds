@@ -657,21 +657,25 @@ async fn sync_get_record(
         return Err(XrpcError::bad("InvalidRequest", "invalid collection or rkey"));
     }
     assert_available(&app, &q.did, creds.as_ref()).await?;
-    let (view, snap) = app.repo_view(&q.did).await?;
-    let head = view.head.clone();
     let path = format!("{}/{}", q.collection, q.rkey);
+    Ok(car_response(record_proof(&app, &q.did, &path).await?))
+}
+
+pub(super) async fn record_proof(app: &App, did: &str, path: &str) -> XResult<Vec<u8>> {
+    let (view, snap) = app.repo_view(did).await?;
+    let head = &view.head;
     let mut out = Vec::new();
     car::write_header(&mut out, &head.commit);
     car::write_block(&mut out, &head.commit, &head.commit_block);
-    let proof = crate::mst_store::proof_blocks(&view.tree.root, &*snap, &q.did, view.gen, path.as_bytes()).await;
+    let proof = crate::mst_store::proof_blocks(&view.tree.root, &*snap, did, view.gen, path.as_bytes()).await;
     for (c, b) in proof.map_err(XrpcError::from_err)? {
         car::write_block(&mut out, &c, &b);
     }
-    if let Some(v) = snap.get(state::record_key(&q.did, view.gen, &path)).await.map_err(XrpcError::from_err)? {
+    if let Some(v) = snap.get(state::record_key(did, view.gen, path)).await.map_err(XrpcError::from_err)? {
         let (cid, bytes) = state::decode_record_value(&v).map_err(XrpcError::from_err)?;
         car::write_block(&mut out, &cid, &bytes);
     }
-    Ok(car_response(out))
+    Ok(out)
 }
 
 /// MST node blocks of a view by CID. First pass (`walk` false): loaded

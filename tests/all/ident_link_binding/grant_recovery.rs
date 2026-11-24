@@ -2,7 +2,10 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use vlpds::xrpc::{
     agent_dispatch::{resolve, Binding, Grant},
-    agent_grant_recovery::{CleanupTarget, Observation, Recovery, Request, State},
+    agent_grant_recovery::{
+        runner::{resume_abandoned, CleanupOutcome, IssuedGrant, Lookup, Progress, Provider},
+        CleanupTarget, Observation, Recovery, Request, State,
+    },
     authn::{authenticate, Credentials},
 };
 
@@ -161,8 +164,76 @@ pub(super) async fn after_restart(s: &TestServer, alice: &Account, issuer: Issue
     assert_eq!(abandoned.state, State::Abandoned);
     assert_eq!(issuer.issue(&recovery, "abandoned").await, None);
     let abandoned_id = issuer.find(&abandoned.correlation).unwrap();
-    let observation = observe_grant(alice, &abandoned_id, &abandoned.correlation);
-    checked(recovery.reconcile_lost_redirect("abandoned", &observation).await);
+    let mut adapter = Adapter {
+        owner: alice.did.clone(),
+        correlation: abandoned.correlation.clone(),
+        grant: abandoned_id.clone(),
+        visible: false,
+        issuer_calls: AtomicUsize::new(0),
+        upstream_calls: AtomicUsize::new(0),
+    };
+    assert_eq!(checked(resume_abandoned(&recovery, "abandoned", &adapter).await), Progress::WaitingForIssuer);
+    assert_eq!(adapter.issuer_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(issuer.issue(&recovery, "abandoned").await, None);
+
+    adapter.visible = true;
+    let wrong_owner = std::mem::replace(&mut adapter.owner, "did:plc:foreign".into());
+    assert!(resume_abandoned(&recovery, "abandoned", &adapter).await.is_err());
+    assert_eq!(checked(recovery.get("abandoned").await).unwrap().state, State::Abandoned);
+    adapter.owner = wrong_owner;
+
+    assert_eq!(checked(resume_abandoned(&recovery, "abandoned", &adapter).await), Progress::CleanupPending);
     assert_eq!(resolve(&s.app, grant(alice, &abandoned_id)).await, None);
+    assert_eq!(
+        checked(recovery.get("abandoned").await).unwrap().state,
+        State::Cleanup { grant: abandoned_id.clone(), issuer_done: false, upstream_done: true }
+    );
+    assert_eq!(checked(resume_abandoned(&recovery, "abandoned", &adapter).await), Progress::Closed);
+    assert_eq!(checked(resume_abandoned(&recovery, "abandoned", &adapter).await), Progress::Closed);
+    assert_eq!(adapter.issuer_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(adapter.upstream_calls.load(Ordering::Relaxed), 1);
     assert_eq!(issuer.minted.load(Ordering::Relaxed), 3);
+}
+
+struct Adapter {
+    owner: String,
+    correlation: String,
+    grant: String,
+    visible: bool,
+    issuer_calls: AtomicUsize,
+    upstream_calls: AtomicUsize,
+}
+
+impl Provider for Adapter {
+    async fn lookup(&self, _owner: &str, request: &Request, correlation: &str) -> vlpds::xrpc::XResult<Lookup> {
+        assert_eq!(correlation, self.correlation);
+        assert_eq!((&*request.issuer, &*request.resource, &*request.client), (ISSUER, RESOURCE, CLIENT));
+        Ok(if self.visible {
+            Lookup::Found(IssuedGrant {
+                owner: self.owner.clone(),
+                issuer: ISSUER.into(),
+                resource: RESOURCE.into(),
+                client: CLIENT.into(),
+                correlation: self.correlation.clone(),
+                id: self.grant.clone(),
+            })
+        } else {
+            Lookup::Pending
+        })
+    }
+
+    async fn cleanup(&self, grant: Grant<'_>, target: CleanupTarget) -> CleanupOutcome {
+        assert_eq!(
+            (grant.owner, grant.issuer, grant.resource, grant.id),
+            (&*self.owner, ISSUER, RESOURCE, &*self.grant)
+        );
+        match target {
+            CleanupTarget::Issuer if self.issuer_calls.fetch_add(1, Ordering::Relaxed) == 0 => CleanupOutcome::Retry,
+            CleanupTarget::Issuer => CleanupOutcome::Complete,
+            CleanupTarget::Upstream => {
+                self.upstream_calls.fetch_add(1, Ordering::Relaxed);
+                CleanupOutcome::Complete
+            }
+        }
+    }
 }

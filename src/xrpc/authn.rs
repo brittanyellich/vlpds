@@ -592,6 +592,24 @@ pub async fn verify_service_jwt(app: &App, token: &str, lxm: Option<&str>) -> XR
     verify_jwt(app, token, lxm, None, false, false).await
 }
 
+/// Verify dispatch service identity before returning its signed claims.
+pub(super) async fn verify_dispatch_jwt(app: &App, token: &str, signer: &str, method: &str) -> XResult<J> {
+    use base64::Engine;
+    if token.len() > 8192 {
+        return Err(service_auth_err("BadJwt", "token limit"));
+    }
+    let header: J = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token.split('.').next().unwrap_or(""))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .ok_or_else(|| service_auth_err("BadJwt", "invalid JWT header"))?;
+    if header["typ"] != "JWT" || !matches!(header["alg"].as_str(), Some("ES256K" | "ES256")) {
+        return Err(service_auth_err("BadJwt", "service JWT profile required"));
+    }
+    verify_jwt(app, token, Some(method), Some(&[signer.to_owned()]), false, false).await?;
+    unverified_claims(token).ok_or_else(|| service_auth_err("BadJwt", "invalid token"))
+}
+
 /// Opt-in A2A caller auth: one configured issuer, normal DID-key verification,
 /// this PDS audience and exact contact method. Never infer this from endorsement.
 pub async fn verify_agent_contact_jwt(app: &App, token: &str, caller: &str) -> XResult<ServiceAuth> {

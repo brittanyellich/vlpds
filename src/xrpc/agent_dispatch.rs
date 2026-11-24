@@ -1,0 +1,112 @@
+//! Durable mapping for a separately authenticated MCP grant. This module does
+//! not verify bearer tokens or expose a network endpoint.
+
+use super::agent_provisioning::{active_owner, binding_is_verified};
+use super::authn::Credentials;
+use super::cas::{Cond, Op};
+use super::{App, XResult, XrpcError};
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Internal grant identity from trusted issuer integration. At dispatch the
+/// caller must first validate the token, its issuer, audience, and scope.
+/// `id` is stable across access/refresh rotation and unique within this issuer
+/// and resource. Obtain `owner` from the verified grant, never tool arguments.
+#[derive(Clone, Copy)]
+pub struct Grant<'a> {
+    pub issuer: &'a str,
+    pub resource: &'a str,
+    pub id: &'a str,
+    pub owner: &'a str,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct Binding {
+    pub agent: String,
+    pub space: String,
+}
+
+#[derive(Deserialize, PartialEq, Eq, Serialize)]
+enum Row {
+    Approved(Binding),
+    Revoked,
+}
+
+impl Grant<'_> {
+    fn row(self) -> XResult<String> {
+        let fields = [self.issuer, self.resource, self.id];
+        if fields.into_iter().any(|field| field.is_empty() || field.len() > 2048 || field.chars().any(char::is_control))
+            || !vlatproto::syntax::valid_did(self.owner)
+        {
+            return Err(XrpcError::bad("InvalidDispatchGrant", "Invalid MCP grant identity"));
+        }
+        // Length is bounded above and control characters (including NUL)
+        // were refused, so the three encoded fields cannot alias one another.
+        let digest = Sha256::digest(fields.join("\0"));
+        Ok(format!("agent-dispatch/v1/{}", hex::encode(digest)))
+    }
+}
+
+fn encode(row: &Row) -> XResult<Bytes> {
+    serde_json::to_vec(row).map(Bytes::from).map_err(XrpcError::from_err)
+}
+
+async fn verify_owner(app: &App, owner_session: &Credentials, grant: Grant<'_>) -> XResult<()> {
+    if active_owner(app, owner_session).await? != grant.owner {
+        return Err(XrpcError::auth("Grant owner does not match the signed-in account"));
+    }
+    Ok(())
+}
+
+/// Record owner consent for an immutable pair and Space. Repeat approval of
+/// the same mapping is idempotent. A revoked grant ID cannot be reused.
+pub async fn approve(app: &App, owner_session: &Credentials, grant: Grant<'_>, binding: Binding) -> XResult<()> {
+    verify_owner(app, owner_session, grant).await?;
+    let row = grant.row()?;
+    if !vlatproto::syntax::parse_space_uri(&binding.space)
+        .is_some_and(|uri| uri.authority == grant.owner && uri.record.is_none())
+    {
+        return Err(XrpcError::bad("InvalidDispatchSpace", "Expected a Space governed by the owner"));
+    }
+    if !binding_is_verified(app, grant.owner, &binding.agent).await {
+        return Err(XrpcError::bad("AgentBindingUnavailable", "Verified owner-agent binding is unavailable"));
+    }
+
+    let bytes = encode(&Row::Approved(binding))?;
+    let written =
+        app.private_cas(grant.owner, vec![Cond::eq(&row, None)], vec![Op::put(&row, Some(bytes.clone()))]).await?;
+    if written.applied || app.get_private(grant.owner, &row).await?.as_ref() == Some(&bytes) {
+        return Ok(());
+    }
+    Err(XrpcError::bad("DispatchGrantUnavailable", "MCP grant already has a different binding or was revoked"))
+}
+
+/// Revoke at the owner partition, even if approval has not landed yet.
+/// The tombstone fences both retried and concurrent approval.
+pub async fn revoke(app: &App, owner_session: &Credentials, grant: Grant<'_>) -> XResult<()> {
+    verify_owner(app, owner_session, grant).await?;
+    let row = grant.row()?;
+    app.private_cas(grant.owner, vec![], vec![Op::put(row, Some(encode(&Row::Revoked)?))]).await?;
+    Ok(())
+}
+
+/// Resolve only while the owner, binding, and original grant mapping are
+/// current. Failure or unavailable evidence denies dispatch. Revocation can
+/// still race work after the last observation of the binding or grant row.
+pub async fn resolve(app: &App, grant: Grant<'_>) -> Option<Binding> {
+    let row = grant.row().ok()?;
+    let before = app.get_private(grant.owner, &row).await.ok()??;
+    let Row::Approved(binding) = serde_json::from_slice(&before).ok()? else {
+        return None;
+    };
+    if !binding_is_verified(app, grant.owner, &binding.agent).await {
+        return None;
+    }
+    super::cas::pause_point("agent_dispatch_before_final_read", grant.owner).await;
+    if !binding_is_verified(app, grant.owner, &binding.agent).await {
+        return None;
+    }
+    let after = app.get_private(grant.owner, &row).await.ok()??;
+    (before == after).then_some(binding)
+}

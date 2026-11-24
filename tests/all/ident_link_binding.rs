@@ -9,6 +9,8 @@ use vlpds::agent_endorsement::{verify_pair, Outcome, TrustedSnapshot};
 use vlpds::plc::{mock::MockPlc, PlcConfig, RotationKey};
 use vlpds::xrpc::agent_binding::{observe, PairStatus};
 
+mod signed_dispatch;
+
 const COLLECTION: &str = "link.ident.endorsement";
 const OWNER_SCOPE: &str = "atproto repo:link.ident.endorsement?action=create";
 const AGENT_OPERATOR_SCOPE: &str = "atproto identity:*";
@@ -271,9 +273,56 @@ async fn ident_link_binding_requires_both_consents_and_either_party_can_revoke()
     let foreign_filter = s.xrpc.get(LIST, &[("did", &bob.did)], &Auth::Bearer(alice.jwt.clone())).await.ok();
     assert_eq!(foreign_filter["agents"], listed_agent(&agent));
 
+    let bridge = signed_dispatch::Bridge::start(&s, &plc).await;
+    let alice_binding = signed_dispatch::Bridge::approve(&s, &alice, &agent, "alice").await;
+    let bob_binding = signed_dispatch::Bridge::approve(&s, &bob, &bob_agent, "bob").await;
+    signed_dispatch::Bridge::approve(&s, &alice, &agent, "race").await;
+    bridge.check_denials(&alice, &bob, &alice_binding).await;
+    bridge.revoke_in_flight(&s, &alice, "race").await;
+    bridge.check(&bob, "bob", Some(&bob_binding)).await;
+
+    let restore = plc.data(&agent.did).unwrap()["alsoKnownAs"].clone();
+    let (server, oauth_server, directory, owner, operator) = (&s, &srv, &plc, &alice, &agent);
+    let (owner_flow, owner_grant, operator_flow, operator_grant) =
+        (&alice_flow, &alice_grant, &agent_flow, &agent_grant);
+    let (undeclared, declared) = (&original, &restore);
+    let worker_grants = crate::spaces_mcp_chat::check_verified_bridge(
+        &s,
+        &plc,
+        [(&alice, &agent), (&bob, &bob_agent)],
+        |phase| async move {
+            match phase.as_str() {
+                "remove-endorsement" => delete_endorsement(server, owner, operator).await,
+                "restore-endorsement" => {
+                    assert_eq!(
+                        endorsement(oauth_server, owner_flow, owner_grant, &owner.did, &operator.did).await.status,
+                        200
+                    );
+                }
+                "remove-declaration" | "restore-declaration" => {
+                    let aliases = if phase == "remove-declaration" { undeclared } else { declared };
+                    change_aliases(
+                        server,
+                        oauth_server,
+                        directory,
+                        operator,
+                        operator_flow,
+                        operator_grant,
+                        aliases.clone(),
+                    )
+                    .await;
+                }
+                _ => panic!("unknown fixture phase"),
+            }
+        },
+    )
+    .await;
+
     // Owner revocation uses the existing full PDS session, separate from the
     // create-only approval. The current signed CAR proves record absence.
-    delete_endorsement(&s, &alice, &agent).await;
+    bridge.deny_while_resolving(&alice, "alice", delete_endorsement(&s, &alice, &agent)).await;
+    bridge.check(&alice, "alice", None).await;
+    bridge.check(&bob, "bob", Some(&bob_binding)).await;
     assert!(matches!(verified(&s, &plc, &alice.did, &agent.did).await, Ok(Outcome::Absent { .. })));
     assert_eq!(agents(&s, &alice).await, json!([]));
     assert_eq!(agents(&s, &bob).await, listed_agent(&bob_agent));
@@ -281,7 +330,10 @@ async fn ident_link_binding_requires_both_consents_and_either_party_can_revoke()
     assert_eq!(endorsement(&srv, &alice_flow, &alice_grant, &alice.did, &agent.did).await.status, 200);
     assert!(is_verified(verified(&s, &plc, &alice.did, &agent.did).await));
     assert_eq!(agents(&s, &alice).await, listed_agent(&agent));
+    bridge.check(&alice, "alice", Some(&alice_binding)).await;
     change_aliases(&s, &srv, &plc, &agent, &agent_flow, &agent_grant, original).await;
+    bridge.check(&alice, "alice", None).await;
+    bridge.check(&bob, "bob", Some(&bob_binding)).await;
     assert!(!is_verified(verified(&s, &plc, &alice.did, &agent.did).await));
     assert_eq!(agents(&s, &alice).await, json!([]));
     assert_eq!(agents(&s, &bob).await, listed_agent(&bob_agent));
@@ -316,10 +368,20 @@ async fn ident_link_binding_requires_both_consents_and_either_party_can_revoke()
     );
 
     assert!(vlpds::server::shutdown_gracefully(&s.app, std::time::Duration::from_secs(5)).await);
-    drop((srv, s));
+    drop((bridge, srv, s));
     let restarted = node(&plc, rotation_key, store, "ident-restarted").await;
     assert_eq!(agents(&restarted, &alice).await, json!([]));
     assert_eq!(agents(&restarted, &bob).await, listed_agent(&bob_agent));
+    if let Some([alice_grant, bob_grant]) = worker_grants {
+        use vlpds::xrpc::agent_dispatch::resolve;
+        let resource = format!("{}/mcp", alice_grant.issuer);
+        assert_eq!(resolve(&restarted.app, alice_grant.grant(&resource, &alice.did)).await, None);
+        assert_eq!(
+            resolve(&restarted.app, bob_grant.grant(&resource, &bob.did)).await.as_ref(),
+            Some(&bob_grant.binding)
+        );
+        assert_eq!(resolve(&restarted.app, bob_grant.grant(&resource, &alice.did)).await, None);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

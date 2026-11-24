@@ -6,6 +6,22 @@ status: draft
 summary: Two separate approvals and a signed repository proof for an agent's declared principal.
 ---
 
+```hero
+diagram:
+  caption: "Discovery requires an agent declaration, a signed owner endorsement, and a ready provisioning reservation."
+  nodes:
+    - { id: agent, label: Agent declaration, at: [0, 0], size: [13, 3], tone: blue }
+    - { id: owner, label: Owner endorsement, at: [16, 0], size: [13, 3], tone: violet }
+    - { id: list, label: Private agent list, at: [8, 6], size: [13, 3], tone: amber }
+  edges:
+    - agent -> list
+    - owner -> list
+facts:
+  - { value: "2", label: statements required }
+  - { value: Fresh, label: proof per list request }
+  - { value: Owner, label: session required }
+```
+
 The [2026-10-22 ident.link draft](https://github.com/bluesky-social/ident.link/blob/41af2b3/docs/index.md) defines two public statements. The agent declares `https://ident.link/agent-of/<principal-did>` in its DID document's `alsoKnownAs`. The principal creates a `link.ident.endorsement` record at the agent DID key in its own repository. The record value contains `$type: "link.ident.endorsement"` and `agent: "<agent-did>"`. Each pair is verified independently. [Endorsement lexicon](https://github.com/bluesky-social/ident.link/blob/41af2b3/lexicons/link/ident/endorsement.json)
 
 The existing operator helper uses these PDS capabilities:

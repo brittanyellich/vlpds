@@ -859,4 +859,30 @@ async fn ident_link_observation_for_existing_accounts() {
     assert!(matches!(observe(&s.app, &agent.did, &principal.did).await.status, PairStatus::SignedAbsent { .. }));
     plc.set_down(true);
     assert_eq!(observe(&s.app, &agent.did, &principal.did).await.status, PairStatus::Unavailable);
+    plc.set_down(false);
+
+    // Availability can change independently of the signed repo head.
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let proceed = Arc::new(tokio::sync::Notify::new());
+    let (signal, resume) = (reached.clone(), proceed.clone());
+    vlpds::xrpc::cas::set_pause_hook(
+        &principal.did,
+        Some(Arc::new(move |point| {
+            let hold = point == "agent_binding_before_final_snapshot";
+            let (signal, resume) = (signal.clone(), resume.clone());
+            Box::pin(async move {
+                if hold {
+                    signal.notify_one();
+                    resume.notified().await;
+                }
+            })
+        })),
+    );
+    let (deactivated, ()) = tokio::join!(observe(&s.app, &agent.did, &principal.did), async {
+        tokio::time::timeout(std::time::Duration::from_secs(2), reached.notified()).await.unwrap();
+        s.xrpc.post("com.atproto.server.deactivateAccount", &json!({}), &principal.auth()).await.ok();
+        proceed.notify_one();
+    });
+    vlpds::xrpc::cas::set_pause_hook(&principal.did, None);
+    assert_eq!(deactivated.status, PairStatus::Unavailable);
 }

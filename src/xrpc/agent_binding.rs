@@ -84,6 +84,10 @@ async fn read_pair(app: &App, agent: &str, principal: &str) -> XResult<PairStatu
     super::cas::pause_point("agent_binding_before_final_snapshot", principal).await;
     let (principal_after, agent_after) =
         tokio::try_join!(plc.client.document_data(principal), plc.client.document_data(agent))?;
+    super::sync::assert_available(app, principal, None).await?;
+    if super::admin::is_record_takendown(app, principal, &path).await? {
+        return Ok(PairStatus::Unavailable);
+    }
     let head_after = app.head(principal).await?.commit;
     if principal_data != principal_after || agent_data != agent_after || head_before != head_after {
         return Ok(PairStatus::Unavailable);

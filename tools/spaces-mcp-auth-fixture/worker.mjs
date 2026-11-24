@@ -1,0 +1,180 @@
+import { OAuthAuthorizationServer, OAuthResourceServer } from "./provider.mjs";
+
+// Disposable single-isolate storage. Production revocation consistency is a separate decision.
+const rows = new Map();
+const env = {
+  OAUTH_KV: {
+    async get(key, options) {
+      const row = rows.get(key);
+      if (!row) return null;
+      return options?.type === "json" ? JSON.parse(row.value) : row.value;
+    },
+    async put(key, value, options) {
+      rows.set(key, { value, metadata: options?.metadata });
+    },
+    async delete(key) {
+      rows.delete(key);
+    },
+    async list({ prefix = "" } = {}) {
+      const keys = [...rows]
+        .filter(([key]) => key.startsWith(prefix))
+        .map(([name, row]) => ({ name, metadata: row.metadata }));
+      return { keys, list_complete: true };
+    },
+  },
+};
+
+// Fixed, synthetic sessions stand in for completed owner authentication and consent.
+// They are fixture inputs delivered over loopback exclusively.
+const owners = new Map([
+  ["owner-a-session", { userId: "owner-a", binding: "a-chat" }],
+  ["owner-b-session", { userId: "owner-b", binding: "b-chat" }],
+]);
+const scope = "mcp:chat";
+
+const encoder = new TextEncoder();
+const base64url = (bytes) => btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+const hex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+
+async function signDispatch(signer, issuer, resource, owner, grant, body) {
+  const key = await crypto.subtle.importKey("jwk", signer.jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  const now = Math.floor(Date.now() / 1000);
+  const claims = {
+    iss: signer.iss, aud: signer.aud, lxm: signer.method,
+    iat: now, exp: now + 25, jti: hex(crypto.getRandomValues(new Uint8Array(16))),
+    issuer, resource, owner, grant,
+    body_sha256: hex(new Uint8Array(await crypto.subtle.digest("SHA-256", body))),
+  };
+  const header = base64url(encoder.encode(JSON.stringify({ typ: "JWT", alg: "ES256" })));
+  const payload = base64url(encoder.encode(JSON.stringify(claims)));
+  const input = header + "." + payload;
+  const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, encoder.encode(input));
+  return input + "." + base64url(new Uint8Array(signature));
+}
+
+export default {
+  async fetch(request, { ORIGIN: origin, SPACES, SPACES_URL, BINDINGS, BRIDGE_TOKEN, SIGNER }, ctx) {
+    const url = new URL(request.url);
+    if (url.origin !== origin || request.headers.has("Origin")) {
+      return new Response(null, { status: 403 });
+    }
+    const mcp = origin + "/mcp";
+    const other = origin + "/other";
+    const issuer = new OAuthAuthorizationServer({
+      issuer: origin,
+      resources: [mcp, other],
+      scopesSupported: [scope, "offline_access"],
+    });
+    const api = issuer.getOAuthApi(env);
+    const recordGrant = (operation, userId, grantId) => SPACES.fetch(new URL("/fixture/grant", SPACES_URL), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${BRIDGE_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ operation, userId, grantId }),
+    });
+    if (url.pathname === "/fixture/client" && request.method === "POST") {
+      const { clientId } = await api.createClient({
+        clientName: "Disposable MCP client",
+        redirectUris: [origin + "/callback"],
+        tokenEndpointAuthMethod: "none",
+        grantTypes: ["authorization_code", "refresh_token"],
+        responseTypes: ["code"],
+      });
+      return Response.json({ clientId });
+    }
+    if (url.pathname === "/authorize" || url.pathname === "/fixture/revoke") {
+      const owner = owners.get(request.headers.get("X-Fixture-Owner"));
+      if (!owner) return new Response(null, { status: 401 });
+
+      if (url.pathname === "/fixture/revoke" && request.method === "GET") {
+        const { items } = await api.listUserGrants(owner.userId);
+        return Response.json(items.map(({ id }) => id));
+      }
+      if (url.pathname === "/fixture/revoke" && request.method === "POST") {
+        const { grantId } = await request.json();
+        const { items } = await api.listUserGrants(owner.userId);
+        const grant = items.find(({ id }) => id === grantId);
+        if (!grant) return new Response(null, { status: 404 });
+        if (BRIDGE_TOKEN && grant.resource === mcp) {
+          const revoked = await recordGrant("revoke", owner.userId, grantId);
+          if (!revoked.ok) return new Response(null, { status: 503 });
+        }
+        await api.revokeGrant(grantId, owner.userId);
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname === "/authorize" && request.method === "GET") {
+        const auth = await api.parseAuthRequest(request);
+        const granted = auth.scope.filter((requested) => requested === scope || requested === "offline_access");
+        const approvalId = crypto.randomUUID();
+        const { redirectTo } = await api.completeAuthorization({
+          request: auth,
+          userId: owner.userId,
+          metadata: { approvalId },
+          props: owner,
+          // The durable adapter must acknowledge revocation separately.
+          ...(BRIDGE_TOKEN ? { revokeExistingGrants: false } : {}),
+          scope: granted,
+        });
+        if (BRIDGE_TOKEN && (auth.resource === mcp || (auth.resource?.length === 1 && auth.resource[0] === mcp))) {
+          const { items } = await api.listUserGrants(owner.userId);
+          const grant = items.find(({ metadata, resource }) => metadata?.approvalId === approvalId && resource === mcp);
+          if (!grant) return new Response(null, { status: 503 });
+          const approved = await recordGrant("approve", owner.userId, grant.id);
+          if (!approved.ok) {
+            await api.revokeGrant(grant.id, owner.userId);
+            return new Response(null, { status: 403 });
+          }
+        }
+        return Response.redirect(redirectTo, 303);
+      }
+      return new Response(null, { status: 405 });
+    }
+    if (url.pathname === "/mcp" || url.pathname.startsWith("/.well-known/oauth-protected-resource")) {
+      const endpoint = new OAuthResourceServer({
+        resourceMetadata: { resource: mcp, authorization_servers: [origin] },
+        requiredScopes: [scope],
+        validateToken: () => (audience, token) => issuer.validateToken(audience, token, env),
+        handler: {
+          async fetch(request, _env, authenticated) {
+            if (!authenticated.auth.scope.includes(scope)) return new Response(null, { status: 403 });
+            const headers = new Headers();
+            let body = request.body;
+            let target = SPACES_URL;
+            if (SIGNER) {
+              if (request.method !== "POST") return new Response(null, { status: 405 });
+              const signer = JSON.parse(SIGNER);
+              // validateToken has already verified the resource, expiry and
+              // scope. unwrapToken exposes the library's stable grant ID.
+              const verified = await api.unwrapToken(authenticated.auth.token);
+              if (!verified || verified.userId !== authenticated.auth.userId || !verified.grantId
+                  || authenticated.auth.audience !== mcp) return new Response(null, { status: 401 });
+              const binding = JSON.parse(BINDINGS)[verified.userId];
+              if (!binding) return new Response(null, { status: 403 });
+              body = await request.arrayBuffer();
+              if (body.byteLength > 64 * 1024) return new Response(null, { status: 413 });
+              const assertion = await signDispatch(signer, origin, mcp, binding.ownerDid, verified.grantId, body);
+              headers.set("Authorization", `Bearer ${assertion}`);
+              target = new URL("/xrpc/" + signer.method, SPACES_URL);
+            } else {
+              const binding = JSON.parse(BINDINGS)[authenticated.props.binding];
+              if (!binding) return new Response(null, { status: 403 });
+              headers.set("Authorization", `Bearer ${binding.token}`);
+            }
+            // Only allowlisted protocol headers cross the private hop.
+            for (const name of ["Accept", "Content-Type", "MCP-Protocol-Version"]) {
+              const value = request.headers.get(name);
+              if (value !== null) headers.set(name, value);
+            }
+            return SPACES.fetch(target, {
+              method: request.method,
+              headers,
+              body,
+              redirect: "manual",
+            });
+          },
+        },
+      });
+      return endpoint.fetch(request, env, ctx);
+    }
+    return issuer.fetch(request, env, ctx);
+  },
+};

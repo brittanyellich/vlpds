@@ -830,7 +830,12 @@ impl MockClientApp {
         use axum::response::IntoResponse;
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", l.local_addr().unwrap());
-        let (client_id, jwks_uri) = (format!("{base}/client-metadata.json"), format!("{base}/jwks.json"));
+        // The process-wide client cache outlives fixtures, and the OS can
+        // reuse the port while the previous client's signing key is cached.
+        let fixture_id = token::new_jti();
+        let metadata_path = format!("/{fixture_id}/client-metadata.json");
+        let jwks_path = format!("/{fixture_id}/jwks.json");
+        let (client_id, jwks_uri) = (format!("{base}{metadata_path}"), format!("{base}{jwks_path}"));
         let key = new_p256();
         let kid = "key-1".to_string();
         let jwk = p256_jwk(&key, &kid);
@@ -839,10 +844,11 @@ impl MockClientApp {
         let (k, m, cid, ju) = (keys.clone(), metadata_ok.clone(), client_id.clone(), jwks_uri.clone());
         let router = axum::Router::new().fallback(move |req: axum::extract::Request| {
             let (k, m, cid, ju, jwk) = (k.clone(), m.clone(), cid.clone(), ju.clone(), jwk.clone());
+            let (metadata_path, jwks_path) = (metadata_path.clone(), jwks_path.clone());
             async move {
                 let keys = *k.lock();
                 match req.uri().path() {
-                    "/client-metadata.json" if m.load(Ordering::SeqCst) => {
+                    path if path == metadata_path && m.load(Ordering::SeqCst) => {
                         let mut md = json!({
                             "client_id": cid,
                             "client_name": "Mock Space App",
@@ -868,7 +874,9 @@ impl MockClientApp {
                         }
                         axum::Json(md).into_response()
                     }
-                    "/jwks.json" if keys == Keys::Uri => axum::Json(json!({"keys": [jwk]})).into_response(),
+                    path if path == jwks_path && keys == Keys::Uri => {
+                        axum::Json(json!({"keys": [jwk]})).into_response()
+                    }
                     _ => axum::http::StatusCode::NOT_FOUND.into_response(),
                 }
             }

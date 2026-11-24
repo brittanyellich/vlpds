@@ -92,3 +92,5 @@ from it. Stored Spaces data migrates in place, and [Interop](interop.md) says ho
 ```pages
 {}
 ```
+
+[Owner agent provisioning](agent-provisioning.md) and [private agent discovery](agent-binding.md) describe the PDS endpoints and binding requirements.

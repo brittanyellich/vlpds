@@ -6,6 +6,7 @@ mod admin;
 pub mod admin_audit;
 mod admin_tools;
 pub mod agent_binding;
+pub mod agent_provisioning;
 mod appview_override;
 pub mod authn;
 mod blob_quota;
@@ -295,6 +296,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(extract::debug_output_layer(
             Router::new()
                 .merge(server::routes())
+                .merge(agent_provisioning::routes())
                 .merge(signin::routes())
                 .merge(passkeys::routes())
                 .merge(mfa::routes())

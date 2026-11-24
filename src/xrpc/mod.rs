@@ -5,6 +5,7 @@ mod account_stats;
 mod admin;
 pub mod admin_audit;
 mod admin_tools;
+pub mod agent_binding;
 mod appview_override;
 pub mod authn;
 mod blob_quota;

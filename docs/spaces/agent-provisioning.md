@@ -6,6 +6,22 @@ status: draft
 summary: An owner-scoped provisioning lifecycle exercised against the existing vlPDS account and repo APIs.
 ---
 
+```hero
+diagram:
+  caption: "The owner starts an operation. The PDS reserves it, runs regular signup checks, and records the agent account."
+  nodes:
+    - { id: owner, label: Owner session, at: [0, 0], size: [12, 3], tone: blue }
+    - { id: journal, label: Private reservation, at: [15, 0], size: [14, 3], tone: violet }
+    - { id: signup, label: PDS signup, at: [32, 0], size: [12, 3], tone: amber }
+  edges:
+    - owner -> journal
+    - journal -> signup
+facts:
+  - { value: "1", label: reservation slot per owner }
+  - { value: Private, label: owner journal }
+  - { value: "Stop", label: when PLC outcome is uncertain }
+```
+
 ### Owner-facing lifecycle
 
 Use the signed-in owner's DID from the PDS session. The owner supplies an operation ID to start provisioning or retry an existing operation. Store one private reservation per owner DID and operation ID. Check the owner's quota when creating a reservation. Retrying a known operation uses its existing reservation, including when the owner is at quota.

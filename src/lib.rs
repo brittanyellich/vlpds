@@ -1,12 +1,19 @@
 #![allow(clippy::type_complexity)]
 
+#[cfg(test)]
+extern crate self as vlpds;
+#[cfg(test)]
+mod agent_mounted_fixture;
+
 pub mod admin_proxy;
 pub mod agent_a2a;
 pub mod agent_a2a_store;
+pub mod agent_admission;
 pub mod agent_card;
 pub mod agent_contact_pilot;
 pub mod agent_endorsement;
 pub mod agent_endorsement_fetch;
+pub mod agent_enrollment;
 pub mod agent_profile_bridge;
 pub mod appview_override;
 pub mod asn;

@@ -1,9 +1,14 @@
 //! Fixed-origin bounded public metadata/proof fetch. No caller URLs or JS parser.
 use crate::agent_endorsement::{self, Outcome, TrustedSnapshot, AGENT, MAX_CAR_BYTES, PRINCIPAL};
+use crate::xrpc::agent_binding::{PairObservation, PairStatus};
 use futures::StreamExt;
 use serde_json::{json, Value as J};
 use std::time::Duration;
+use std::time::SystemTime;
 use vlatproto::cid::Cid;
+
+#[cfg(test)]
+pub(crate) mod fixture_transport;
 
 const PLC: &str = "https://plc.directory";
 const PDS: &str = "https://pds.crate.social";
@@ -12,16 +17,7 @@ async fn read(url: reqwest::Url, limit: usize, json_body: bool) -> Result<(u16, 
     if ![PLC, PDS].contains(&url.origin().ascii_serialization().as_str()) {
         return Err("Unconfigured identity authority".into());
     }
-    let response = vlatproto::http::guarded(false)
-        .get(url.as_str())?
-        .header(
-            "accept",
-            if json_body { "application/json, application/did+ld+json" } else { "application/vnd.ipld.car" },
-        )
-        .timeout(Duration::from_secs(3))
-        .send()
-        .await
-        .map_err(|_| "Identity fetch failed")?;
+    let response = fetch_response(&url, json_body).await?;
     let status = response.status().as_u16();
     let media = response
         .headers()
@@ -52,6 +48,30 @@ async fn read(url: reqwest::Url, limit: usize, json_body: bool) -> Result<(u16, 
     }
     Ok((status, bytes))
 }
+async fn fetch_response(url: &reqwest::Url, json_body: bool) -> Result<reqwest::Response, String> {
+    #[cfg(test)]
+    if let Some(fixture) = fixture_transport::current() {
+        return tokio::time::timeout(Duration::from_secs(3), fixture.reply(url))
+            .await
+            .map_err(|_| "Identity fetch failed")?;
+    }
+    #[cfg(test)]
+    if fixture_transport::https_denied() {
+        return Err("Unscoped fixture identity read refused".into());
+    }
+    let response = vlatproto::http::guarded(false)
+        .get(url.as_str())?
+        .header(
+            "accept",
+            if json_body { "application/json, application/did+ld+json" } else { "application/vnd.ipld.car" },
+        )
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|_| "Identity fetch failed")?;
+    Ok(response)
+}
+
 fn rpc(method: &str, params: &[(&str, &str)]) -> reqwest::Url {
     let mut u = reqwest::Url::parse(&format!("{PDS}/xrpc/{method}")).expect("constant URL");
     u.query_pairs_mut().extend_pairs(params.iter().copied());
@@ -92,7 +112,7 @@ async fn head() -> Result<Cid, String> {
     let j: J = serde_json::from_slice(&bytes).map_err(|_| "Invalid head JSON")?;
     Cid::parse(j["cid"].as_str().ok_or("Missing head CID")?).map_err(|_| "Invalid head CID".into())
 }
-async fn resolve_inner() -> Result<J, String> {
+async fn resolve_inner() -> Result<PairStatus, String> {
     let agent = document(AGENT).await?;
     check_pds(&agent)?;
     let aliases: &[J] = match agent.get("alsoKnownAs") {
@@ -105,7 +125,10 @@ async fn resolve_inner() -> Result<J, String> {
     }
     let alias = format!("https://ident.link/agent-of/{PRINCIPAL}");
     if !aliases.iter().any(|v| v == &alias) {
-        return Ok(json!({"agentDid":AGENT,"principalDid":PRINCIPAL,"status":"no_declaration"}));
+        if document(AGENT).await? != agent {
+            return Err("DID metadata changed during observation".into());
+        }
+        return Ok(PairStatus::Undeclared);
     }
     let principal = document(PRINCIPAL).await?;
     check_pds(&principal)?;
@@ -143,22 +166,74 @@ async fn resolve_inner() -> Result<J, String> {
         head_after: after,
     };
     match agent_endorsement::verify(&snapshot, &car, record.as_ref())? {
-        Outcome::Verified { commit, record } => Ok(
-            json!({"agentDid":AGENT,"principalDid":PRINCIPAL,"status":"verified","commitCid":commit.to_string(),"recordCid":record.to_string()}),
-        ),
-        Outcome::Absent { commit } => Ok(
-            json!({"agentDid":AGENT,"principalDid":PRINCIPAL,"status":"declared_unverified","commitCid":commit.to_string()}),
-        ),
+        Outcome::Verified { commit, record } => Ok(PairStatus::Verified { commit, record }),
+        Outcome::Absent { commit } => Ok(PairStatus::SignedAbsent { commit }),
     }
 }
-/// Only this fixed pair and these fixed HTTPS authorities. No runtime parameters.
-pub async fn resolve_fixed() -> Result<J, String> {
+async fn resolve_bounded() -> Result<PairStatus, String> {
     tokio::time::timeout(Duration::from_secs(20), resolve_inner()).await.map_err(|_| "Identity resolution deadline")?
+}
+/// Typed sibling for internal admission only; same fixed HTTPS authority/pair pins.
+/// Test transport is absent from the normal library API:
+/// ```compile_fail
+/// use vlpds::agent_endorsement_fetch::fixture_transport;
+/// ```
+/// Resolution start bounds the oldest evidence age; this is not a global freshness lease.
+pub async fn observe_fixed() -> PairObservation {
+    observe_resolution(resolve_bounded()).await
+}
+async fn observe_resolution(
+    resolution: impl std::future::Future<Output = Result<PairStatus, String>>,
+) -> PairObservation {
+    let observed_at = SystemTime::now();
+    let status = resolution.await.unwrap_or(PairStatus::Unavailable);
+    PairObservation { agent: AGENT.into(), principal: PRINCIPAL.into(), observed_at, status }
+}
+/// Preserve the legacy fixed identity evaluation JSON and error behavior.
+pub async fn resolve_fixed() -> Result<J, String> {
+    legacy_status(resolve_bounded().await?)
+}
+fn legacy_status(status: PairStatus) -> Result<J, String> {
+    Ok(match status {
+        PairStatus::Verified { commit, record } => {
+            json!({"agentDid":AGENT,"principalDid":PRINCIPAL,"status":"verified","commitCid":commit.to_string(),"recordCid":record.to_string()})
+        }
+        PairStatus::SignedAbsent { commit } => {
+            json!({"agentDid":AGENT,"principalDid":PRINCIPAL,"status":"declared_unverified","commitCid":commit.to_string()})
+        }
+        PairStatus::Undeclared => json!({"agentDid":AGENT,"principalDid":PRINCIPAL,"status":"no_declaration"}),
+        PairStatus::Unavailable => return Err("Identity observation unavailable".into()),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn observation_age_includes_resolution_delay() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(observe_resolution(async move {
+            started_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            Ok(PairStatus::Undeclared)
+        }));
+        started_rx.await.unwrap();
+        let pending_at = SystemTime::now();
+        release_tx.send(()).unwrap();
+        let observation = task.await.unwrap();
+        assert!(observation.observed_at <= pending_at);
+        assert!(matches!(observation.status, PairStatus::Undeclared));
+    }
+    #[test]
+    fn typed_observation_preserves_legacy_outcomes() {
+        let commit = Cid::dag_cbor(b"synthetic-commit");
+        let record = Cid::dag_cbor(b"synthetic-record");
+        assert_eq!(legacy_status(PairStatus::Verified { commit, record }).unwrap()["status"], "verified");
+        assert_eq!(legacy_status(PairStatus::SignedAbsent { commit }).unwrap()["status"], "declared_unverified");
+        assert_eq!(legacy_status(PairStatus::Undeclared).unwrap()["status"], "no_declaration");
+        assert!(legacy_status(PairStatus::Unavailable).is_err());
+    }
     #[test]
     fn fixed_urls_and_service_migration_gate() {
         let u = rpc("com.atproto.sync.getRecord", &[("did", PRINCIPAL), ("rkey", AGENT)]);

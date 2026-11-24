@@ -596,3 +596,252 @@ async fn seed_disposable_s3_active_card_account() {
     p.db.put(vlpds::state::account_key(AGENT), serde_json::to_vec(&account).unwrap()).await.unwrap();
     vlpds::server::shutdown(&s.app).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_enrollment_requires_authenticated_caller_and_private_consent() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use vlpds::agent_admission::{run_if_admitted, Refusal};
+    let s = TestServer::spawn_lone(|c| {
+        c.workers = 1;
+        c.shards = 1;
+    })
+    .await;
+    let caller = s.create_account("enrollmentcallerfixture").await;
+    let aud = s.pds_did().await;
+    let result = s
+        .xrpc
+        .get(
+            "com.atproto.server.getServiceAuth",
+            &[("aud", &*aud), ("lxm", "chat.atagents.agent.contact")],
+            &caller.auth(),
+        )
+        .await
+        .ok();
+    let token = result["token"].as_str().unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    for (token, expected) in [("not-a-token", Refusal::Caller), (token, Refusal::Consent)] {
+        let calls = count.clone();
+        let outcome = run_if_admitted(&s.app, token, &caller.did, move || async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+        })
+        .await;
+        assert_eq!(outcome, Err(expected));
+    }
+    // No policy row exists: a valid service JWT cannot cause proof fetch or action.
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    vlpds::server::shutdown(&s.app).await;
+}
+
+async fn enrollment_owner_token(s: &TestServer, access: &str) -> String {
+    let (parts, _) = axum::http::Request::builder()
+        .header("authorization", format!("Bearer {access}"))
+        .body(())
+        .unwrap()
+        .into_parts();
+    assert!(matches!(
+        vlpds::xrpc::authn::authenticate(&s.app, &parts).await.map_err(|e| e.message).unwrap(),
+        vlpds::xrpc::authn::Credentials::Session { .. }
+    ));
+    access.to_owned()
+}
+
+fn enrollment_op(
+    id: &str,
+    agent: Option<&str>,
+    action: vlpds::agent_enrollment::Action,
+    revision: u64,
+) -> vlpds::agent_enrollment::Operation {
+    vlpds::agent_enrollment::Operation { request_id: id.into(), agent: agent.map(str::to_owned), action, revision }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_owner_consent_cas_retries_isolation_disable_and_shutdown() {
+    use vlpds::agent_enrollment::{apply_owner_consent as apply, Action::*, Pair};
+    let s = TestServer::spawn_lone(|c| {
+        c.workers = 1;
+        c.shards = 1;
+    })
+    .await;
+    let owner = s.create_account("enrollownerfixture").await;
+    let other = s.create_account("enrollotherfixture").await;
+    let agent = s.create_account("enrollagentfixture").await;
+    let second = s.create_account("enrollsecondfixture").await;
+    let other_agent = s.create_account("enrollforeignfixture").await;
+    let credentials = enrollment_owner_token(&s, &owner.access).await;
+    let foreign = enrollment_owner_token(&s, &other.access).await;
+    let pairs = [Pair { agent: &agent.did, caller: &owner.did }, Pair { agent: &second.did, caller: &owner.did }];
+    let b_pairs = [Pair { agent: &other_agent.did, caller: &other.did }];
+    let original = enrollment_op("original", Some(&agent.did), Enable, 0);
+    let first = apply(&s.app, &credentials, &owner.did, &pairs, &original).await.map_err(|e| e.message).unwrap();
+    assert!(first.enabled);
+    let replay = apply(&s.app, &credentials, &owner.did, &pairs, &original).await.map_err(|e| e.message).unwrap();
+    assert!(replay.replay);
+    assert_eq!(first.receipt, replay.receipt);
+    assert!(apply(&s.app, &foreign, &owner.did, &pairs, &original).await.is_err());
+    let app_password = s.app.jwt.issue_with_jti(&owner.did, "com.atproto.appPassPrivileged", 60, "at+jwt", None);
+    assert!(apply(&s.app, &app_password, &owner.did, &pairs, &original).await.is_err());
+    assert!(apply(&s.app, &credentials, &owner.did, &pairs, &enrollment_op("original", Some(&agent.did), Disable, 0))
+        .await
+        .is_err());
+    let foreign_enable = enrollment_op("foreign", Some(&other_agent.did), Enable, 0);
+    assert!(
+        apply(&s.app, &foreign, &other.did, &b_pairs, &foreign_enable).await.map_err(|e| e.message).unwrap().enabled
+    );
+    assert!(
+        !apply(&s.app, &credentials, &owner.did, &pairs, &enrollment_op("disable", Some(&agent.did), Disable, 1))
+            .await
+            .map_err(|e| e.message)
+            .unwrap()
+            .enabled
+    );
+    assert!(!apply(&s.app, &credentials, &owner.did, &pairs, &original).await.map_err(|e| e.message).unwrap().enabled);
+    assert!(apply(&s.app, &credentials, &owner.did, &pairs, &enrollment_op("stale", Some(&agent.did), Enable, 1))
+        .await
+        .is_err());
+    assert!(
+        apply(&s.app, &credentials, &owner.did, &pairs, &enrollment_op("fresh", Some(&agent.did), Enable, 2))
+            .await
+            .map_err(|e| e.message)
+            .unwrap()
+            .enabled
+    );
+    apply(&s.app, &credentials, &owner.did, &pairs, &enrollment_op("revoke", Some(&agent.did), RevokeEndorsement, 3))
+        .await
+        .map_err(|e| e.message)
+        .unwrap();
+    assert!(apply(&s.app, &credentials, &owner.did, &pairs, &enrollment_op("restore", Some(&agent.did), Enable, 4))
+        .await
+        .is_err());
+    let second_enable = enrollment_op("second", Some(&second.did), Enable, 4);
+    assert!(
+        apply(&s.app, &credentials, &owner.did, &pairs, &second_enable).await.map_err(|e| e.message).unwrap().enabled
+    );
+    let shutdown = enrollment_op("shutdown", None, OwnerDisable, 5);
+    let result = apply(&s.app, &credentials, &owner.did, &pairs, &shutdown).await.map_err(|e| e.message).unwrap();
+    assert!(result.owner_disabled);
+    assert_eq!(
+        apply(&s.app, &credentials, &owner.did, &pairs, &shutdown).await.map_err(|e| e.message).unwrap().receipt,
+        result.receipt
+    );
+    assert!(
+        !apply(&s.app, &credentials, &owner.did, &pairs, &second_enable).await.map_err(|e| e.message).unwrap().enabled
+    );
+    assert!(apply(&s.app, &credentials, &owner.did, &pairs, &enrollment_op("afteroff", Some(&second.did), Enable, 6))
+        .await
+        .is_err());
+    assert!(
+        apply(&s.app, &foreign, &other.did, &b_pairs, &foreign_enable).await.map_err(|e| e.message).unwrap().enabled
+    );
+    s.xrpc.post("com.atproto.server.deactivateAccount", &json!({}), &owner.auth()).await.ok();
+    assert!(
+        apply(&s.app, &credentials, &owner.did, &pairs, &original).await.is_err(),
+        "Retained session identity cannot bypass inactive owner"
+    );
+    vlpds::server::shutdown(&s.app).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_owner_consent_disable_fences_inflight_enable_cas() {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+    use vlpds::{
+        agent_enrollment::{apply_owner_consent as apply, Action::*, Pair},
+        xrpc::cas::set_pause_hook,
+    };
+    let s = TestServer::spawn_lone(|c| {
+        c.workers = 1;
+        c.shards = 1;
+    })
+    .await;
+    let owner = s.create_account("enrollraceowner").await;
+    let agent = s.create_account("enrollraceagent").await;
+    let credentials = enrollment_owner_token(&s, &owner.access).await;
+    let pairs = [Pair { agent: &agent.did, caller: &owner.did }];
+    apply(&s.app, &credentials, &owner.did, &pairs, &enrollment_op("setup", Some(&agent.did), Enable, 0))
+        .await
+        .map_err(|e| e.message)
+        .unwrap();
+    let reached = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let reached_hook = reached.clone();
+    let release_hook = release.clone();
+    set_pause_hook(
+        &owner.did,
+        Some(Arc::new(move |point| {
+            let reached = reached_hook.clone();
+            let release = release_hook.clone();
+            let should = point == "agent_enrollment_enable_before_cas";
+            Box::pin(async move {
+                if should {
+                    reached.notify_one();
+                    release.notified().await;
+                }
+            })
+        })),
+    );
+    let app = s.app.clone();
+    let creds = credentials.clone();
+    let owner_id = owner.did.clone();
+    let agent_id = agent.did.clone();
+    let delayed = tokio::spawn(async move {
+        let pairs = [Pair { agent: &agent_id, caller: &owner_id }];
+        apply(&app, &creds, &owner_id, &pairs, &enrollment_op("delayed", Some(&agent_id), Enable, 1)).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified()).await.unwrap();
+    apply(&s.app, &credentials, &owner.did, &pairs, &enrollment_op("disable", Some(&agent.did), Disable, 1))
+        .await
+        .map_err(|e| e.message)
+        .unwrap();
+    release.notify_one();
+    assert!(delayed.await.unwrap().is_err());
+    set_pause_hook(&owner.did, None);
+    let setup = enrollment_op("setup", Some(&agent.did), Enable, 0);
+    assert!(!apply(&s.app, &credentials, &owner.did, &pairs, &setup).await.map_err(|e| e.message).unwrap().enabled);
+    vlpds::server::shutdown(&s.app).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_owner_consent_shutdown_survives_capacity_and_reopen() {
+    use std::sync::Arc;
+    use vlpds::agent_enrollment::{apply_owner_consent as apply, Action::*, Pair};
+    let store = Arc::new(object_store::memory::InMemory::new());
+    let s = TestServer::spawn_lone(|c| {
+        c.workers = 1;
+        c.shards = 1;
+        c.memory_store = Some(store.clone());
+    })
+    .await;
+    let owner = s.create_account("enrollcapacityowner").await;
+    let agent = s.create_account("enrollcapacityagent").await;
+    let credentials = enrollment_owner_token(&s, &owner.access).await;
+    let pairs = [Pair { agent: &agent.did, caller: &owner.did }];
+    let initial = enrollment_op("first", Some(&agent.did), Enable, 0);
+    apply(&s.app, &credentials, &owner.did, &pairs, &initial).await.map_err(|e| e.message).unwrap();
+    for revision in 1..64 {
+        apply(
+            &s.app,
+            &credentials,
+            &owner.did,
+            &pairs,
+            &enrollment_op(&format!("disable{revision}"), Some(&agent.did), Disable, revision),
+        )
+        .await
+        .map_err(|e| e.message)
+        .unwrap();
+    }
+    assert!(apply(&s.app, &credentials, &owner.did, &pairs, &enrollment_op("full", Some(&agent.did), Enable, 64))
+        .await
+        .is_err());
+    let off = enrollment_op("off", None, OwnerDisable, 64);
+    apply(&s.app, &credentials, &owner.did, &[], &off).await.map_err(|e| e.message).unwrap();
+    vlpds::server::shutdown(&s.app).await;
+    let reopened = TestServer::spawn_lone(|c| {
+        c.workers = 1;
+        c.shards = 1;
+        c.memory_store = Some(store.clone());
+    })
+    .await;
+    let result = apply(&reopened.app, &credentials, &owner.did, &pairs, &initial).await.map_err(|e| e.message).unwrap();
+    assert!(result.replay && result.owner_disabled && !result.enabled);
+    vlpds::server::shutdown(&reopened.app).await;
+}

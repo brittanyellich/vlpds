@@ -8,6 +8,7 @@ mod admin_tools;
 pub mod agent_binding;
 pub mod agent_dispatch;
 pub mod agent_dispatch_auth;
+pub mod agent_grant_recovery;
 pub mod agent_provisioning;
 mod appview_override;
 pub mod authn;

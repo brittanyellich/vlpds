@@ -1,8 +1,8 @@
 // Incident-only reconciliation. No Worker upload, restart, activation or mint.
 import{PilotProvider,checkBindings,ProviderPending}from'./pilot-provider.mjs';import{PILOT}from'./pilot-activation-plan.mjs';
 import{createHash}from'node:crypto';import{writeFileSync}from'node:fs';import{join,isAbsolute}from'node:path';import{pathToFileURL}from'node:url';
-// Exact OFF-with-bindings Worker from authenticated GET inspection44999046705.
-export const CLEANUP=Object.freeze({worker:'7495c31c-de99-40f5-a4a6-748026fd9425',script:'88f6a917a64c75dda70dd40bb76cc74c8607790400fd50349095ec7fe615dc42',
+// Exact OFF-with-bindings Worker from authenticated GET inspection45334769227.
+export const CLEANUP=Object.freeze({worker:'e7ba115b-d6f0-4c71-87e6-57040e8f8c41',script:'88f6a917a64c75dda70dd40bb76cc74c8607790400fd50349095ec7fe615dc42',
  provisionedTypes:'391439edd899f411421542bb7bee96c82485534096ebaf71a9449a99b9ce8d11',cleanTypes:'0fc25600babf6b573a96519018b704a676c59723f09f83ba89de0b27f3c0c5ad'});
 const body=JSON.stringify({secrets:{AGENT_A2A_BRIDGE_KEY:null,AGENT_A2A_KODY_TOKEN:null}});
 export async function reconcileBindings({provider,remove,operation,exclusiveWindow=false,now=()=>performance.now(),sleep=ms=>new Promise(r=>setTimeout(r,ms))}){

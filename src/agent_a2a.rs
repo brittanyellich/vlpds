@@ -20,6 +20,13 @@ use serde_json::{json, Value as J};
 use sha2::{Digest, Sha256};
 use std::{path::Path, sync::Arc, time::Duration};
 
+/// Normal builds cannot select the compile-time-only fixture gate.
+/// ```compile_fail
+/// use vlpds::agent_a2a::NativeA2a;
+/// fn no_fixture_gate(config: NativeA2a) {
+///     let _ = config.with_local_enrollment_gate_for_fixture();
+/// }
+/// ```
 #[derive(Clone)]
 pub struct NativeA2a {
     origin: String,
@@ -27,6 +34,10 @@ pub struct NativeA2a {
     bridge: Bridge,
     capacity: u32,
     signed_card: Option<crate::agent_card::SignedCard>,
+    #[cfg(test)]
+    local_enrollment_gate: bool,
+    #[cfg(test)]
+    development: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,9 +109,26 @@ impl NativeA2a {
             bridge,
             capacity: default_capacity(),
             signed_card: None,
+            #[cfg(test)]
+            local_enrollment_gate: false,
+            #[cfg(test)]
+            development: dev,
         })
     }
+    /// Local integration fixture only. No file/env/production enablement path.
+    #[cfg(test)]
+    pub(crate) fn with_local_enrollment_gate_for_fixture(mut self) -> anyhow::Result<Self> {
+        let origin = reqwest::Url::parse(&self.origin)?;
+        anyhow::ensure!(
+            self.development && origin.scheme() == "http" && origin.host_str() == Some("127.0.0.1"),
+            "Enrollment integration is loopback-only"
+        );
+        self.local_enrollment_gate = true;
+        Ok(self)
+    }
     pub fn validate(&self, dev: bool, origin: &str) -> anyhow::Result<()> {
+        #[cfg(test)]
+        anyhow::ensure!(!self.local_enrollment_gate || dev, "Local enrollment gate cannot run in production");
         anyhow::ensure!(self.origin == origin, "A2A public origin mismatch");
         anyhow::ensure!(dev || self.signed_card.is_some(), "Production signed Card gate is not configured");
         let url = reqwest::Url::parse(origin)?;
@@ -210,7 +238,8 @@ async fn contact(State((app, cfg)): State<(Arc<App>, Arc<NativeA2a>)>, req: Requ
     else {
         return response(StatusCode::UNAUTHORIZED, json!({"error":"Service authentication required"}));
     };
-    let auth = match crate::xrpc::authn::verify_agent_contact_jwt(&app, token, &cfg.caller).await {
+    let token = token.to_owned();
+    let auth = match crate::xrpc::authn::verify_agent_contact_jwt(&app, &token, &cfg.caller).await {
         Ok(a) => a,
         Err(_) => return response(StatusCode::UNAUTHORIZED, json!({"error":"Caller authentication refused"})),
     };
@@ -255,6 +284,41 @@ async fn contact(State((app, cfg)): State<(Arc<App>, Arc<NativeA2a>)>, req: Requ
             )
         }
     };
+    #[cfg(test)]
+    if cfg.local_enrollment_gate {
+        if !app.config.dev_mode {
+            return rpc_error(StatusCode::SERVICE_UNAVAILABLE, &id, "Local enrollment fixture disabled");
+        }
+        let correlation = id.clone();
+        let decision_app = app.clone();
+        let decision_cfg = cfg.clone();
+        return match crate::agent_admission::run_if_admitted(&app, &token, &cfg.caller, move || {
+            contact_decision(decision_app, decision_cfg, auth, id, event, digest)
+        })
+        .await
+        {
+            Ok(reply) => reply,
+            Err(crate::agent_admission::Refusal::Caller) => {
+                rpc_error(StatusCode::UNAUTHORIZED, &correlation, "Caller authentication refused")
+            }
+            Err(crate::agent_admission::Refusal::Consent) => {
+                rpc_error(StatusCode::FORBIDDEN, &correlation, "Owner enrollment consent required")
+            }
+            Err(_) => {
+                rpc_error(StatusCode::SERVICE_UNAVAILABLE, &correlation, "Current enrollment evidence unavailable")
+            }
+        };
+    }
+    contact_decision(app, cfg, auth, id, event, digest).await
+}
+async fn contact_decision(
+    app: Arc<App>,
+    cfg: Arc<NativeA2a>,
+    auth: crate::xrpc::authn::ServiceAuth,
+    id: J,
+    event: String,
+    digest: String,
+) -> Response {
     if !app.account(AGENT).await.is_ok_and(|a| a.status.is_none()) {
         return response(StatusCode::NOT_FOUND, json!({"error":"Agent unavailable"}));
     }

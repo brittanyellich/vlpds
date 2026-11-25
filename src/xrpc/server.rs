@@ -1463,13 +1463,13 @@ async fn account_did_doc(app: &App, a: &Account) -> Option<J> {
 ///   repo and no firehose events until activateAccount.
 /// - A given invite code is checked and recorded even if not required.
 pub(super) async fn create_account_inner(app: &App, inp: CreateAccountIn, requester: Option<&str>) -> XResult<Account> {
-    count_signup(create_account_checked(app, inp, requester, false).await)
+    count_signup(create_account_checked(app, inp, requester, false, None).await)
 }
 
 /// The operator's createAccount (vlpds.admin.createAccount): as a sign-up,
 /// but no invite code is needed when the server requires one.
 pub(super) async fn create_account_by_operator(app: &App, inp: CreateAccountIn) -> XResult<Account> {
-    count_signup(create_account_checked(app, inp, None, true).await)
+    count_signup(create_account_checked(app, inp, None, true, None).await)
 }
 
 fn count_signup(r: XResult<Account>) -> XResult<Account> {
@@ -1499,11 +1499,23 @@ fn signup_refusal(e: &XrpcError) -> &'static str {
     }
 }
 
+/// Provisioning uses normal signup policy and records its proof in the same
+/// commit as the new account and first repo head.
+pub(super) async fn create_agent_account(
+    app: &App,
+    input: CreateAccountIn,
+    provenance: &str,
+    potentially_applied: &mut bool,
+) -> XResult<Account> {
+    count_signup(create_account_checked(app, input, None, false, Some((provenance, potentially_applied))).await)
+}
+
 async fn create_account_checked(
     app: &App,
     inp: CreateAccountIn,
     requester: Option<&str>,
     operator: bool,
+    mut provisioning: Option<(&str, &mut bool)>,
 ) -> XResult<Account> {
     if inp.plc_op.is_some() {
         return Err(invalid_request("Unsupported input: \"plcOp\""));
@@ -1655,6 +1667,9 @@ async fn create_account_checked(
     }
     // the reference too registers the DID before writing the account
     if let Some((plc, op)) = &genesis {
+        if let Some((_, potentially_applied)) = &mut provisioning {
+            **potentially_applied = true;
+        }
         if let Err(err) = plc.create(&did, op).await {
             release(true, true, claim).await;
             if matches!(err, crate::plc::PlcError::Unavailable(_)) {
@@ -1705,6 +1720,10 @@ async fn create_account_checked(
         set_extra(&mut acct, EXTERNAL_DID, json!(true));
         set_extra(&mut acct, "deactivatedAt", json!(vlatproto::events::now_rfc3339()));
         recompute_status(&mut acct);
+    }
+    if let Some((marker, potentially_applied)) = provisioning {
+        set_extra(&mut acct, super::agent_provisioning::ACCOUNT_MARKER, json!(marker));
+        *potentially_applied = true;
     }
     let created = create_repo(app, &did, &handle, key, &acct).await;
     if let Err((e, false)) = &created {

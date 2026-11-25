@@ -531,6 +531,10 @@ async fn xrpc_target(
     if app.is_some_and(|a| a.config.spaces) && space_host_method(nsid) {
         return space_host_target(req).await;
     }
+    if nsid == "vlpds.agent.listAgents" {
+        let sub = token_sub(&req);
+        return Ok((req, sub));
+    }
     // the caller's own spaces: `did` is a filter (an authority), not whose
     if nsid == "com.atproto.space.listSpaces" && app.is_some_and(|a| a.config.spaces) {
         let sub = token_sub(&req);

@@ -489,7 +489,7 @@ pub const DELETE_POINTS: u32 = 1;
 fn ip_route_limits(path: &str) -> &'static [&'static Limit] {
     match path {
         "/xrpc/com.atproto.sync.getRepo" => &[&GET_REPO],
-        "/xrpc/com.atproto.server.createAccount" => &[&CREATE_ACCOUNT],
+        "/xrpc/com.atproto.server.createAccount" | "/xrpc/vlpds.agent.provision" => &[&CREATE_ACCOUNT],
         "/xrpc/com.atproto.server.deleteAccount" => &[&DELETE_ACCOUNT],
         "/xrpc/com.atproto.server.requestPasswordReset" => &[&REQUEST_PASSWORD_RESET_DAY, &REQUEST_PASSWORD_RESET_HOUR],
         "/xrpc/com.atproto.server.resetPassword" => &[&RESET_PASSWORD],

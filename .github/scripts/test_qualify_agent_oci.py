@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import gzip
 import io
 import json
 import pathlib
@@ -10,7 +11,7 @@ from qualify_agent_oci import REVISION, qualify
 
 
 class QualificationTests(unittest.TestCase):
-    def archive(self, directory, *, wrong_config=False, corrupt_layer=False, duplicate=False, extra_manifest=False, bad_config_media=False, bad_layer_media=False):
+    def archive(self, directory, *, wrong_config=False, corrupt_layer=False, duplicate=False, extra_manifest=False, bad_config_media=False, bad_layer_media=False, wrong_diff_id=False, compressed=False):
         entries = {}
 
         def blob(value, media):
@@ -19,8 +20,10 @@ class QualificationTests(unittest.TestCase):
             entries['blobs/sha256/' + digest] = raw
             return {'digest': 'sha256:' + digest, 'size': len(raw), 'mediaType': media}
 
-        config = blob({'architecture': 'amd64', 'os': 'linux'}, 'application/vnd.oci.image.config.v1+json')
-        layer = blob(b'synthetic layer', 'application/vnd.oci.image.layer.v1.tar')
+        raw_layer = b'synthetic layer'
+        diff_id = 'sha256:' + ('0' * 64 if wrong_diff_id else hashlib.sha256(raw_layer).hexdigest())
+        config = blob({'architecture': 'amd64', 'os': 'linux', 'rootfs': {'type': 'layers', 'diff_ids': [diff_id]}}, 'application/vnd.oci.image.config.v1+json')
+        layer = blob(gzip.compress(raw_layer) if compressed else raw_layer, 'application/vnd.oci.image.layer.v1.tar+gzip' if compressed else 'application/vnd.oci.image.layer.v1.tar')
         if bad_config_media:
             config['mediaType'] = 'application/octet-stream'
         if bad_layer_media:
@@ -52,8 +55,13 @@ class QualificationTests(unittest.TestCase):
             self.assertFalse(result['registryPublished'])
             self.assertEqual(result['archiveSha256'], hashlib.sha256(archive.read_bytes()).hexdigest())
 
+    def test_gzip_layer_binds_uncompressed_rootfs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive, receipt, _ = self.archive(directory, compressed=True)
+            self.assertTrue(qualify(archive, receipt)['capabilityVerified'])
+
     def test_wrong_export_corrupt_layer_duplicate_or_multiple_candidates_deny(self):
-        for option in ['wrong_config', 'corrupt_layer', 'duplicate', 'extra_manifest', 'bad_config_media', 'bad_layer_media']:
+        for option in ['wrong_config', 'corrupt_layer', 'duplicate', 'extra_manifest', 'bad_config_media', 'bad_layer_media', 'wrong_diff_id']:
             with self.subTest(option=option), tempfile.TemporaryDirectory() as directory:
                 archive, receipt, _ = self.archive(directory, **{option: True})
                 with self.assertRaises(ValueError):

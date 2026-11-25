@@ -1,5 +1,6 @@
 """Bind a locally qualified AMD64 image to its OCI archive; never extract or run it."""
 import hashlib
+import gzip
 import json
 import re
 import sys
@@ -65,9 +66,12 @@ def qualify(archive, receipt):
                 or receipt["imageId"] not in {receipt["configDigest"], descriptor["digest"]}
                 or config.get("architecture") != "amd64" or config.get("os") != "linux"):
             raise ValueError("Export differs from qualified image")
-        for layer in manifest["layers"]:
+        diff_ids = config.get("rootfs", {}).get("diff_ids", [])
+        if config.get("rootfs", {}).get("type") != "layers" or len(diff_ids) != len(manifest["layers"]):
+            raise ValueError("Qualified root filesystem required")
+        for layer, diff_id in zip(manifest["layers"], diff_ids):
             if layer.get("mediaType") not in {"application/vnd.oci.image.layer.v1.tar",
-                    "application/vnd.oci.image.layer.v1.tar+gzip", "application/vnd.oci.image.layer.v1.tar+zstd"}:
+                    "application/vnd.oci.image.layer.v1.tar+gzip"}:
                 raise ValueError("OCI layer descriptor required")
             match = DIGEST.fullmatch(layer["digest"])
             if not match:
@@ -79,6 +83,11 @@ def qualify(archive, receipt):
             digest = stream_digest(stream)
             if digest != match[1]:
                 raise ValueError("Layer digest mismatch")
+            stream = tar.extractfile(member)
+            if layer["mediaType"].endswith("+gzip"):
+                stream = gzip.GzipFile(fileobj=stream)
+            if "sha256:" + stream_digest(stream) != diff_id:
+                raise ValueError("Layer differs from qualified root filesystem")
     with open(archive, "rb") as stream:
         archive_digest = stream_digest(stream)
     return {"version": 1, "revision": REVISION, "runtime": "agent-a2a",

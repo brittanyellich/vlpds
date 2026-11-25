@@ -94,7 +94,7 @@ def qualify(archive, receipt):
             "platform": "linux/amd64", "manifestDigest": descriptor["digest"],
             "configDigest": receipt["configDigest"], "imageId": receipt["imageId"],
             "archiveSha256": archive_digest, "capabilityVerified": True,
-            "registryPublished": False}
+            "registryPublished": False, "localVerification": receipt}
 
 
 if __name__ == "__main__":

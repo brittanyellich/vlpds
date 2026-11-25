@@ -53,14 +53,18 @@ jobs:
         run: GITHUB_SHA="$REVISION" node deploy/cloudflare/scripts/verify-artifact.mjs inspect vlpds:exp710-qualification "$RUNNER_TEMP/verified-runtime.json"
       - name: Bind exported OCI config to qualified image and receipt
         run: python3 qualification/.github/scripts/qualify_agent_oci.py "$RUNNER_TEMP/agent-runtime.oci.tar" "$RUNNER_TEMP/verified-runtime.json" "$RUNNER_TEMP/oci-qualification.json"
-      - name: Retain qualified candidate only in GitHub artifacts
+      - name: Retain bounded qualification receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: qualified-agent-runtime-8fb5949-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/agent-runtime.oci.tar
-            ${{ runner.temp }}/verified-runtime.json
-            ${{ runner.temp }}/oci-qualification.json
+          name: agent-runtime-receipt-8fb5949-${{ github.run_id }}
+          path: ${{ runner.temp }}/oci-qualification.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain OCI archive only in GitHub artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: agent-runtime-oci-8fb5949-${{ github.run_id }}
+          path: ${{ runner.temp }}/agent-runtime.oci.tar
           if-no-files-found: error
           retention-days: 7
           compression-level: 0

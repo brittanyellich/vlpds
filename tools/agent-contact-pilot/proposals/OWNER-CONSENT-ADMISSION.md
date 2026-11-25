@@ -1,0 +1,16 @@
+# Default-off owner-consent admission
+
+The existing owner-only native A2A configuration accepts `require_owner_consent`, a boolean that defaults to false. Existing configuration files and `NativeA2a::new` keep legacy behavior. A reviewed operator opt-in sets this field to true, or uses `with_owner_consent()` in trusted server code. Neither creates a consent grant.
+
+When opted in, the CLI derives the consent HTTP transport from the same fixed agent/principal pair and configured caller. Startup rejects absent or mismatched transport pins, and rejects a native instance paired with a consent transport that would ignore consent. Request bodies cannot choose those pins. The normal owner session, active-account checks and private CAS writer remain authoritative. Caller authentication, signed Card, fixed authority, decision quota, retry handling and private HMAC bridge checks remain in place.
+
+Current proof and current private consent are checked before both a cached reply and a fresh decision. A policy change during proof collection denies admission. Revocation after the final policy read can race work already admitted; this does not promise cancellation of an in-flight profile operation. The native admission path supports only the fixed pilot pair. The existing public consent transport remains a reusable, explicitly configured API for trusted embedding applications; standalone mounting does not authorize native contact or impose the pilot pair on those applications.
+
+## Operator recovery choices
+
+- **Reversible pause:** use authenticated per-agent Disable with a unique request ID and current revision. A later fresh Enable is possible only if no terminal revocation or owner shutoff exists. An old enable replay returns its original receipt with current disabled state and cannot restore permission.
+- **Terminal revocation:** RevokeEndorsement and OwnerDisable are one-way in this policy version. Do not use them on a real principal as temporary test cleanup. Restoration needs a separately reviewed, owner-authorized recovery/generation protocol; this change does not implement one.
+- **Emergency stop or runtime rollback:** disable the entire contact mount, preserve private policy/audit state, let the approved lease finish its mandatory OFF path, and revoke the exact temporary execution credential. Do not turn `require_owner_consent` off, delete a policy row, or run an old enabled contact binary to bypass a disabled policy. If rolling back to a binary without admission support, contact must remain off.
+- **Resume:** requalify exact runtime and trust pins, keep admission opted in, verify the persisted policy, and obtain fresh owner action where the current policy permits it. Do not infer restoration from a retry, config rollback, Card response or token change.
+
+No deployment, private configuration edit, credential action, policy reset, live request or durable enablement is authorized by this code change. Live acceptance still requires qualified immutable runtime, current provider baseline and exclusive write window, authenticated readiness, operator/custodian availability and separately approved bounded test/rollback scope. Existing unresolved OFF acknowledgement evidence must be reconciled before another live window.

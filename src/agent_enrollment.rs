@@ -293,6 +293,9 @@ impl OwnerConsentTransport {
         }
         Ok(Self { owner, pairs })
     }
+    pub(crate) fn matches(&self, owner: &str, agent: &str, caller: &str) -> bool {
+        self.owner == owner && self.pairs.iter().any(|(a, c)| a == agent && c == caller)
+    }
     /// Intentionally not merged into the default server router. The embedding
     /// server must supply its ordinary global rate limits and explicit mounting decision.
     pub fn routes(self) -> axum::Router<std::sync::Arc<App>> {

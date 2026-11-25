@@ -393,6 +393,7 @@ pub async fn build(cfg: Config) -> anyhow::Result<Arc<xrpc::App>> {
     );
     if let Some(a2a) = &cfg.agent_a2a {
         a2a.validate(cfg.dev_mode, &cfg.public_url)?;
+        a2a.validate_owner_consent(cfg.agent_owner_consent.as_ref())?;
     }
     if let Some(mount) = &cfg.agent_contact_pilot {
         mount.validate(cfg.dev_mode, &cfg.public_url)?;

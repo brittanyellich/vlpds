@@ -1059,3 +1059,123 @@ async fn owner_consent_normal_router_opt_in_auth_and_revocation() {
         .is_success());
     vlpds::server::shutdown(&s.app).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn normal_library_owner_consent_admission_blocks_cached_reply_and_validates_mount() {
+    use axum::{body::Body, http::Request};
+    use sha2::{Digest, Sha256};
+    use tower::ServiceExt;
+    use vlpds::{
+        agent_a2a::NativeA2a,
+        agent_contact_pilot::AGENT_PATH,
+        agent_endorsement::{AGENT, PRINCIPAL},
+        agent_enrollment::{apply_owner_consent as apply, Action::*, Pair},
+        agent_profile_bridge::Bridge,
+    };
+    let s = TestServer::spawn_lone(|c| {
+        c.workers = 1;
+        c.shards = 1;
+    })
+    .await;
+    let caller = s.create_account("enrollcachecaller").await;
+    // Disposable metadata only: no real fixed DID, signing key or account authority.
+    for (did, handle) in [(AGENT, "syntheticagent.test"), (PRINCIPAL, "syntheticowner.test")] {
+        let partition = s.app.partition(did).unwrap_or_else(|_| panic!("Missing fixture partition"));
+        let account = vlpds::state::Account { did: did.into(), handle: handle.into(), ..Default::default() };
+        partition.db.put(vlpds::state::account_key(did), serde_json::to_vec(&account).unwrap()).await.unwrap();
+    }
+    let cfg =
+        NativeA2a::new(&s.url, &caller.did, Bridge::new("http://127.0.0.1:19099", vec![1; 32]).unwrap(), true).unwrap();
+    let legacy = cfg.clone().routes(s.app.clone());
+    let gated = cfg.clone().with_owner_consent().routes(s.app.clone());
+    let aud = s.pds_did().await;
+    let token = s
+        .xrpc
+        .get(
+            "com.atproto.server.getServiceAuth",
+            &[("aud", aud.as_str()), ("lxm", "chat.atagents.agent.contact")],
+            &caller.auth(),
+        )
+        .await
+        .ok()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let event = "cached-enrollment";
+    let digest = hex::encode(Sha256::digest(
+        serde_json::to_vec(
+            &json!({"messageId":event,"skillId":"resolve-identity-test","agentDid":AGENT,"principalDid":PRINCIPAL}),
+        )
+        .unwrap(),
+    ));
+    let Reservation::Fresh { row, pending } =
+        reserve(&s.app, AGENT, &caller.did, event, &digest, 100).await.map_err(|e| e.message).unwrap()
+    else {
+        panic!("fresh")
+    };
+    finish(&s.app, AGENT, &row, pending, &json!({"jsonrpc":"2.0","id":"cached","result":{"fixture":"cached-only"}}))
+        .await
+        .map_err(|e| e.message)
+        .unwrap();
+    let body=serde_json::to_vec(&json!({"jsonrpc":"2.0","id":"request","method":"SendMessage","params":{"message":{"messageId":event,"role":"ROLE_USER","parts":[{"data":{"skillId":"resolve-identity-test","agentDid":AGENT,"principalDid":PRINCIPAL}}]}}})).unwrap();
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri(AGENT_PATH)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .header("a2a-version", "1.0")
+            .body(Body::from(body.clone()))
+            .unwrap()
+    };
+    assert_eq!(legacy.clone().oneshot(request()).await.unwrap().status(), 200);
+    assert_eq!(gated.clone().oneshot(request()).await.unwrap().status(), 403);
+    // Only this disposable server issues this synthetic principal session; no live identity authority.
+    let owner = s.app.jwt.access(PRINCIPAL);
+    let pairs = [Pair { agent: AGENT, caller: &caller.did }];
+    let enabled = enrollment_op("consent", Some(AGENT), Enable, 0);
+    apply(&s.app, &owner, PRINCIPAL, &pairs, &enabled).await.map_err(|e| e.message).unwrap();
+    apply(&s.app, &owner, PRINCIPAL, &pairs, &enrollment_op("disable", Some(AGENT), Disable, 1))
+        .await
+        .map_err(|e| e.message)
+        .unwrap();
+    assert_eq!(gated.clone().oneshot(request()).await.unwrap().status(), 403);
+    assert!(!apply(&s.app, &owner, PRINCIPAL, &pairs, &enabled).await.map_err(|e| e.message).unwrap().enabled);
+    apply(&s.app, &owner, PRINCIPAL, &pairs, &enrollment_op("off", None, OwnerDisable, 2))
+        .await
+        .map_err(|e| e.message)
+        .unwrap();
+    assert_eq!(gated.oneshot(request()).await.unwrap().status(), 403);
+    assert_eq!(
+        legacy.oneshot(request()).await.unwrap().status(),
+        200,
+        "Local opt-in does not change legacy pilot semantics"
+    );
+    assert!(cfg.owner_consent_transport().unwrap().is_none(), "Legacy opt-in remains unchanged");
+    let guarded = cfg.with_owner_consent();
+    assert!(guarded.validate(false, &s.url).is_err(), "Admission cannot bypass production Card/HTTPS");
+    let mut config = (*s.app.config).clone();
+    config.agent_a2a = Some(guarded.clone());
+    config.agent_owner_consent = None;
+    let refused = vlpds::server::build(config.clone()).await.err().expect("Missing consent transport rejected");
+    assert!(refused.to_string().contains("matching server-owned consent transport pins"));
+    config.agent_owner_consent = Some(
+        vlpds::agent_enrollment::OwnerConsentTransport::new(
+            PRINCIPAL.into(),
+            vec![(AGENT.into(), "did:web:wrong.example.invalid".into())],
+        )
+        .unwrap_or_else(|e| panic!("{}", e.message)),
+    );
+    assert!(vlpds::server::build(config.clone()).await.is_err());
+    config.agent_owner_consent = guarded.owner_consent_transport().unwrap();
+    let mut misleading = config.clone();
+    // A separate unguarded native instance must not advertise a consent control plane.
+    misleading.agent_a2a = Some(
+        NativeA2a::new(&s.url, &caller.did, Bridge::new("http://127.0.0.1:19099", vec![1; 32]).unwrap(), true).unwrap(),
+    );
+    let refused = vlpds::server::build(misleading).await.err().expect("Consent cannot be ignored");
+    assert!(refused.to_string().contains("must require owner consent"));
+    let app = vlpds::server::build(config).await.unwrap();
+    vlpds::server::shutdown(&app).await;
+    vlpds::server::shutdown(&s.app).await;
+}

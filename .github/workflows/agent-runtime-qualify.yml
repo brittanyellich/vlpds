@@ -1,0 +1,66 @@
+name: Qualify pinned agent runtime (build only)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: exp710-build-only-8fb5949
+  cancel-in-progress: false
+jobs:
+  qualify:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      REVISION: 8fb5949c400018146ef58e594697859403c0d247
+      RUNTIME: agent-a2a
+    steps:
+      - name: Read reviewed qualification tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: qualification
+          persist-credentials: false
+      - name: Read immutable candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 8fb5949c400018146ef58e594697859403c0d247
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.12.1'
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: Verify source and exporter contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$REVISION"
+          test "$(git -C candidate rev-parse 'HEAD^{tree}')" = 1259458a9dd19d4f03173005951846424d7bb766
+          test -z "$(git -C candidate status --porcelain)"
+          python3 -m unittest discover -s qualification/.github/scripts -p 'test_qualify_agent_oci.py'
+      - name: Build local AMD64 image and OCI archive without publication
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64 \
+            --build-arg VLPDS_RUNTIME_STAGE=agent-a2a --build-arg VLPDS_GIT_REV="$REVISION" \
+            --provenance=false --sbom=false \
+            --output "type=docker,name=vlpds:exp710-qualification" \
+            --output "type=oci,dest=$RUNNER_TEMP/agent-runtime.oci.tar" .
+      - name: Qualify immutable local image with network-denied synthetic smoke
+        working-directory: candidate
+        run: GITHUB_SHA="$REVISION" node deploy/cloudflare/scripts/verify-artifact.mjs inspect vlpds:exp710-qualification "$RUNNER_TEMP/verified-runtime.json"
+      - name: Bind exported OCI config to qualified image and receipt
+        run: python3 qualification/.github/scripts/qualify_agent_oci.py "$RUNNER_TEMP/agent-runtime.oci.tar" "$RUNNER_TEMP/verified-runtime.json" "$RUNNER_TEMP/oci-qualification.json"
+      - name: Retain qualified candidate only in GitHub artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: qualified-agent-runtime-8fb5949-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/agent-runtime.oci.tar
+            ${{ runner.temp }}/verified-runtime.json
+            ${{ runner.temp }}/oci-qualification.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

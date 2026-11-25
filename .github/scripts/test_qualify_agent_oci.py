@@ -1,0 +1,82 @@
+import copy
+import hashlib
+import io
+import json
+import pathlib
+import tarfile
+import tempfile
+import unittest
+from qualify_agent_oci import REVISION, qualify
+
+
+class QualificationTests(unittest.TestCase):
+    def archive(self, directory, *, wrong_config=False, corrupt_layer=False, duplicate=False, extra_manifest=False):
+        entries = {}
+
+        def blob(value, media):
+            raw = json.dumps(value).encode() if isinstance(value, dict) else value
+            digest = hashlib.sha256(raw).hexdigest()
+            entries['blobs/sha256/' + digest] = raw
+            return {'digest': 'sha256:' + digest, 'size': len(raw), 'mediaType': media}
+
+        config = blob({'architecture': 'amd64', 'os': 'linux'}, 'application/vnd.oci.image.config.v1+json')
+        layer = blob(b'synthetic layer', 'application/vnd.oci.image.layer.v1.tar')
+        manifest = blob({'schemaVersion': 2, 'config': config, 'layers': [layer]}, 'application/vnd.oci.image.manifest.v1+json')
+        entries['oci-layout'] = b'{"imageLayoutVersion":"1.0.0"}'
+        entries['index.json'] = json.dumps({'schemaVersion': 2, 'manifests': [manifest] * (2 if extra_manifest else 1)}).encode()
+        if corrupt_layer:
+            entries['blobs/sha256/' + layer['digest'][7:]] = b'corrupted layer'
+        archive = pathlib.Path(directory) / 'candidate.tar'
+        with tarfile.open(archive, 'w') as tar:
+            for name, raw in entries.items():
+                info = tarfile.TarInfo(name); info.size = len(raw)
+                tar.addfile(info, io.BytesIO(raw))
+            if duplicate:
+                info = tarfile.TarInfo('index.json'); info.size = len(entries['index.json'])
+                tar.addfile(info, io.BytesIO(entries['index.json']))
+        receipt = {'version': 1, 'revision': REVISION, 'runtime': 'agent-a2a', 'platform': 'linux/amd64',
+                   'capabilityVerified': True, 'configDigest': 'sha256:' + '0' * 64 if wrong_config else config['digest'],
+                   'imageId': config['digest']}
+        return archive, receipt, manifest
+
+    def test_exact_export_binds_qualified_config_and_streamed_layers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive, receipt, manifest = self.archive(directory)
+            result = qualify(archive, receipt)
+            self.assertEqual(result['manifestDigest'], manifest['digest'])
+            self.assertEqual(result['configDigest'], receipt['configDigest'])
+            self.assertFalse(result['registryPublished'])
+            self.assertEqual(result['archiveSha256'], hashlib.sha256(archive.read_bytes()).hexdigest())
+
+    def test_wrong_export_corrupt_layer_duplicate_or_multiple_candidates_deny(self):
+        for option in ['wrong_config', 'corrupt_layer', 'duplicate', 'extra_manifest']:
+            with self.subTest(option=option), tempfile.TemporaryDirectory() as directory:
+                archive, receipt, _ = self.archive(directory, **{option: True})
+                with self.assertRaises(ValueError):
+                    qualify(archive, receipt)
+
+    def test_unqualified_wrong_revision_runtime_or_platform_deny(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive, receipt, _ = self.archive(directory)
+            for key, value in [('revision', '0' * 40), ('runtime', 'pds-runtime'), ('platform', 'linux/arm64'), ('capabilityVerified', False)]:
+                bad = copy.deepcopy(receipt); bad[key] = value
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    qualify(archive, bad)
+
+    def test_manual_workflow_never_requests_provider_or_registry_writes(self):
+        source = (pathlib.Path(__file__).parent.parent / 'workflows/agent-runtime-qualify.yml').read_text()
+        self.assertIn('workflow_dispatch:', source)
+        self.assertNotIn('pull_request:', source)
+        self.assertNotIn('push:', source)
+        self.assertNotIn('secrets.', source)
+        self.assertNotIn('environment:', source)
+        self.assertNotIn('packages: write', source)
+        self.assertIn('contents: read', source)
+        self.assertIn('ref: ' + REVISION, source)
+        self.assertIn('--build-arg VLPDS_RUNTIME_STAGE=agent-a2a', source)
+        self.assertIn('type=oci,dest=', source)
+        self.assertNotIn('--push', source)
+
+
+if __name__ == '__main__':
+    unittest.main()

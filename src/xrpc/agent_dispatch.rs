@@ -28,13 +28,13 @@ pub struct Binding {
 }
 
 #[derive(Deserialize, PartialEq, Eq, Serialize)]
-enum Row {
+pub(super) enum Row {
     Approved(Binding),
     Revoked,
 }
 
 impl Grant<'_> {
-    fn row(self) -> XResult<String> {
+    pub(super) fn row(self) -> XResult<String> {
         let fields = [self.issuer, self.resource, self.id];
         if fields.into_iter().any(|field| field.is_empty() || field.len() > 2048 || field.chars().any(char::is_control))
             || !vlatproto::syntax::valid_did(self.owner)
@@ -48,7 +48,7 @@ impl Grant<'_> {
     }
 }
 
-fn encode(row: &Row) -> XResult<Bytes> {
+pub(super) fn encode(row: &Row) -> XResult<Bytes> {
     serde_json::to_vec(row).map(Bytes::from).map_err(XrpcError::from_err)
 }
 
@@ -59,19 +59,25 @@ async fn verify_owner(app: &App, owner_session: &Credentials, grant: Grant<'_>) 
     Ok(())
 }
 
+pub(super) async fn verify_binding(app: &App, owner: &str, binding: &Binding) -> XResult<()> {
+    if !vlatproto::syntax::parse_space_uri(&binding.space)
+        .is_some_and(|uri| uri.authority == owner && uri.record.is_none())
+    {
+        return Err(XrpcError::bad("InvalidDispatchSpace", "Expected a Space governed by the owner"));
+    }
+    if !binding_is_verified(app, owner, &binding.agent).await {
+        return Err(XrpcError::bad("AgentBindingUnavailable", "Verified owner-agent binding is unavailable"));
+    }
+
+    Ok(())
+}
+
 /// Record owner consent for an immutable pair and Space. Repeat approval of
 /// the same mapping is idempotent. A revoked grant ID cannot be reused.
 pub async fn approve(app: &App, owner_session: &Credentials, grant: Grant<'_>, binding: Binding) -> XResult<()> {
     verify_owner(app, owner_session, grant).await?;
     let row = grant.row()?;
-    if !vlatproto::syntax::parse_space_uri(&binding.space)
-        .is_some_and(|uri| uri.authority == grant.owner && uri.record.is_none())
-    {
-        return Err(XrpcError::bad("InvalidDispatchSpace", "Expected a Space governed by the owner"));
-    }
-    if !binding_is_verified(app, grant.owner, &binding.agent).await {
-        return Err(XrpcError::bad("AgentBindingUnavailable", "Verified owner-agent binding is unavailable"));
-    }
+    verify_binding(app, grant.owner, &binding).await?;
 
     let bytes = encode(&Row::Approved(binding))?;
     let written =

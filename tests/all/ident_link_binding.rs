@@ -9,6 +9,7 @@ use vlpds::agent_endorsement::{verify_pair, Outcome, TrustedSnapshot};
 use vlpds::plc::{mock::MockPlc, PlcConfig, RotationKey};
 use vlpds::xrpc::agent_binding::{observe, PairStatus};
 
+mod grant_recovery;
 mod signed_dispatch;
 
 const COLLECTION: &str = "link.ident.endorsement";
@@ -273,6 +274,8 @@ async fn ident_link_binding_requires_both_consents_and_either_party_can_revoke()
     let foreign_filter = s.xrpc.get(LIST, &[("did", &bob.did)], &Auth::Bearer(alice.jwt.clone())).await.ok();
     assert_eq!(foreign_filter["agents"], listed_agent(&agent));
 
+    let recovery_issuer = grant_recovery::before_restart(&s, &alice, &agent, &bob).await;
+
     let bridge = signed_dispatch::Bridge::start(&s, &plc).await;
     let alice_binding = signed_dispatch::Bridge::approve(&s, &alice, &agent, "alice").await;
     let bob_binding = signed_dispatch::Bridge::approve(&s, &bob, &bob_agent, "bob").await;
@@ -370,6 +373,7 @@ async fn ident_link_binding_requires_both_consents_and_either_party_can_revoke()
     assert!(vlpds::server::shutdown_gracefully(&s.app, std::time::Duration::from_secs(5)).await);
     drop((bridge, srv, s));
     let restarted = node(&plc, rotation_key, store, "ident-restarted").await;
+    grant_recovery::after_restart(&restarted, &alice, recovery_issuer).await;
     assert_eq!(agents(&restarted, &alice).await, json!([]));
     assert_eq!(agents(&restarted, &bob).await, listed_agent(&bob_agent));
     if let Some([alice_grant, bob_grant]) = worker_grants {

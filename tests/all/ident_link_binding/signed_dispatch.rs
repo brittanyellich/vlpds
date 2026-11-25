@@ -1,13 +1,14 @@
 use super::*;
-use axum::{body::Bytes, extract::DefaultBodyLimit, http::HeaderMap, routing::post, Json, Router};
+use axum::{response::IntoResponse, Json};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
 use sha2::{Digest, Sha256};
 use std::future::Future;
-use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
+use tokio::sync::Notify;
 use vlatproto::crypto::Purpose;
 use vlpds::xrpc::{
     agent_dispatch::{approve, revoke, Binding, Grant},
-    agent_dispatch_auth::{admit, Authority, MAX_BODY_BYTES, METHOD},
+    agent_dispatch_auth::{MAX_BODY_BYTES, METHOD},
+    agent_dispatch_route::Mount,
     authn::authenticate,
     cas::set_pause_hook,
 };
@@ -22,17 +23,10 @@ pub(super) struct Bridge {
     audience: String,
     url: String,
     client: reqwest::Client,
-    task: JoinHandle<()>,
-}
-
-impl Drop for Bridge {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
 }
 
 impl Bridge {
-    pub(super) async fn start(s: &TestServer, plc: &MockPlc) -> Self {
+    pub(super) async fn prepare(plc: &MockPlc) -> Self {
         let key = Keypair::generate();
         let operation = vlpds::plc::sign(
             json!({
@@ -57,30 +51,32 @@ impl Bridge {
             .status()
             .is_success());
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/xrpc/{METHOD}", listener.local_addr().unwrap());
-        let app = s.app.clone();
-        let trusted = signer.clone();
-        let router = Router::new()
-            .route(
-                &format!("/xrpc/{METHOD}"),
-                post(move |headers: HeaderMap, body: Bytes| {
-                    let (app, signer) = (app.clone(), trusted.clone());
-                    async move {
-                        let token = headers
-                            .get("authorization")
-                            .and_then(|h| h.to_str().ok())
-                            .and_then(|h| h.strip_prefix("Bearer "))
-                            .ok_or_else(|| vlatproto::xrpc::XrpcError::auth("Missing dispatch assertion"))?;
-                        admit(&app, &Authority { signer: &signer, issuer: ISSUER, resource: RESOURCE }, token, &body)
-                            .await
-                            .map(Json)
-                    }
-                }),
-            )
-            .layer(DefaultBodyLimit::max(MAX_BODY_BYTES));
-        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        Self { key, signer, audience: s.pds_did().await, url, client, task }
+        Self { key, signer, audience: String::new(), url: String::new(), client }
+    }
+
+    pub(super) fn mount(&self) -> Mount {
+        Mount::new(&self.signer, ISSUER, RESOURCE, |binding, body| async move {
+            assert_eq!(body.as_ref(), BODY);
+            Json(binding).into_response()
+        })
+        .unwrap()
+    }
+
+    pub(super) async fn connect(&mut self, s: &TestServer) {
+        self.audience = s.pds_did().await;
+        self.url = format!("{}/xrpc/{METHOD}", s.url);
+    }
+
+    pub(super) async fn check_default_off(&self, s: &TestServer) {
+        let target = format!("{}/xrpc/{METHOD}", s.url);
+        for request in [
+            self.client.post(&target),
+            self.client.post(&target).header("atproto-proxy", "did:web:elsewhere.invalid#service"),
+        ] {
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status(), 501);
+            assert_eq!(response.json::<J>().await.unwrap()["error"], "MethodNotImplemented");
+        }
     }
 
     fn claims(&self, owner: &Account, id: &str) -> J {
@@ -117,8 +113,35 @@ impl Bridge {
 
     pub(super) async fn check_denials(&self, owner: &Account, other: &Account, binding: &Binding) {
         let token = Self::sign(&self.key, &self.claims(owner, "alice"));
+        assert_eq!(self.client.get(&self.url).send().await.unwrap().status(), 400);
+        assert_eq!(self.client.post(&self.url).body(vec![0; MAX_BODY_BYTES + 1]).send().await.unwrap().status(), 413);
+        assert_eq!(
+            self.client
+                .post(format!("{}?other=1", self.url))
+                .bearer_auth(&token)
+                .body(BODY)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        assert_eq!(
+            self.client
+                .post(&self.url)
+                .bearer_auth(&token)
+                .header("origin", ISSUER)
+                .body(BODY)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
         assert_eq!(self.send(&token, b"different request").await.status(), 401);
-        assert_eq!(self.send(&token, BODY).await.json::<Binding>().await.unwrap(), *binding);
+        let response = self.send(&token, BODY).await;
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.json::<Binding>().await.unwrap(), *binding);
         assert_eq!(self.send(&token, BODY).await.status(), 401);
         let other_key = Keypair::generate();
         for (field, value, key) in [
@@ -196,4 +219,34 @@ async fn owner_credentials(s: &TestServer, owner: &Account) -> vlpds::xrpc::auth
         .unwrap()
         .into_parts();
     authenticate(&s.app, &parts).await.unwrap_or_else(|e| panic!("{}", e.message))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn signed_dispatch_authentication_is_behind_global_ip_limit() {
+    let mount = Mount::new("did:web:signer.example.invalid", ISSUER, RESOURCE, |_, _| async {
+        panic!("unsigned request reached the dispatch consumer")
+    })
+    .unwrap();
+    let s = TestServer::spawn_lone(move |config| {
+        config.spaces = true;
+        config.rate_limits_enabled = true;
+        config.agent_dispatch = Some(mount);
+    })
+    .await;
+    s.xrpc
+        .post(
+            "vlpds.admin.updateRateLimits",
+            &json!({
+                "config": {"limiters": {"global-ip": {"points": 1, "windowSecs": 3600}}},
+                "ifVersion": 0, "actor": "synthetic-fixture",
+            }),
+            &Auth::Admin,
+        )
+        .await
+        .ok();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("{}/xrpc/{METHOD}", s.url);
+    for status in [401, 429] {
+        assert_eq!(client.post(&url).send().await.unwrap().status(), status);
+    }
 }

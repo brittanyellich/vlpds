@@ -22,6 +22,8 @@ pub struct Config {
     pub agent_a2a: Option<crate::agent_a2a::NativeA2a>,
     /// Explicit server-owned owner-consent mount; None keeps the method unsupported.
     pub agent_owner_consent: Option<crate::agent_enrollment::OwnerConsentTransport>,
+    /// Optional signed MCP transport. Requires an embedding tool handler.
+    pub agent_dispatch: Option<crate::xrpc::agent_dispatch_route::Mount>,
     pub handle_domain: String,
     pub service_did: String,
     pub jwt_secret: String,
@@ -276,6 +278,7 @@ impl Default for Config {
             agent_contact_pilot: None,
             agent_a2a: None,
             agent_owner_consent: None,
+            agent_dispatch: None,
             handle_domain: "vlpds.test".into(),
             service_did: "did:web:localhost".into(),
             jwt_secret: DEV_JWT_SECRET.into(),
@@ -383,6 +386,7 @@ impl Default for Config {
 }
 
 pub async fn build(cfg: Config) -> anyhow::Result<Arc<xrpc::App>> {
+    anyhow::ensure!(cfg.agent_dispatch.is_none() || cfg.spaces, "MCP dispatch requires Spaces");
     anyhow::ensure!(
         cfg.agent_a2a.is_none() || cfg.agent_contact_pilot.is_none(),
         "Choose native A2A or dev pilot, not both"
@@ -757,7 +761,12 @@ const PEER_ONLY_HEADERS: [&str; 5] = [
 /// before anything reads them: a forwarded marker is served as the client
 /// request it is, and `x-vlpds-internal` doesn't skip rate limits.
 pub fn public_router(app: &Arc<xrpc::App>) -> axum::Router {
-    router(app).layer(axum::middleware::from_fn(
+    let router = router(app);
+    let router = match &app.config.agent_dispatch {
+        Some(mount) => router.merge(xrpc::with_http_layers(mount.routes(app.clone()), app)),
+        None => router,
+    };
+    router.layer(axum::middleware::from_fn(
         |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
             let p = req.uri().path();
             if p == "/internal" || p.starts_with("/internal/") {

@@ -8,6 +8,7 @@ mod admin_tools;
 pub mod agent_binding;
 pub mod agent_dispatch;
 pub mod agent_dispatch_auth;
+pub mod agent_dispatch_route;
 pub mod agent_grant_recovery;
 pub mod agent_provisioning;
 mod appview_override;
@@ -363,6 +364,12 @@ pub fn router(app: Arc<App>) -> Router {
     federated::start(&app);
     theme::start(&app);
     let r = oauth::with_dpop_layer(r, &app);
+    with_http_layers(r, &app).with_state(app)
+}
+
+/// Shared XRPC HTTP policy. Signed dispatch stays outside request decoding
+/// because it authenticates the exact bytes handed to its consumer.
+pub(crate) fn with_http_layers<S: Clone + Send + Sync + 'static>(r: Router<S>, app: &App) -> Router<S> {
     let r = if app.config.rate_limits_enabled {
         let limiter = app.ratelimit.clone();
         r.layer(axum::middleware::from_fn_with_state(limiter, crate::ratelimit::layer))
@@ -376,7 +383,6 @@ pub fn router(app: Arc<App>) -> Router {
             JsonOrCar,
         )))
         .layer(axum::middleware::from_fn(cors))
-        .with_state(app)
 }
 
 /// Compress only JSON and CAR bodies (reference `compression()` filter with

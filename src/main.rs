@@ -1526,6 +1526,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         public_url: args.public_url.clone(),
         // Programmatic opt-in only; CLI keeps owner consent unmounted.
         agent_owner_consent: None,
+        agent_dispatch: None,
         agent_a2a: args
             .agent_a2a_config
             .as_ref()

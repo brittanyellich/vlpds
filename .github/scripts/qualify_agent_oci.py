@@ -19,11 +19,24 @@ def stream_digest(stream):
     return digest.hexdigest()
 
 
+def load_receipt(path):
+    with open(path, "rb") as source:
+        raw = source.read(8193)
+    if len(raw) > 8192:
+        raise ValueError("Receipt byte limit")
+    return json.loads(raw)
+
+
 def qualify(archive, receipt):
-    if (receipt.get("version") != 1 or receipt.get("revision") != REVISION
+    fields = {"version", "revision", "runtime", "platform", "capabilityVerified",
+              "configDigest", "imageId", "dockerClientVersion"}
+    if (type(receipt) is not dict or set(receipt) != fields
+            or type(receipt.get("version")) is not int or receipt.get("version") != 1 or receipt.get("revision") != REVISION
             or receipt.get("runtime") != "agent-a2a"
             or receipt.get("platform") != "linux/amd64"
             or receipt.get("capabilityVerified") is not True
+            or not isinstance(receipt.get("dockerClientVersion"), str)
+            or not re.fullmatch(r"[0-9]{2,3}\.[0-9]{1,3}\.[0-9]{1,3}(?:[-+][A-Za-z0-9.-]{1,32})?", receipt["dockerClientVersion"])
             or not DIGEST.fullmatch(receipt.get("configDigest", ""))
             or not DIGEST.fullmatch(receipt.get("imageId", ""))):
         raise ValueError("Qualification receipt refused")
@@ -98,7 +111,9 @@ def qualify(archive, receipt):
 
 
 if __name__ == "__main__":
-    report = qualify(sys.argv[1], json.load(open(sys.argv[2])))
+    report = qualify(sys.argv[1], load_receipt(sys.argv[2]))
+    encoded = json.dumps(report, indent=2) + "\n"
+    if len(encoded.encode("utf-8")) > 8192:
+        raise ValueError("Output receipt byte limit")
     with open(sys.argv[3], "x") as output:
-        json.dump(report, output, indent=2)
-        output.write("\n")
+        output.write(encoded)

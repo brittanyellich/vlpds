@@ -7,7 +7,7 @@ import pathlib
 import tarfile
 import tempfile
 import unittest
-from qualify_agent_oci import REVISION, qualify
+from qualify_agent_oci import REVISION, qualify, load_receipt
 
 
 class QualificationTests(unittest.TestCase):
@@ -42,7 +42,7 @@ class QualificationTests(unittest.TestCase):
                 info = tarfile.TarInfo('index.json'); info.size = len(entries['index.json'])
                 tar.addfile(info, io.BytesIO(entries['index.json']))
         receipt = {'version': 1, 'revision': REVISION, 'runtime': 'agent-a2a', 'platform': 'linux/amd64',
-                   'capabilityVerified': True, 'configDigest': 'sha256:' + '0' * 64 if wrong_config else config['digest'],
+                   'capabilityVerified': True, 'dockerClientVersion': '28.0.0', 'configDigest': 'sha256:' + '0' * 64 if wrong_config else config['digest'],
                    'imageId': config['digest']}
         return archive, receipt, manifest
 
@@ -74,6 +74,17 @@ class QualificationTests(unittest.TestCase):
                 bad = copy.deepcopy(receipt); bad[key] = value
                 with self.subTest(key=key), self.assertRaises(ValueError):
                     qualify(archive, bad)
+
+    def test_receipt_size_and_unknown_fields_refuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive, receipt, _ = self.archive(directory)
+            receipt['extra'] = 'unexpected'
+            with self.assertRaises(ValueError):
+                qualify(archive, receipt)
+            path = pathlib.Path(directory) / 'receipt.json'
+            path.write_bytes(b' ' * 8193)
+            with self.assertRaises(ValueError):
+                load_receipt(path)
 
     def test_manual_workflow_never_requests_provider_or_registry_writes(self):
         source = (pathlib.Path(__file__).parent.parent / 'workflows/agent-runtime-qualify.yml').read_text()

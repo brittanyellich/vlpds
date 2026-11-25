@@ -164,6 +164,7 @@ mod spaces_blobs;
 mod spaces_console;
 mod spaces_e2e;
 mod spaces_host;
+mod spaces_mcp_chat;
 mod spaces_scopes;
 mod spaces_side;
 mod spaces_sync;

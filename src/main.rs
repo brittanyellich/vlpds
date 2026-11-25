@@ -1524,6 +1524,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
         vlpds::xrpc::blobs::size_flags(args.max_blob_mb, args.max_blob_override_mb)?;
     let cfg = Config {
         public_url: args.public_url.clone(),
+        // Programmatic opt-in only; CLI keeps owner consent unmounted.
+        agent_owner_consent: None,
         agent_dispatch: None,
         agent_a2a: args
             .agent_a2a_config

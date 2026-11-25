@@ -326,6 +326,10 @@ pub fn router(app: Arc<App>) -> Router {
                     false => Router::new(),
                 }),
         ))
+        .merge(match &app.config.agent_owner_consent {
+            Some(consent) => consent.clone().routes(),
+            None => Router::new(),
+        })
         .merge(proxy::routes())
         .merge(oauth::routes())
         .merge(federated::routes())

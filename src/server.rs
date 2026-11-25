@@ -20,6 +20,8 @@ pub struct Config {
     pub agent_contact_pilot: Option<crate::agent_contact_pilot::Mount>,
     /// Explicit native A2A opt-in; absent keeps all production agent routes off.
     pub agent_a2a: Option<crate::agent_a2a::NativeA2a>,
+    /// Explicit server-owned owner-consent mount; None keeps the method unsupported.
+    pub agent_owner_consent: Option<crate::agent_enrollment::OwnerConsentTransport>,
     /// Optional signed MCP transport. Requires an embedding tool handler.
     pub agent_dispatch: Option<crate::xrpc::agent_dispatch_route::Mount>,
     pub handle_domain: String,
@@ -275,6 +277,7 @@ impl Default for Config {
             public_url: "http://localhost:2583".into(),
             agent_contact_pilot: None,
             agent_a2a: None,
+            agent_owner_consent: None,
             agent_dispatch: None,
             handle_domain: "vlpds.test".into(),
             service_did: "did:web:localhost".into(),

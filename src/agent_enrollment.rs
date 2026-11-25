@@ -1,4 +1,4 @@
-//! Internal owner-consent writer. No HTTP endpoint or provisioning operation.
+//! Owner-consent CAS writer and explicitly constructed, default-unmounted HTTP transport.
 use crate::{
     agent_admission::Consent,
     xrpc::{
@@ -270,4 +270,49 @@ mod tests {
         };
         assert!(serde_json::to_vec(&policy).unwrap().len() - before < SHUTDOWN_RESERVE);
     }
+}
+
+/// Server-owned trust pins for an opt-in consent transport. No request may select
+/// an owner or caller. Constructing this value does not mount a route or enable contact.
+#[derive(Clone)]
+pub struct OwnerConsentTransport {
+    owner: String,
+    pairs: Vec<(String, String)>,
+}
+impl OwnerConsentTransport {
+    pub fn new(owner: String, pairs: Vec<(String, String)>) -> XResult<Self> {
+        let unique: std::collections::HashSet<_> = pairs.iter().map(|(agent, _)| agent).collect();
+        if !vlatproto::syntax::valid_did(&owner)
+            || pairs.len() > 128
+            || unique.len() != pairs.len()
+            || pairs.iter().any(|(agent, caller)| {
+                !vlatproto::syntax::valid_did(agent) || !vlatproto::syntax::valid_did(caller) || agent == &owner
+            })
+        {
+            return Err(denied("Invalid server consent transport pins"));
+        }
+        Ok(Self { owner, pairs })
+    }
+    /// Intentionally not merged into the default server router. The embedding
+    /// server must supply its ordinary global rate limits and explicit mounting decision.
+    pub fn routes(self) -> axum::Router<std::sync::Arc<App>> {
+        axum::Router::new()
+            .route("/xrpc/chat.atagents.agent.applyConsent", axum::routing::post(owner_consent_http))
+            .layer(axum::extract::DefaultBodyLimit::max(4096))
+            .layer(axum::Extension(std::sync::Arc::new(self)))
+    }
+}
+async fn owner_consent_http(
+    axum::extract::State(app): axum::extract::State<std::sync::Arc<App>>,
+    axum::Extension(config): axum::Extension<std::sync::Arc<OwnerConsentTransport>>,
+    crate::xrpc::authn::Auth(credentials): crate::xrpc::authn::Auth,
+    operation: Result<axum::Json<Operation>, axum::extract::rejection::JsonRejection>,
+) -> XResult<axum::Json<Decision>> {
+    let axum::Json(operation) = operation.map_err(|error| XrpcError {
+        status: error.status(),
+        error: "InvalidRequest".into(),
+        message: "Expected bounded consent JSON".into(),
+    })?;
+    let pairs: Vec<_> = config.pairs.iter().map(|(agent, caller)| Pair { agent, caller }).collect();
+    apply_authenticated(&app, &credentials, &config.owner, &pairs, &operation).await.map(axum::Json)
 }

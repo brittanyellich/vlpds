@@ -845,3 +845,89 @@ async fn native_owner_consent_shutdown_survives_capacity_and_reopen() {
     assert!(result.replay && result.owner_disabled && !result.enabled);
     vlpds::server::shutdown(&reopened.app).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_consent_http_auth_scope_retries_and_default_absence() {
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
+    use tower::ServiceExt;
+    use vlpds::agent_enrollment::OwnerConsentTransport;
+    let s = TestServer::spawn_lone(|c| {
+        c.workers = 1;
+        c.shards = 1;
+    })
+    .await;
+    let owner = s.create_account("consenthttpowner").await;
+    let other = s.create_account("consenthttpother").await;
+    let agent = s.create_account("consenthttpagent").await;
+    let token = enrollment_owner_token(&s, &owner.access).await;
+    let foreign = enrollment_owner_token(&s, &other.access).await;
+    let path = "/xrpc/chat.atagents.agent.applyConsent";
+    assert_eq!(reqwest::Client::new().post(format!("{}{path}", s.url)).send().await.unwrap().status(), 501);
+    assert!(OwnerConsentTransport::new("invalid".into(), vec![]).is_err());
+    assert!(OwnerConsentTransport::new(owner.did.clone(), vec![(agent.did.clone(), owner.did.clone()); 2]).is_err());
+    let router = OwnerConsentTransport::new(owner.did.clone(), vec![(agent.did.clone(), owner.did.clone())])
+        .unwrap_or_else(|e| panic!("{}", e.message))
+        .routes()
+        .with_state(s.app.clone());
+    let call = |token: String, body: J| {
+        let router = router.clone();
+        async move {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body: J = serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+            (status, body)
+        }
+    };
+    let enable = json!({"request_id":"enable","agent":agent.did,"action":"Enable","revision":0});
+    assert!(!call(foreign, enable.clone()).await.0.is_success());
+    assert!(!call(String::new(), enable.clone()).await.0.is_success());
+    let app_pass = s.app.jwt.issue_with_jti(&owner.did, "com.atproto.appPassPrivileged", 60, "at+jwt", None);
+    assert!(!call(app_pass, enable.clone()).await.0.is_success());
+    let mut injected = enable.clone();
+    injected["owner"] = json!(other.did);
+    assert!(!call(token.clone(), injected).await.0.is_success());
+    let mut oversized = enable.clone();
+    oversized["request_id"] = json!("x".repeat(5000));
+    assert_eq!(call(token.clone(), oversized).await.0, 413);
+    let (status, first) = call(token.clone(), enable.clone()).await;
+    assert!(status.is_success());
+    assert_eq!(first["enabled"], true);
+    let (_, retry) = call(token.clone(), enable.clone()).await;
+    assert_eq!(retry["replay"], true);
+    assert_eq!(first["receipt"], retry["receipt"]);
+    let (_, disabled) =
+        call(token.clone(), json!({"request_id":"disable","agent":agent.did,"action":"Disable","revision":1})).await;
+    assert_eq!(disabled["enabled"], false);
+    let (_, stale_retry) = call(token.clone(), enable).await;
+    assert_eq!(stale_retry["enabled"], false);
+    assert_eq!(stale_retry["replay"], true);
+    let (_, revoked) =
+        call(token.clone(), json!({"request_id":"revoke","agent":agent.did,"action":"RevokeEndorsement","revision":2}))
+            .await;
+    assert_eq!(revoked["enabled"], false);
+    assert!(!call(token.clone(), json!({"request_id":"restore","agent":agent.did,"action":"Enable","revision":3}))
+        .await
+        .0
+        .is_success());
+    let (_, shutoff) = call(token.clone(), json!({"request_id":"off","action":"OwnerDisable","revision":3})).await;
+    assert_eq!(shutoff["owner_disabled"], true);
+    assert!(!call(token, json!({"request_id":"afteroff","agent":agent.did,"action":"Enable","revision":4}))
+        .await
+        .0
+        .is_success());
+    vlpds::server::shutdown(&s.app).await;
+}

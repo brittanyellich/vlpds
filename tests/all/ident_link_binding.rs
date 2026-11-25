@@ -171,12 +171,14 @@ async fn node(
     rotation_key: Arc<Keypair>,
     store: Arc<object_store::memory::InMemory>,
     id: &str,
+    dispatch: Option<vlpds::xrpc::agent_dispatch_route::Mount>,
 ) -> TestServer {
     let url = plc.url.clone();
     cluster_node(id, store, 4, move |config| {
         config.plc_url = url;
         config.service_did = "did:web:pds.test".into();
         config.spaces = true;
+        config.agent_dispatch = dispatch;
         config.plc = PlcConfig { rotation_key: Some(RotationKey::Key(rotation_key)), ..Default::default() };
     })
     .await
@@ -187,7 +189,9 @@ async fn ident_link_binding_requires_both_consents_and_either_party_can_revoke()
     let plc = MockPlc::start().await;
     let store = Arc::new(object_store::memory::InMemory::new());
     let rotation_key = Arc::new(Keypair::generate());
-    let s = node(&plc, rotation_key.clone(), store.clone(), "ident-first").await;
+    let mut bridge = signed_dispatch::Bridge::prepare(&plc).await;
+    let s = node(&plc, rotation_key.clone(), store.clone(), "ident-first", Some(bridge.mount())).await;
+    bridge.connect(&s).await;
     let srv = Srv {
         app: s.app.clone(),
         base: s.url.clone(),
@@ -276,7 +280,6 @@ async fn ident_link_binding_requires_both_consents_and_either_party_can_revoke()
 
     let recovery_issuer = grant_recovery::before_restart(&s, &alice, &agent, &bob).await;
 
-    let bridge = signed_dispatch::Bridge::start(&s, &plc).await;
     let alice_binding = signed_dispatch::Bridge::approve(&s, &alice, &agent, "alice").await;
     let bob_binding = signed_dispatch::Bridge::approve(&s, &bob, &bob_agent, "bob").await;
     signed_dispatch::Bridge::approve(&s, &alice, &agent, "race").await;
@@ -371,8 +374,9 @@ async fn ident_link_binding_requires_both_consents_and_either_party_can_revoke()
     );
 
     assert!(vlpds::server::shutdown_gracefully(&s.app, std::time::Duration::from_secs(5)).await);
-    drop((bridge, srv, s));
-    let restarted = node(&plc, rotation_key, store, "ident-restarted").await;
+    drop((srv, s));
+    let restarted = node(&plc, rotation_key, store, "ident-restarted", None).await;
+    bridge.check_default_off(&restarted).await;
     grant_recovery::after_restart(&restarted, &alice, recovery_issuer).await;
     assert_eq!(agents(&restarted, &alice).await, json!([]));
     assert_eq!(agents(&restarted, &bob).await, listed_agent(&bob_agent));
@@ -395,8 +399,14 @@ async fn ident_link_existing_dids_verify_without_provisioning_marker() {
     use vlpds::xrpc::cas::set_pause_hook;
 
     let plc = MockPlc::start().await;
-    let s = node(&plc, Arc::new(Keypair::generate()), Arc::new(object_store::memory::InMemory::new()), "existing-dids")
-        .await;
+    let s = node(
+        &plc,
+        Arc::new(Keypair::generate()),
+        Arc::new(object_store::memory::InMemory::new()),
+        "existing-dids",
+        None,
+    )
+    .await;
     let srv = Srv {
         app: s.app.clone(),
         base: s.url.clone(),

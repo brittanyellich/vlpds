@@ -306,14 +306,16 @@ async fn repo_ops_metrics_segments_and_mail() {
     }
     assert!(n["watermark"].as_str().is_some() && r["lastEmitted"].as_str().is_some());
 
-    // mail shows the recipient's domain only
+    // The unfiltered log is shared. Add another confirmation for the same domain.
     s.xrpc.post_empty("com.atproto.server.requestEmailConfirmation", &a.auth()).await.ok();
+    let b = s.create_account("cops").await;
+    s.xrpc.post_empty("com.atproto.server.requestEmailConfirmation", &b.auth()).await.ok();
     let r = admin_get(&s, "vlpds.admin.listMail", &[("limit", "200")]).await;
     let m = r["mail"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|m| m["purpose"] == "confirm_email" && m["toDomain"] == "example.com")
+        .find(|m| m["did"] == a.did.as_str() && m["purpose"] == "confirm_email" && m["toDomain"] == "example.com")
         .unwrap_or_else(|| panic!("mail listed: {r}"))
         .clone();
     assert_eq!(m["node"], "single");
@@ -322,8 +324,6 @@ async fn repo_ops_metrics_segments_and_mail() {
     assert!(!r.to_string().contains(&a.email), "no address: {r}");
 
     // filtered to one account
-    let b = s.create_account("cops").await;
-    s.xrpc.post_empty("com.atproto.server.requestEmailConfirmation", &b.auth()).await.ok();
     let r = admin_get(&s, "vlpds.admin.listMail", &[("did", &b.did)]).await;
     let mail = r["mail"].as_array().unwrap();
     assert!(!mail.is_empty() && mail.iter().all(|m| m["did"] == b.did.as_str()), "{r}");

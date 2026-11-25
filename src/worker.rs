@@ -2484,6 +2484,9 @@ fn process_space(st: &mut RepoState, r: crate::space::repo::SpaceReq, clock_id: 
             let delivered = spaces.outbox.take_delivered(&did);
             let max = spaces.limits.max_records;
             let b = match sr::write(st.spaces_mut(), &did, sid, &uri, writes, clock_id, &applied, delivered, max) {
+                // A duplicate can see a queued create in the worker's view
+                // before readers can see it. Fence the conflict behind it.
+                Err(e @ SpaceError::RecordAlreadyExists(_)) => return space_noop(st, reply, Err(e)),
                 Err(e) => {
                     // fetched again (and its rows looked for) next time
                     if matches!(e, SpaceError::Unswept(_)) {
@@ -2492,7 +2495,7 @@ fn process_space(st: &mut RepoState, r: crate::space::repo::SpaceReq, clock_id: 
                     let _ = reply.send(Err(e));
                     return Ok(());
                 }
-                Ok(Err(results)) => return space_noop(st, reply, SpaceAck::Write { rev: None, results }),
+                Ok(Err(results)) => return space_noop(st, reply, Ok(SpaceAck::Write { rev: None, results })),
                 Ok(Ok(b)) => b,
             };
             built_write_ack(st, &spaces, &did, &uri, sid, b, applied)
@@ -2515,7 +2518,7 @@ fn process_space(st: &mut RepoState, r: crate::space::repo::SpaceReq, clock_id: 
                     let _ = reply.send(Err(e));
                     return Ok(());
                 }
-                Ok(None) => return space_noop(st, reply, SpaceAck::Writer(None)),
+                Ok(None) => return space_noop(st, reply, Ok(SpaceAck::Writer(None))),
                 Ok(Some((muts, seq))) => {
                     let job = crate::space::fanout::Job {
                         authority: did.clone(),
@@ -2555,7 +2558,7 @@ fn process_space(st: &mut RepoState, r: crate::space::repo::SpaceReq, clock_id: 
                     let _ = reply.send(Err(e));
                     return Ok(());
                 }
-                Ok(None) => return space_noop(st, reply, SpaceAck::Host),
+                Ok(None) => return space_noop(st, reply, Ok(SpaceAck::Host)),
                 Ok(Some(m)) => {
                     let (sp, d) = (spaces.clone(), did.clone());
                     let ack = move || {
@@ -2611,7 +2614,7 @@ fn process_space(st: &mut RepoState, r: crate::space::repo::SpaceReq, clock_id: 
                 let _ = reply.send(Err(WriteError::Invalid(m.into()).into()));
                 return Ok(());
             }
-            return space_noop(st, reply, SpaceAck::Host);
+            return space_noop(st, reply, Ok(SpaceAck::Host));
         }
         SpaceOp::Clear { nonce, prev, deletes, hash, records } => {
             if spaces.import_nonce(&did, sid) != Some(nonce) {
@@ -2743,7 +2746,7 @@ fn process_space(st: &mut RepoState, r: crate::space::repo::SpaceReq, clock_id: 
                     let _ = reply.send(Err(e));
                     return Ok(());
                 }
-                Ok((muts, ack)) if muts.is_empty() => return space_noop(st, reply, ack),
+                Ok((muts, ack)) if muts.is_empty() => return space_noop(st, reply, Ok(ack)),
                 Ok((muts, SpaceAck::Deleted { already })) => {
                     let (sp, d) = (spaces.clone(), did.clone());
                     let ack = move || {
@@ -2856,10 +2859,10 @@ fn built_write_ack(
 fn space_noop(
     st: &RepoState,
     reply: oneshot::Sender<Result<crate::space::repo::SpaceAck, crate::space::repo::SpaceError>>,
-    ack: crate::space::repo::SpaceAck,
+    outcome: Result<crate::space::repo::SpaceAck, crate::space::repo::SpaceError>,
 ) -> anyhow::Result<()> {
     if st.pending.load(Ordering::Acquire) == 0 {
-        let _ = reply.send(Ok(ack));
+        let _ = reply.send(outcome);
         return Ok(());
     }
     let entry = LogEntry {
@@ -2867,7 +2870,7 @@ fn space_noop(
         frames: Vec::new(),
         muts: Vec::new(),
         ack: Some(Box::new(move |r| {
-            let _ = reply.send(r.map(|_| ack).map_err(|e| WriteError::Internal(e.to_string()).into()));
+            let _ = reply.send(r.map_err(|e| WriteError::Internal(e.to_string()).into()).and(outcome));
         })),
         pending: Some(st.pending.clone()),
         enqueued: Instant::now(),

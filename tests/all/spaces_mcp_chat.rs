@@ -289,7 +289,12 @@ where
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn spaces_mcp_chat_two_owners() {
-    let server = TestServer::spawn_with(|config| config.spaces = true).await;
+    let store = std::sync::Arc::new(crate::common::throttled_store(0));
+    let server = TestServer::spawn_with(|config| {
+        config.spaces = true;
+        config.memory_store = Some(store.clone());
+    })
+    .await;
     let alice = SpaceClient::new(&server, "mcpalice", SCOPE).await;
     let bob = SpaceClient::new(&server, "mcpbob", SCOPE).await;
     let alice_agent = SpaceClient::new(&server, "mcpagentone", SCOPE).await;
@@ -328,7 +333,11 @@ async fn spaces_mcp_chat_two_owners() {
     assert_eq!(bob_chat.call(START, json!({})).await["structuredContent"], json!({"conversationId": "bobchat"}));
 
     let send = json!({"conversationId": "alicechat", "messageId": "first", "text": "Synthetic question"});
+    // Let the worker observe the duplicate while the first create is
+    // still waiting on its log write.
+    store.config_mut(|config| config.wait_put_per_call = std::time::Duration::from_millis(100));
     let (receipt, retry) = tokio::join!(chat.call(SEND, send.clone()), chat.call(SEND, send.clone()));
+    store.config_mut(|config| config.wait_put_per_call = std::time::Duration::ZERO);
     assert_eq!(receipt["isError"], false);
     assert_eq!(receipt, retry);
     assert_eq!(receipt["structuredContent"]["authorDid"], alice.did);

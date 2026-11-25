@@ -931,3 +931,131 @@ async fn owner_consent_http_auth_scope_retries_and_default_absence() {
         .is_success());
     vlpds::server::shutdown(&s.app).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_consent_normal_router_opt_in_auth_and_revocation() {
+    use vlpds::agent_enrollment::OwnerConsentTransport;
+    let store = std::sync::Arc::new(object_store::memory::InMemory::new());
+    let s = TestServer::spawn_lone(|c| {
+        c.memory_store = Some(store.clone());
+        c.workers = 1;
+        c.shards = 1;
+    })
+    .await;
+    let owner = s.create_account("consenthttpowner").await;
+    let other = s.create_account("consenthttpother").await;
+    let agent = s.create_account("consenthttpagent").await;
+    let token = enrollment_owner_token(&s, &owner.access).await;
+    let foreign = enrollment_owner_token(&s, &other.access).await;
+    let path = "/xrpc/chat.atagents.agent.applyConsent";
+    assert_eq!(reqwest::Client::new().post(format!("{}{path}", s.url)).send().await.unwrap().status(), 501);
+    vlpds::server::shutdown(&s.app).await;
+    let s = TestServer::spawn_lone(|c| {
+        c.workers = 1;
+        c.shards = 1;
+        c.memory_store = Some(store.clone());
+        c.rate_limits_enabled = true;
+        c.agent_owner_consent = Some(
+            OwnerConsentTransport::new(owner.did.clone(), vec![(agent.did.clone(), owner.did.clone())])
+                .unwrap_or_else(|e| panic!("{}", e.message)),
+        );
+    })
+    .await;
+    let client = reqwest::Client::new();
+    let endpoint = format!("{}{path}", s.url);
+    let call = |token: String, body: J| {
+        let client = client.clone();
+        let endpoint = endpoint.clone();
+        async move {
+            let response = client.post(endpoint).bearer_auth(token).json(&body).send().await.unwrap();
+            let status = response.status();
+            let body: J = response.json().await.unwrap();
+            (status, body)
+        }
+    };
+    let enable = json!({"request_id":"enable","agent":agent.did,"action":"Enable","revision":0});
+    assert!(!call(foreign, enable.clone()).await.0.is_success());
+    assert!(!call(String::new(), enable.clone()).await.0.is_success());
+    let app_pass = s.app.jwt.issue_with_jti(&owner.did, "com.atproto.appPassPrivileged", 60, "at+jwt", None);
+    assert!(!call(app_pass, enable.clone()).await.0.is_success());
+    let mut injected = enable.clone();
+    injected["owner"] = json!(other.did);
+    assert!(!call(token.clone(), injected).await.0.is_success());
+    let mut oversized = enable.clone();
+    oversized["request_id"] = json!("x".repeat(5000));
+    assert_eq!(call(token.clone(), oversized).await.0, 413);
+    let mut unknown_oversized = enable.clone();
+    unknown_oversized["unknown"] = json!("x".repeat(5000));
+    assert_eq!(call(token.clone(), unknown_oversized).await.0, 413);
+    let preflight = client
+        .request(reqwest::Method::OPTIONS, &endpoint)
+        .header("origin", "https://client.invalid")
+        .header("access-control-request-method", "POST")
+        .header("access-control-request-headers", "authorization, content-type")
+        .send()
+        .await
+        .unwrap();
+    assert!(preflight.status().is_success());
+    assert_eq!(preflight.headers()["access-control-allow-origin"], "*");
+    assert!(preflight.headers()["access-control-allow-headers"].to_str().unwrap().contains("authorization"));
+    assert!(!preflight.headers().contains_key("access-control-allow-credentials"));
+    let same_origin_cookie = client
+        .post(&endpoint)
+        .header("origin", &s.url)
+        .header("cookie", format!("session={token}"))
+        .json(&enable)
+        .send()
+        .await
+        .unwrap();
+    assert!(!same_origin_cookie.status().is_success());
+    // There is no ambient browser-cookie consent authority. Cross-origin
+    // cookie-only requests fail; explicit bearer auth follows ordinary XRPC CORS.
+    let response = client
+        .post(&endpoint)
+        .header("origin", "https://untrusted.invalid")
+        .header("cookie", format!("session={token}"))
+        .json(&enable)
+        .send()
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+    let response = client
+        .post(&endpoint)
+        .header("origin", "https://client.invalid")
+        .bearer_auth(&token)
+        .json(&enable)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    assert!(response.headers().contains_key("ratelimit-limit"));
+    assert_eq!(response.headers()["access-control-allow-origin"], "*");
+    assert!(!response.headers().contains_key("access-control-allow-credentials"));
+    let (status, first) = call(token.clone(), enable.clone()).await;
+    assert!(status.is_success());
+    assert_eq!(first["enabled"], true);
+    let (_, retry) = call(token.clone(), enable.clone()).await;
+    assert_eq!(retry["replay"], true);
+    assert_eq!(first["receipt"], retry["receipt"]);
+    let (_, disabled) =
+        call(token.clone(), json!({"request_id":"disable","agent":agent.did,"action":"Disable","revision":1})).await;
+    assert_eq!(disabled["enabled"], false);
+    let (_, stale_retry) = call(token.clone(), enable).await;
+    assert_eq!(stale_retry["enabled"], false);
+    assert_eq!(stale_retry["replay"], true);
+    let (_, revoked) =
+        call(token.clone(), json!({"request_id":"revoke","agent":agent.did,"action":"RevokeEndorsement","revision":2}))
+            .await;
+    assert_eq!(revoked["enabled"], false);
+    assert!(!call(token.clone(), json!({"request_id":"restore","agent":agent.did,"action":"Enable","revision":3}))
+        .await
+        .0
+        .is_success());
+    let (_, shutoff) = call(token.clone(), json!({"request_id":"off","action":"OwnerDisable","revision":3})).await;
+    assert_eq!(shutoff["owner_disabled"], true);
+    assert!(!call(token, json!({"request_id":"afteroff","agent":agent.did,"action":"Enable","revision":4}))
+        .await
+        .0
+        .is_success());
+    vlpds::server::shutdown(&s.app).await;
+}

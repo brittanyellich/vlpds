@@ -1522,16 +1522,18 @@ async fn run(args: Args) -> anyhow::Result<()> {
     });
     let (max_blob_size, max_blob_override) =
         vlpds::xrpc::blobs::size_flags(args.max_blob_mb, args.max_blob_override_mb)?;
+    let agent_a2a = args
+        .agent_a2a_config
+        .as_ref()
+        .map(|p| vlpds::agent_a2a::NativeA2a::load(p, &args.public_url, args.dev_mode))
+        .transpose()?;
+    let agent_owner_consent =
+        agent_a2a.as_ref().map(vlpds::agent_a2a::NativeA2a::owner_consent_transport).transpose()?.flatten();
     let cfg = Config {
         public_url: args.public_url.clone(),
-        // Programmatic opt-in only; CLI keeps owner consent unmounted.
-        agent_owner_consent: None,
+        agent_owner_consent,
         agent_dispatch: None,
-        agent_a2a: args
-            .agent_a2a_config
-            .as_ref()
-            .map(|p| vlpds::agent_a2a::NativeA2a::load(p, &args.public_url, args.dev_mode))
-            .transpose()?,
+        agent_a2a,
         agent_contact_pilot: args
             .agent_contact_pilot
             .as_deref()

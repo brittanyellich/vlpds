@@ -20,7 +20,8 @@ use serde_json::{json, Value as J};
 use sha2::{Digest, Sha256};
 use std::{path::Path, sync::Arc, time::Duration};
 
-/// Normal builds cannot select the compile-time-only fixture gate.
+/// The test-only convenience helper stays unavailable in normal builds.
+/// Production admission uses the separate explicit default-off opt-in.
 /// ```compile_fail
 /// use vlpds::agent_a2a::NativeA2a;
 /// fn no_fixture_gate(config: NativeA2a) {
@@ -34,8 +35,7 @@ pub struct NativeA2a {
     bridge: Bridge,
     capacity: u32,
     signed_card: Option<crate::agent_card::SignedCard>,
-    #[cfg(test)]
-    local_enrollment_gate: bool,
+    require_owner_consent: bool,
     #[cfg(test)]
     development: bool,
 }
@@ -44,6 +44,8 @@ pub struct NativeA2a {
 struct FileConfig {
     enabled: bool,
     caller_did: String,
+    #[serde(default)]
+    require_owner_consent: bool,
     bridge_origin: String,
     bridge_key_file: String,
     #[serde(default = "default_capacity")]
@@ -86,6 +88,7 @@ impl NativeA2a {
             _ => anyhow::bail!("Production A2A requires signed_card_file and independent card_key_multibase"),
         };
         native.capacity = c.decision_capacity;
+        native.require_owner_consent = c.require_owner_consent;
         Ok(native)
     }
     pub fn new(origin: &str, caller: &str, bridge: Bridge, dev: bool) -> anyhow::Result<Self> {
@@ -109,26 +112,51 @@ impl NativeA2a {
             bridge,
             capacity: default_capacity(),
             signed_card: None,
-            #[cfg(test)]
-            local_enrollment_gate: false,
+            require_owner_consent: false,
             #[cfg(test)]
             development: dev,
         })
     }
-    /// Local integration fixture only. No file/env/production enablement path.
+    /// Test-only loopback convenience helper; delegates to the same admission policy.
     #[cfg(test)]
-    pub(crate) fn with_local_enrollment_gate_for_fixture(mut self) -> anyhow::Result<Self> {
+    pub(crate) fn with_local_enrollment_gate_for_fixture(self) -> anyhow::Result<Self> {
         let origin = reqwest::Url::parse(&self.origin)?;
         anyhow::ensure!(
             self.development && origin.scheme() == "http" && origin.host_str() == Some("127.0.0.1"),
             "Enrollment integration is loopback-only"
         );
-        self.local_enrollment_gate = true;
-        Ok(self)
+        Ok(self.with_owner_consent())
+    }
+    /// Explicit server-side opt-in. Defaults remain unchanged; this does not grant consent.
+    pub fn with_owner_consent(mut self) -> Self {
+        self.require_owner_consent = true;
+        self
+    }
+    /// Derive HTTP consent trust pins from the same fixed pair and configured caller.
+    /// The CLI mounts this only when the owner-only config explicitly opts in.
+    pub fn owner_consent_transport(&self) -> anyhow::Result<Option<crate::agent_enrollment::OwnerConsentTransport>> {
+        if !self.require_owner_consent {
+            return Ok(None);
+        }
+        crate::agent_enrollment::OwnerConsentTransport::new(PRINCIPAL.into(), vec![(AGENT.into(), self.caller.clone())])
+            .map(Some)
+            .map_err(|error| anyhow::anyhow!(error.message))
+    }
+    pub(crate) fn validate_owner_consent(
+        &self,
+        transport: Option<&crate::agent_enrollment::OwnerConsentTransport>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.require_owner_consent || transport.is_none(),
+            "Native A2A with a consent transport must require owner consent"
+        );
+        anyhow::ensure!(
+            !self.require_owner_consent || transport.is_some_and(|t| t.matches(PRINCIPAL, AGENT, &self.caller)),
+            "Owner consent admission requires matching server-owned consent transport pins"
+        );
+        Ok(())
     }
     pub fn validate(&self, dev: bool, origin: &str) -> anyhow::Result<()> {
-        #[cfg(test)]
-        anyhow::ensure!(!self.local_enrollment_gate || dev, "Local enrollment gate cannot run in production");
         anyhow::ensure!(self.origin == origin, "A2A public origin mismatch");
         anyhow::ensure!(dev || self.signed_card.is_some(), "Production signed Card gate is not configured");
         let url = reqwest::Url::parse(origin)?;
@@ -284,11 +312,7 @@ async fn contact(State((app, cfg)): State<(Arc<App>, Arc<NativeA2a>)>, req: Requ
             )
         }
     };
-    #[cfg(test)]
-    if cfg.local_enrollment_gate {
-        if !app.config.dev_mode {
-            return rpc_error(StatusCode::SERVICE_UNAVAILABLE, &id, "Local enrollment fixture disabled");
-        }
+    if cfg.require_owner_consent {
         let correlation = id.clone();
         let decision_app = app.clone();
         let decision_cfg = cfg.clone();
@@ -376,6 +400,58 @@ async fn contact_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn owner_consent_file_switch_defaults_off_and_rejects_nonboolean() {
+        let mut value = json!({"enabled":true,"caller_did":"did:web:caller.invalid","bridge_origin":"http://127.0.0.1:31001","bridge_key_file":"synthetic-key"});
+        assert!(!serde_json::from_value::<FileConfig>(value.clone()).unwrap().require_owner_consent);
+        value["require_owner_consent"] = json!(true);
+        assert!(serde_json::from_value::<FileConfig>(value.clone()).unwrap().require_owner_consent);
+        value["require_owner_consent"] = json!(false);
+        assert!(!serde_json::from_value::<FileConfig>(value.clone()).unwrap().require_owner_consent);
+        for malformed in [J::Null, json!("true"), json!(1), json!({})] {
+            value["require_owner_consent"] = malformed;
+            assert!(serde_json::from_value::<FileConfig>(value.clone()).is_err());
+        }
+        // Exercise the real owner-only file loader, not only serde or the builder.
+        let directory =
+            std::env::temp_dir().join(format!("consent-config-{}-{}", std::process::id(), rand::random::<u64>()));
+        std::fs::create_dir(&directory).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let key = directory.join("synthetic-key");
+        let config = directory.join("config.json");
+        let write = |path: &Path, bytes: &[u8]| {
+            use std::io::Write;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            options.open(path).unwrap().write_all(bytes).unwrap();
+        };
+        write(&key, hex::encode([11u8; 32]).as_bytes());
+        value["bridge_key_file"] = json!(key);
+        for setting in [None, Some(false), Some(true)] {
+            value.as_object_mut().unwrap().remove("require_owner_consent");
+            if let Some(enabled) = setting {
+                value["require_owner_consent"] = json!(enabled);
+            }
+            write(&config, &serde_json::to_vec(&value).unwrap());
+            let loaded = NativeA2a::load(&config, "http://127.0.0.1:2583", true).unwrap();
+            assert_eq!(loaded.require_owner_consent, setting.unwrap_or(false));
+            assert_eq!(loaded.owner_consent_transport().unwrap().is_some(), setting.unwrap_or(false));
+            assert!(
+                NativeA2a::load(&config, "https://pds.example.invalid", false).is_err(),
+                "Consent opt-in never bypasses production signed Card requirements"
+            );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
     #[test]
     fn fixed_request_semantic_digest_and_input_guards() {
         let mut r = json!({"jsonrpc":"2.0","id":"one","method":"SendMessage","params":{"message":{"messageId":"event","role":"ROLE_USER","parts":[{"data":{"agentDid":AGENT,"principalDid":PRINCIPAL,"skillId":"resolve-identity-test"}}]}}});

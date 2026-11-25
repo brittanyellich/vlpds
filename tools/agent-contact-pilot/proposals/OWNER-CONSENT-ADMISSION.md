@@ -14,3 +14,11 @@ Current proof and current private consent are checked before both a cached reply
 - **Resume:** requalify exact runtime and trust pins, keep admission opted in, verify the persisted policy, and obtain fresh owner action where the current policy permits it. Do not infer restoration from a retry, config rollback, Card response or token change.
 
 No deployment, private configuration edit, credential action, policy reset, live request or durable enablement is authorized by this code change. Live acceptance still requires qualified immutable runtime, current provider baseline and exclusive write window, authenticated readiness, operator/custodian availability and separately approved bounded test/rollback scope. Existing unresolved OFF acknowledgement evidence must be reconciled before another live window.
+
+## Hosted composition (default off)
+
+An agent-capable hosted runtime accepts the optional Worker plain-text variable `AGENT_A2A_REQUIRE_OWNER_CONSENT` with exactly `true` or `false`; omission keeps legacy admission behavior. The Worker forwards the selection only during the existing valid A2A lease. The supervisor writes the corresponding JSON boolean into its owner-only native config. Selecting this policy does not enable A2A, extend a lease, grant owner consent, or relax Card/caller/proof checks. Invalid Worker values close agent admission; invalid enabled-supervisor values refuse startup before private files or children.
+
+Operator preparation preserves an explicit selection for an agent-capable deployment while keeping `AGENT_A2A_ENABLED=false`. Omission adds no binding. An ordinary-runtime deployment rejects a true selection, and ordinary rollback removes the optional variable while retaining OFF. OFF supervisor launches discard any inherited native config mount. Policy storage remains untouched; turning the selection off while contact is enabled is not an authorized recovery path.
+
+This source change invalidates the prior build-only candidate as evidence for the updated hosted path. Qualify a new exact merged runtime before publication or deployment. An explicit opt-in also changes the Worker binding set: existing fixed pilot baseline/metadata gates must be separately reconciled and reviewed against fresh readback before a live run. This change does not broaden those gates, modify live configuration, or dispatch another build.

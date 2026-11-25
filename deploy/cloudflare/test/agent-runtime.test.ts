@@ -20,3 +20,17 @@ test('fixed lease closes new admission at exact boundary without runner or token
  // Replaying a cached request or using a token never changes the fixed lease.
  for(let i=0;i<3;i++)assert.equal(agentEnabled(env,now+601),false);
 });
+
+test('explicit hosted consent option propagates only within the fixed active lease',()=>{
+ const base={AGENT_A2A_ENABLED:'true',AGENT_A2A_EXPIRES_AT:String(Math.floor(Date.now()/1000)+599),AGENT_A2A_RUNTIME:'native-profile-v1',AGENT_A2A_SIGNED_CARD_JSON:'{"signatures":[]}',AGENT_A2A_CARD_KEY_MULTIBASE:'zSyntheticPublicPin',AGENT_A2A_CALLER_DID:'did:plc:vsgwub3c3pupqt3yhxfmecma',AGENT_A2A_BRIDGE_KEY:'a'.repeat(64),AGENT_A2A_KODY_TOKEN:'kody_at_synthetic_fixture'};
+ for(const value of [undefined,'false','true']){
+  const e={...base,AGENT_A2A_REQUIRE_OWNER_CONSENT:value};
+  assert.equal(agentEnvironment(e).VLPDS_AGENT_A2A_REQUIRE_OWNER_CONSENT,value??'false');
+  assert.deepEqual(agentEnvironment({...e,AGENT_A2A_ENABLED:'false'}),{});
+  assert.deepEqual(agentEnvironment({...e,AGENT_A2A_EXPIRES_AT:'1000000000'}),{});
+ }
+ for(const value of ['TRUE','1','',' true','null']){
+  const e={...base,AGENT_A2A_REQUIRE_OWNER_CONSENT:value};
+  assert.equal(agentEnabled(e),false);assert.deepEqual(agentEnvironment(e),{});
+ }
+});

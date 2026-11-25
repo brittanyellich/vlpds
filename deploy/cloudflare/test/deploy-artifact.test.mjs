@@ -119,3 +119,21 @@ test('agent image requires matching profile files, pinned CLI/workerd and opt-in
   assert.deepEqual(inspectArtifact('build','agent-a2a',revision,run,()=>id),base('agent-a2a'));
   for (broken of ['hash','workerd','cli','supervisor']) assert.throws(()=>inspectArtifact('build','agent-a2a',revision,run,()=>id));
 });
+
+test('operator consent selection is strict, default-off and reset on ordinary rollback',()=>{
+ for(const value of [undefined,'false','true']){
+  const c=config();if(value!==undefined)c.vars.AGENT_A2A_REQUIRE_OWNER_CONSENT=value;
+  const result=prepareDeployment(env('agent-a2a',c),bound('agent-a2a'));
+  assert.equal(result.vars.AGENT_A2A_REQUIRE_OWNER_CONSENT,value);
+  assert.equal(result.vars.AGENT_A2A_ENABLED,'false');
+  const rolled=prepareDeployment({...env('pds-runtime',c),OPERATION:'rollback',ROLLBACK_IMAGE:remote});
+  assert.equal(rolled.vars.AGENT_A2A_REQUIRE_OWNER_CONSENT,undefined);
+  assert.equal(rolled.vars.AGENT_A2A_ENABLED,'false');
+ }
+ for(const value of [true,false,null,1,'TRUE','']){
+  const c=config();c.vars.AGENT_A2A_REQUIRE_OWNER_CONSENT=value;
+  assert.throws(()=>prepareDeployment(env('agent-a2a',c),bound('agent-a2a')));
+ }
+ const c=config();c.vars.AGENT_A2A_REQUIRE_OWNER_CONSENT='true';
+ assert.throws(()=>prepareDeployment(env('pds-runtime',c),bound('pds-runtime')));
+});

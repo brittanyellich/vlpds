@@ -7,6 +7,7 @@ interface Env {
   PDS: DurableObjectNamespace<Pds>;
   PUBLIC_HOST: string;
   AGENT_A2A_ENABLED?: string;
+  AGENT_A2A_REQUIRE_OWNER_CONSENT?: string;
   AGENT_A2A_EXPIRES_AT?: string;
   AGENT_A2A_RUNTIME?: string;
   AGENT_A2A_SIGNED_CARD_JSON?: string;
@@ -64,15 +65,17 @@ export class Pds extends DurableObject<Env> {
     if (this.env.ENABLED !== "true") throw new Error("Deployment is not enabled");
     const c = this.ctx.container!;
     if (!c.running) {
-      const env = this.environment();
+      // One clock snapshot binds secret-bearing environment and entrypoint.
+      const now = Math.floor(Date.now()/1000);
+      const env = this.environment(now);
       c.start({ image: c.images.pds, instance: "standard-3", enableInternet: true, env,
-        entrypoint: runtimeEntrypoint(agentEnabled(this.env)) });
+        entrypoint: runtimeEntrypoint(agentEnabled(this.env, now)) });
     }
     await c.setInactivityTimeout(INACTIVITY_MS);
     await this.ctx.storage.setAlarm(Date.now() + HEARTBEAT_MS);
   }
 
-  private environment(): Record<string, string> {
+  private environment(now: number): Record<string, string> {
     const e = this.env;
     const values: Record<string, string> = {
       VLPDS_PUBLIC_URL: `https://${e.PUBLIC_HOST}`,
@@ -92,7 +95,7 @@ export class Pds extends DurableObject<Env> {
       VLPDS_SLATEDB_MANIFEST_POLL: "60s", VLPDS_MEMORY_BUDGET_MB: "3072",
       VLPDS_CACHE_DIR: "/var/lib/vlpds/cache", VLPDS_DISK_CACHE_MB: "1024",
       VLPDS_METRICS_LISTEN: "0.0.0.0:9583", VLPDS_LOG_FORMAT: "json",
-      ...agentEnvironment(e),
+      ...agentEnvironment(e, now),
     };
     for (const [key, value] of Object.entries(values)) {
       if (!value) throw new Error(`Missing required configuration: ${key}`);

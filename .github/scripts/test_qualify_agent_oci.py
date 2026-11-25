@@ -10,7 +10,7 @@ from qualify_agent_oci import REVISION, qualify
 
 
 class QualificationTests(unittest.TestCase):
-    def archive(self, directory, *, wrong_config=False, corrupt_layer=False, duplicate=False, extra_manifest=False):
+    def archive(self, directory, *, wrong_config=False, corrupt_layer=False, duplicate=False, extra_manifest=False, bad_config_media=False, bad_layer_media=False):
         entries = {}
 
         def blob(value, media):
@@ -21,6 +21,10 @@ class QualificationTests(unittest.TestCase):
 
         config = blob({'architecture': 'amd64', 'os': 'linux'}, 'application/vnd.oci.image.config.v1+json')
         layer = blob(b'synthetic layer', 'application/vnd.oci.image.layer.v1.tar')
+        if bad_config_media:
+            config['mediaType'] = 'application/octet-stream'
+        if bad_layer_media:
+            layer['mediaType'] = 'application/octet-stream'
         manifest = blob({'schemaVersion': 2, 'config': config, 'layers': [layer]}, 'application/vnd.oci.image.manifest.v1+json')
         entries['oci-layout'] = b'{"imageLayoutVersion":"1.0.0"}'
         entries['index.json'] = json.dumps({'schemaVersion': 2, 'manifests': [manifest] * (2 if extra_manifest else 1)}).encode()
@@ -49,7 +53,7 @@ class QualificationTests(unittest.TestCase):
             self.assertEqual(result['archiveSha256'], hashlib.sha256(archive.read_bytes()).hexdigest())
 
     def test_wrong_export_corrupt_layer_duplicate_or_multiple_candidates_deny(self):
-        for option in ['wrong_config', 'corrupt_layer', 'duplicate', 'extra_manifest']:
+        for option in ['wrong_config', 'corrupt_layer', 'duplicate', 'extra_manifest', 'bad_config_media', 'bad_layer_media']:
             with self.subTest(option=option), tempfile.TemporaryDirectory() as directory:
                 archive, receipt, _ = self.archive(directory, **{option: True})
                 with self.assertRaises(ValueError):
@@ -58,7 +62,7 @@ class QualificationTests(unittest.TestCase):
     def test_unqualified_wrong_revision_runtime_or_platform_deny(self):
         with tempfile.TemporaryDirectory() as directory:
             archive, receipt, _ = self.archive(directory)
-            for key, value in [('revision', '0' * 40), ('runtime', 'pds-runtime'), ('platform', 'linux/arm64'), ('capabilityVerified', False)]:
+            for key, value in [('revision', '0' * 40), ('runtime', 'pds-runtime'), ('platform', 'linux/arm64'), ('capabilityVerified', False), ('imageId', 'sha256:' + '1' * 64)]:
                 bad = copy.deepcopy(receipt); bad[key] = value
                 with self.subTest(key=key), self.assertRaises(ValueError):
                     qualify(archive, bad)

@@ -57,12 +57,18 @@ def qualify(archive, receipt):
         if descriptor.get("mediaType") != "application/vnd.oci.image.manifest.v1+json":
             raise ValueError("Image manifest required")
         manifest = blob(descriptor)
+        if manifest["config"].get("mediaType") != "application/vnd.oci.image.config.v1+json":
+            raise ValueError("OCI config descriptor required")
         config = blob(manifest["config"])
         if (manifest.get("schemaVersion") != 2
                 or manifest["config"]["digest"] != receipt["configDigest"]
+                or receipt["imageId"] not in {receipt["configDigest"], descriptor["digest"]}
                 or config.get("architecture") != "amd64" or config.get("os") != "linux"):
             raise ValueError("Export differs from qualified image")
         for layer in manifest["layers"]:
+            if layer.get("mediaType") not in {"application/vnd.oci.image.layer.v1.tar",
+                    "application/vnd.oci.image.layer.v1.tar+gzip", "application/vnd.oci.image.layer.v1.tar+zstd"}:
+                raise ValueError("OCI layer descriptor required")
             match = DIGEST.fullmatch(layer["digest"])
             if not match:
                 raise ValueError("Layer digest refused")

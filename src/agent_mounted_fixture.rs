@@ -12,7 +12,7 @@ use crate::{
         self,
         fixture_transport::{self, Authority, Mode},
     },
-    agent_enrollment::{apply_owner_consent, Action, Operation, Pair},
+    agent_enrollment::{Action, Operation, OwnerConsentTransport},
     agent_profile_bridge::Bridge,
 };
 use axum::{body::Body, extract::State, http::Request, middleware::Next, response::Response};
@@ -175,6 +175,39 @@ async fn post(client: &reqwest::Client, origin: &str, token: &str, event: &str) 
         .unwrap();
     (r.status().as_u16(), r.json().await.unwrap())
 }
+#[derive(serde::Deserialize)]
+struct HttpConsentDecision {
+    enabled: bool,
+}
+async fn apply_http_consent(
+    s: &TestServer,
+    token: &str,
+    operation: &Operation,
+) -> crate::xrpc::XResult<HttpConsentDecision> {
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap()
+        .post(format!("{}/xrpc/chat.atagents.agent.applyConsent", s.url))
+        .bearer_auth(token)
+        .json(operation)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    if status.is_success() {
+        Ok(response.json().await.unwrap())
+    } else {
+        let error: J = response.json().await.unwrap();
+        Err(vlatproto::xrpc::XrpcError {
+            status,
+            error: error["error"].as_str().unwrap().into(),
+            message: error["message"].as_str().unwrap_or("Consent refused").into(),
+        })
+    }
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mounted_signed_authority_consent_cache_and_single_stub_dispatch() {
     fixture_transport::deny_real_https(mounted_signed_case()).await;
@@ -195,7 +228,9 @@ async fn mounted_signed_case() {
     assert_eq!(authority.requests.load(Ordering::SeqCst), 0, "Unscoped requests must not fall back to real HTTPS");
     let key = rand::random::<[u8; 32]>();
     let mut stub = Stub::start(key).await;
+    let store = Arc::new(object_store::memory::InMemory::new());
     let s = TestServer::spawn_lone(|c| {
+        c.memory_store = Some(store.clone());
         c.workers = 1;
         c.shards = 1;
     })
@@ -207,10 +242,23 @@ async fn mounted_signed_case() {
         let account = crate::state::Account { did: did.into(), handle: handle.into(), ..Default::default() };
         partition.db.put(crate::state::account_key(did), serde_json::to_vec(&account).unwrap()).await.unwrap();
     }
+    vlpds::server::shutdown(&s.app).await;
+    let s = TestServer::spawn_lone(|c| {
+        c.workers = 1;
+        c.shards = 1;
+        c.memory_store = Some(store.clone());
+        c.agent_owner_consent = Some(
+            OwnerConsentTransport::new(PRINCIPAL.into(), vec![(AGENT.into(), caller.did.clone())])
+                .unwrap_or_else(|e| panic!("{}", e.message)),
+        );
+    })
+    .await;
     let owner_token = s.app.jwt.access(PRINCIPAL);
-    let pairs = [Pair { agent: AGENT, caller: &caller.did }];
     let enable = operation("consent", Action::Enable, 0);
-    apply_owner_consent(&s.app, &owner_token, PRINCIPAL, &pairs, &enable).await.map_err(|e| e.message).unwrap();
+    let foreign_token = s.app.jwt.access(&caller.did);
+    let refused = apply_http_consent(&s, &foreign_token, &enable).await.err().expect("Foreign owner refused");
+    assert_eq!(refused.status.as_u16(), 401);
+    assert_eq!(refused.message, "Active configured owner required");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let cfg = NativeA2a::new(&origin, &caller.did, Bridge::new(&stub.origin, key.to_vec()).unwrap(), true)
@@ -245,6 +293,9 @@ async fn mounted_signed_case() {
         .unwrap()
         .to_owned();
     let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap();
+    assert_eq!(post(&client, &origin, &token, "before-consent").await.0, 403);
+    assert_eq!(stub.counter.load(Ordering::SeqCst), 0);
+    assert!(apply_http_consent(&s, &owner_token, &enable).await.map_err(|e| e.message).unwrap().enabled);
     let (status, first) = post(&client, &origin, &token, "same").await;
     assert_eq!(status, 200, "Synthetic mounted authority response");
     assert_eq!(first["result"]["message"]["parts"][0]["data"]["status"], "verified");
@@ -283,7 +334,7 @@ async fn mounted_signed_case() {
         );
     }
     authority.mode(Mode::Valid);
-    apply_owner_consent(&s.app, &owner_token, PRINCIPAL, &pairs, &operation("disable", Action::Disable, 1))
+    apply_http_consent(&s, &owner_token, &operation("disable", Action::Disable, 1))
         .await
         .map_err(|e| e.message)
         .unwrap();
@@ -291,14 +342,8 @@ async fn mounted_signed_case() {
     assert_eq!(post(&client, &origin, &token, "same").await.0, 403);
     assert_eq!(post(&client, &origin, &token, "disabled-fresh").await.0, 403);
     assert_eq!(reads, authority.requests.load(Ordering::SeqCst));
-    assert!(
-        !apply_owner_consent(&s.app, &owner_token, PRINCIPAL, &pairs, &enable)
-            .await
-            .map_err(|e| e.message)
-            .unwrap()
-            .enabled
-    );
-    apply_owner_consent(&s.app, &owner_token, PRINCIPAL, &pairs, &operation("fresh-consent", Action::Enable, 2))
+    assert!(!apply_http_consent(&s, &owner_token, &enable).await.map_err(|e| e.message).unwrap().enabled);
+    apply_http_consent(&s, &owner_token, &operation("fresh-consent", Action::Enable, 2))
         .await
         .map_err(|e| e.message)
         .unwrap();
@@ -308,14 +353,14 @@ async fn mounted_signed_case() {
     let t = token.clone();
     let pending = tokio::spawn(async move { post(&c, &u, &t, "same").await });
     tokio::time::timeout(Duration::from_secs(5), entered.notified()).await.unwrap();
-    apply_owner_consent(&s.app, &owner_token, PRINCIPAL, &pairs, &operation("race-disable", Action::Disable, 3))
+    apply_http_consent(&s, &owner_token, &operation("race-disable", Action::Disable, 3))
         .await
         .map_err(|e| e.message)
         .unwrap();
     release.notify_one();
     assert_eq!(pending.await.unwrap().0, 503);
     assert_eq!(post(&client, &origin, &token, "same").await.0, 403);
-    apply_owner_consent(&s.app, &owner_token, PRINCIPAL, &pairs, &operation("after-race-consent", Action::Enable, 4))
+    apply_http_consent(&s, &owner_token, &operation("after-race-consent", Action::Enable, 4))
         .await
         .map_err(|e| e.message)
         .unwrap();
@@ -348,7 +393,7 @@ async fn mounted_signed_case() {
     assert_eq!(post(&client, &origin, &token, "same").await.0, 503);
     assert!(authority.requests.load(Ordering::SeqCst) > reads);
     authority.mode(Mode::Valid);
-    apply_owner_consent(&s.app, &owner_token, PRINCIPAL, &pairs, &operation("revoke", Action::RevokeEndorsement, 5))
+    apply_http_consent(&s, &owner_token, &operation("revoke", Action::RevokeEndorsement, 5))
         .await
         .map_err(|e| e.message)
         .unwrap();
@@ -356,14 +401,19 @@ async fn mounted_signed_case() {
     assert_eq!(post(&client, &origin, &token, "same").await.0, 403);
     assert_eq!(post(&client, &origin, &token, "revoked-fresh").await.0, 403);
     assert_eq!(reads, authority.requests.load(Ordering::SeqCst));
-    assert!(apply_owner_consent(&s.app, &owner_token, PRINCIPAL, &pairs, &operation("no-restore", Action::Enable, 6))
+    let refused = apply_http_consent(&s, &owner_token, &operation("no-restore", Action::Enable, 6))
         .await
-        .is_err());
-    apply_owner_consent(&s.app, &owner_token, PRINCIPAL, &[], &operation("off", Action::OwnerDisable, 6))
+        .err()
+        .expect("Revoked enrollment cannot be restored");
+    assert_eq!(refused.status.as_u16(), 400);
+    assert_eq!(refused.error, "EnrollmentRefused");
+    assert_eq!(refused.message, "Revoked or shut off; no automatic restoration");
+    apply_http_consent(&s, &owner_token, &operation("off", Action::OwnerDisable, 6))
         .await
         .map_err(|e| e.message)
         .unwrap();
     assert_eq!(post(&client, &origin, &token, "same").await.0, 403);
+    assert_eq!(post(&client, &origin, &token, "owner-off-fresh").await.0, 403);
     assert!(route.close().await, "Owned route server cleanup");
     vlpds::server::shutdown(&s.app).await;
     assert!(stub.close(), "Owned stub process and counter reader cleanup");

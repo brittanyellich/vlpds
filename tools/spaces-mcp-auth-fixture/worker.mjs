@@ -63,6 +63,7 @@ export default {
     const issuer = new OAuthAuthorizationServer({
       issuer: origin,
       resources: [mcp, other],
+      clientRegistrationEndpoint: "/register",
       scopesSupported: [scope, "offline_access"],
     });
     const api = issuer.getOAuthApi(env);
@@ -71,16 +72,6 @@ export default {
       headers: { Authorization: `Bearer ${BRIDGE_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({ operation, userId, ...evidence }),
     });
-    if (url.pathname === "/fixture/client" && request.method === "POST") {
-      const { clientId } = await api.createClient({
-        clientName: "Disposable MCP client",
-        redirectUris: [origin + "/callback"],
-        tokenEndpointAuthMethod: "none",
-        grantTypes: ["authorization_code", "refresh_token"],
-        responseTypes: ["code"],
-      });
-      return Response.json({ clientId });
-    }
     if (url.pathname === "/authorize" || url.pathname === "/fixture/revoke") {
       const owner = owners.get(request.headers.get("X-Fixture-Owner"));
       if (!owner) return new Response(null, { status: 401 });

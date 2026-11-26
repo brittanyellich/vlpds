@@ -112,6 +112,13 @@ impl<'a> Recovery<'a> {
         self.get(operation).await?.filter(|existing| existing.request == intent.request).ok_or_else(refused)
     }
 
+    /// Reserve the consent and claim its one issuer call. The returned
+    /// correlation must be attached to the issuer's durable grant metadata.
+    pub async fn begin_issuance(&self, operation: &str, request: Request) -> XResult<Option<String>> {
+        self.reserve(operation, request).await?;
+        self.claim(operation).await
+    }
+
     pub async fn get(&self, operation: &str) -> XResult<Option<Intent>> {
         self.app
             .get_private(&self.owner, &operation_row(operation)?)

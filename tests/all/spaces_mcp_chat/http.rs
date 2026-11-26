@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use vlpds::plc::mock::MockPlc;
 use vlpds::xrpc::agent_dispatch::{self, Binding, Grant};
 use vlpds::xrpc::agent_dispatch_auth::{admit, Authority, MAX_BODY_BYTES, METHOD};
+use vlpds::xrpc::agent_grant_recovery::{CleanupTarget, Observation, Recovery, Request};
 
 use vlpds::xrpc::agent_chat::{self, VERSION, VERSION_HEADER};
 
@@ -364,41 +365,69 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers.get(header::AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")
 }
 
-async fn grant_consent(State(endpoint): State<Arc<Endpoint>>, headers: HeaderMap, Json(body): Json<J>) -> StatusCode {
+async fn grant_consent(State(endpoint): State<Arc<Endpoint>>, headers: HeaderMap, Json(body): Json<J>) -> Response {
+    let denied = || StatusCode::FORBIDDEN.into_response();
     if endpoint.signer.is_none()
         || !matches_listener(&endpoint, &headers)
         || bearer(&headers) != Some(endpoint.bridge_token.as_str())
     {
-        return StatusCode::FORBIDDEN;
+        return denied();
     }
     let Some(index) = body["userId"].as_str().and_then(fixture_owner) else {
-        return StatusCode::FORBIDDEN;
+        return denied();
     };
-    let (Some(issuer), Some(id), Some(session)) =
-        (endpoint.issuer.get(), body["grantId"].as_str(), endpoint.sessions.get(index))
+    let (Some(issuer), Some(operation), Some(client), Some(session)) =
+        (endpoint.issuer.get(), body["approval"].as_str(), body["clientId"].as_str(), endpoint.sessions.get(index))
     else {
-        return StatusCode::FORBIDDEN;
+        return denied();
     };
     let Ok(credentials) = session.owner_credentials().await else {
-        return StatusCode::FORBIDDEN;
+        return denied();
+    };
+    let Ok(recovery) = Recovery::for_owner(&session.caller.srv.app, &credentials, &session.owner).await else {
+        return denied();
     };
     let resource = format!("{issuer}/mcp");
-    let grant = Grant { issuer, resource: &resource, id, owner: &session.owner };
-    match body["operation"].as_str() {
-        Some("approve") => {
-            if agent_dispatch::approve(&session.caller.srv.app, &credentials, grant, session.binding()).await.is_err() {
-                return StatusCode::FORBIDDEN;
-            }
-            endpoint.grants.lock()[index] = Some(id.to_owned());
+    if body["operation"] == "begin" {
+        let mut request_digest = [0; 32];
+        if hex::decode_to_slice(operation, &mut request_digest).is_err() {
+            return denied();
         }
-        Some("revoke") => {
-            if agent_dispatch::revoke(&session.caller.srv.app, &credentials, grant).await.is_err() {
-                return StatusCode::FORBIDDEN;
-            }
-        }
-        _ => return StatusCode::BAD_REQUEST,
+        let request = Request {
+            issuer: issuer.clone(),
+            resource,
+            client: client.into(),
+            request_digest,
+            binding: session.binding(),
+        };
+        return match recovery.begin_issuance(operation, request).await {
+            Ok(Some(correlation)) => Json(json!({"correlation": correlation})).into_response(),
+            Ok(None) => StatusCode::CONFLICT.into_response(),
+            Err(_) => denied(),
+        };
     }
-    StatusCode::NO_CONTENT
+    let (Some(id), Some(correlation)) = (body["grantId"].as_str(), body["correlation"].as_str()) else {
+        return denied();
+    };
+    let grant = Grant { issuer, resource: &resource, id, owner: &session.owner };
+    let observation = Observation { grant, client, correlation };
+    let outcome = match body["operation"].as_str() {
+        Some("approve") => match recovery.issued(operation, &observation).await {
+            Ok(true) => {
+                endpoint.grants.lock()[index] = Some(id.to_owned());
+                Ok(())
+            }
+            _ => return denied(),
+        },
+        Some("revoke") => recovery.reconcile_lost_redirect(operation, &observation).await,
+        Some("issuer-cleaned") => recovery.acknowledge(operation, id, CleanupTarget::Issuer).await,
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if outcome.is_ok() {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        denied()
+    }
 }
 
 async fn request(

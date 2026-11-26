@@ -70,7 +70,7 @@ class QualificationTests(unittest.TestCase):
     def test_unqualified_wrong_revision_runtime_or_platform_deny(self):
         with tempfile.TemporaryDirectory() as directory:
             archive, receipt, _ = self.archive(directory)
-            for key, value in [('revision', '0' * 40), ('runtime', 'pds-runtime'), ('platform', 'linux/arm64'), ('capabilityVerified', False), ('imageId', 'sha256:' + '1' * 64)]:
+            for key, value in [('revision', '8fb5949c400018146ef58e594697859403c0d247'), ('revision', '0' * 40), ('runtime', 'pds-runtime'), ('platform', 'linux/arm64'), ('capabilityVerified', False), ('imageId', 'sha256:' + '1' * 64)]:
                 bad = copy.deepcopy(receipt); bad[key] = value
                 with self.subTest(key=key), self.assertRaises(ValueError):
                     qualify(archive, bad)
@@ -95,7 +95,14 @@ class QualificationTests(unittest.TestCase):
         self.assertNotIn('environment:', source)
         self.assertNotIn('packages: write', source)
         self.assertIn('contents: read', source)
+        self.assertEqual(REVISION, '703c118c66277ca42c45808a2f6cc620429c6718')
         self.assertIn('ref: ' + REVISION, source)
+        self.assertIn('a5578cb57829d36f4f2c0bb7f1b507af8783a023', source)
+        self.assertIn('test/hosted-consent-supervisor.test.mjs', source)
+        self.assertIn('test/agent-runtime.test.ts', source)
+        self.assertIn('test/deploy-artifact.test.mjs', source)
+        self.assertIn('npm ci --ignore-scripts', source)
+        self.assertIn('npm run typecheck', source)
         self.assertIn('--build-arg VLPDS_RUNTIME_STAGE=agent-a2a', source)
         self.assertIn('type=oci,dest=', source)
         self.assertNotIn('--push', source)

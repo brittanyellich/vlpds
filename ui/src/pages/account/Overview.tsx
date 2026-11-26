@@ -3,6 +3,7 @@ import { fmtNum, fmtTime } from '../../lib/format'
 import { useLoad, useSession } from '../../lib/hooks'
 import { Link } from '../../lib/router'
 import { acall, getSession, setSession } from '../../lib/xrpc'
+import { CreateAgent } from './CreateAgent'
 
 export type SessionInfo = {
   did: string
@@ -130,6 +131,7 @@ export function Overview() {
               !st.error && <Loading />
             )}
           </Panel>
+          {d.active && d.did === s.did && <CreateAgent key={d.did} owner={d.did} />}
           {d.didDoc && (
             <Panel title="DID document" desc="What the network resolves your DID to: your handle, signing key and this server.">
               <JsonView value={d.didDoc} />

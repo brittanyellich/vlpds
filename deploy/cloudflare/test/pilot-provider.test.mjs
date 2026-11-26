@@ -84,3 +84,18 @@ test('native-looking labels require normalized JSON media type',()=>{
  }
  assert.equal(new CardPending(503,Buffer.from('{"error":"Signed Card trust unavailable"}'),'application/json').reason,'card-http-503-trust-unavailable');
 });
+
+test('required consent mode accepts only the exact active true binding; OFF and legacy require absence',()=>{
+ const card='synthetic-card',deadline=1800000600;
+ const bindings=Object.entries({AGENT_A2A_ENABLED:'true',AGENT_A2A_RUNTIME:'native-profile-v1',AGENT_A2A_EXPIRES_AT:String(deadline),AGENT_A2A_CALLER_DID:PILOT.caller,AGENT_A2A_CAPACITY:'1000',AGENT_A2A_SIGNED_CARD_JSON:card,AGENT_A2A_CARD_KEY_MULTIBASE:PILOT.cardKey,AGENT_A2A_REQUIRE_OWNER_CONSENT:'true'}).map(([name,text])=>({name,type:'plain_text',text}));
+ const options={enabled:true,provisioned:false,card,deadline,ownerConsentRequired:true};
+ assert.equal(checkBindings({bindings},options).length,64);
+ assert.throws(()=>checkBindings({bindings},{...options,ownerConsentRequired:false}));
+ for(const change of [a=>a.pop(),a=>a.at(-1).text='false',a=>a.at(-1).text='TRUE',a=>a.at(-1).type='secret_text',a=>a.at(-1).name='AGENT_A2A_OTHER',a=>a[a.length-2]={...a.at(-1)}]){
+  const bad=structuredClone(bindings);change(bad);assert.throws(()=>checkBindings({bindings:bad},options));
+ }
+ const off={bindings:[{name:'AGENT_A2A_ENABLED',type:'plain_text',text:'false'},{name:'AGENT_A2A_RUNTIME',type:'plain_text',text:'native-profile-v1'}]};
+ assert.equal(checkBindings(off,{enabled:false,provisioned:false,ownerConsentRequired:true}).length,64);
+ for(const text of ['true','false'])assert.throws(()=>checkBindings({bindings:[...off.bindings,{name:'AGENT_A2A_REQUIRE_OWNER_CONSENT',type:'plain_text',text}]},{enabled:false,provisioned:false,ownerConsentRequired:true}));
+ for(const ownerConsentRequired of ['true',null,1])assert.throws(()=>checkBindings(off,{enabled:false,provisioned:false,ownerConsentRequired}));
+});

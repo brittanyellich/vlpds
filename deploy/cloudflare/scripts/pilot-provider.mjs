@@ -68,9 +68,12 @@ export class PilotProvider {
   let a;try{a=JSON.parse(r.bytes);}catch{throw safeError();}if(r.status!==202 || a.desired!==this.image || a.starting!==true || typeof a.restarted!=='boolean')throw safeError();
  }
 }
-export function checkBindings(meta,{enabled,baseline,provisioned,card,deadline}) {
+export function checkBindings(meta,{enabled,baseline,provisioned,card,deadline,ownerConsentRequired=false}) {
+ if(typeof ownerConsentRequired!=='boolean')throw safeError();
+ if(!Array.isArray(meta?.bindings)||new Set(meta.bindings.map(b=>b.name)).size!==meta.bindings.length)throw safeError();
  const names=['AGENT_A2A_BRIDGE_KEY','AGENT_A2A_KODY_TOKEN'];
  const vars={AGENT_A2A_ENABLED:enabled?'true':'false',AGENT_A2A_RUNTIME:'native-profile-v1'};
+ if(enabled&&ownerConsentRequired)vars.AGENT_A2A_REQUIRE_OWNER_CONSENT='true';
  if(enabled)Object.assign(vars,{AGENT_A2A_EXPIRES_AT:String(deadline),AGENT_A2A_CALLER_DID:PILOT.caller,AGENT_A2A_CAPACITY:'1000',AGENT_A2A_SIGNED_CARD_JSON:card,AGENT_A2A_CARD_KEY_MULTIBASE:PILOT.cardKey});
  const agent=meta.bindings.filter(b=>b.name.startsWith('AGENT_A2A_'));
  if(agent.length!==Object.keys(vars).length+(provisioned?2:0))throw safeError();

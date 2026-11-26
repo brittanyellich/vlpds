@@ -1,16 +1,16 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import{PilotLifecycle}from'../scripts/pilot-lifecycle.mjs';import{PILOT}from'../scripts/pilot-activation-plan.mjs';import{ProviderPending,CardPending}from'../scripts/pilot-provider.mjs';
-function fixture(){
- let state,enabled=false,provisioned=false,version=PILOT.offWorker,time=1800000000;const events=[];
+function fixture({ownerConsentRequired=false}={}){
+ let state,enabled=false,consentBinding=false,provisioned=false,version=PILOT.offWorker,time=1800000000;const events=[];
  const card='{"synthetic":true}',identity={repository:'brittanyellich/vlpds',runId:123,head:'a'.repeat(40)};
  const metadata=()=>({id:version,scriptEtag:'e'.repeat(64),bindings:[{name:'PUBLIC_HOST',type:'plain_text',text:'pds.crate.social'},
- ...Object.entries({AGENT_A2A_ENABLED:enabled?'true':'false',AGENT_A2A_RUNTIME:'native-profile-v1',...(enabled?{AGENT_A2A_EXPIRES_AT:String(state?.deadline),AGENT_A2A_CALLER_DID:PILOT.caller,AGENT_A2A_CAPACITY:'1000',AGENT_A2A_SIGNED_CARD_JSON:card,AGENT_A2A_CARD_KEY_MULTIBASE:PILOT.cardKey}:{})}).map(([name,text])=>({name,text,type:'plain_text'})),
+ ...Object.entries({AGENT_A2A_ENABLED:enabled?'true':'false',AGENT_A2A_RUNTIME:'native-profile-v1',...(consentBinding?{AGENT_A2A_REQUIRE_OWNER_CONSENT:'true'}:{}),...(enabled?{AGENT_A2A_EXPIRES_AT:String(state?.deadline),AGENT_A2A_CALLER_DID:PILOT.caller,AGENT_A2A_CAPACITY:'1000',AGENT_A2A_SIGNED_CARD_JSON:card,AGENT_A2A_CARD_KEY_MULTIBASE:PILOT.cardKey}:{})}).map(([name,text])=>({name,text,type:'plain_text'})),
  ...(provisioned?['AGENT_A2A_BRIDGE_KEY','AGENT_A2A_KODY_TOKEN'].map(name=>({name,type:'secret_text'})):[])]});
  const provider={image:`registry.cloudflare.com/${'a'.repeat(32)}/vlpds@${PILOT.digest}`,status:async()=>{events.push('status');},currentCardKey:async()=>PILOT.cardKey,metadata:async()=>metadata(),publicChecks:async e=>{assert.equal(e,enabled);return {bytes:Buffer.from(card)};},restart:async phase=>{events.push('restart:'+phase);}};
- const lifecycle=new PilotLifecycle({provider,save:async s=>{state=structuredClone(s);events.push('save:'+s.phase);},load:async()=>structuredClone(state),deploy:async e=>{events.push('deploy:'+e);enabled=e;version=e?'a'.repeat(36):'b'.repeat(36);return version;},
+ const lifecycle=new PilotLifecycle({ownerConsentRequired,provider,save:async s=>{state=structuredClone(s);events.push('save:'+s.phase);},load:async()=>structuredClone(state),deploy:async (e,_deadline,policy)=>{events.push('deploy:'+e);enabled=e;consentBinding=e&&policy?.ownerConsentRequired===true;version=e?'a'.repeat(36):'b'.repeat(36);return version;},
  introspect:async(token,o)=>{assert.equal(token,'kody_at_SYNTHETIC_ONLY');events.push('introspect');return o.expected;},provision:async x=>{assert.ok(x.stdin.includes('SYNTHETIC'));events.push('provision');provisioned=true;version='c'.repeat(36);return true;},remove:async()=>{events.push('remove');provisioned=false;},card,now:()=>time,sleep:async ms=>{time+=ms/1000;},identity});
  const credential={id:'synthetic_opaque_id',idleSeconds:900,maxSeconds:3600,orgBinding:'org',profileId:PILOT.profile,scopes:['org:execute'],issuedAt:time,expiresAt:time+900,maxExpiresAt:time+3600};
- return {lifecycle,provider,events,credential,get state(){return state;},get enabled(){return enabled;},get provisioned(){return provisioned;},advance:n=>{time+=n;}};
+ return {lifecycle,provider,events,credential,get state(){return state;},get enabled(){return enabled;},get consentBinding(){return consentBinding;},get provisioned(){return provisioned;},advance:n=>{time+=n;}};
 }
 const secrets={bridgeKey:'b'.repeat(64),profileToken:'kody_at_SYNTHETIC_ONLY',cloudflareToken:'c'.repeat(40),account:'a'.repeat(32)};
 test('actual lifecycle sequencing with synthetic provider: OFF provision, active receipt, OFF then delete',async()=>{
@@ -113,4 +113,52 @@ test('diagnostic initialization failure cannot prevent OFF and cleanup',async()=
  const {createTransitionReporter}=await import('../scripts/pilot-transition-diagnostic.mjs');const f=fixture();
  await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});await f.lifecycle.provisionSecrets(secrets);await f.lifecycle.activate();
  f.lifecycle.reportOff=createTransitionReporter('disable',{runId:0},()=>{});await f.lifecycle.disable();await f.lifecycle.cleanup();assert.equal(f.enabled,false);assert.equal(f.state.phase,'cleaned');
+});
+
+
+test('explicit required-consent mode adds exact active binding then removes it before OFF cleanup',async()=>{
+ const f=fixture({ownerConsentRequired:true});
+ await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});
+ assert.equal(f.state.ownerConsentRequired,true);assert.equal(f.consentBinding,false);
+ await f.lifecycle.provisionSecrets(secrets);const ready=await f.lifecycle.activate();
+ assert.equal(ready.ownerConsentRequired,true);assert.equal(f.consentBinding,true);
+ await f.lifecycle.disable();assert.equal(f.consentBinding,false);
+ await f.lifecycle.cleanup();assert.equal(f.state.phase,'cleaned');assert.equal(f.provisioned,false);
+ assert.ok(f.events.indexOf('deploy:false')<f.events.indexOf('remove'));
+});
+test('saved required-consent mode cannot resume activation as legacy, but distinct OFF remains possible',async()=>{
+ const f=fixture({ownerConsentRequired:true});await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});
+ await f.lifecycle.provisionSecrets(secrets);f.lifecycle.ownerConsentRequired=false;
+ await assert.rejects(f.lifecycle.activate(),/consent mode differs/);
+ assert.ok(!f.events.includes('deploy:true'));await f.lifecycle.disable();await f.lifecycle.cleanup();assert.equal(f.state.phase,'cleaned');
+});
+test('missing required binding refuses activation before restart; OFF rollback restores baseline',async()=>{
+ const f=fixture({ownerConsentRequired:true});await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});await f.lifecycle.provisionSecrets(secrets);
+ const deploy=f.lifecycle.deploy;f.lifecycle.deploy=(e,deadline)=>deploy(e,deadline,{ownerConsentRequired:false});
+ await assert.rejects(f.lifecycle.activate());assert.ok(!f.events.includes('restart:activate'));
+ await f.lifecycle.disable();await f.lifecycle.cleanup();assert.equal(f.state.phase,'cleaned');
+});
+test('OFF binding residue blocks restart and secret cleanup',async()=>{
+ const f=fixture({ownerConsentRequired:true});await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});await f.lifecycle.provisionSecrets(secrets);await f.lifecycle.activate();
+ const metadata=f.provider.metadata;f.provider.metadata=async()=>{const m=await metadata();if(!f.enabled)m.bindings.push({name:'AGENT_A2A_REQUIRE_OWNER_CONSENT',type:'plain_text',text:'true'});return m;};
+ await assert.rejects(f.lifecycle.disable());assert.ok(!f.events.includes('restart:disable'));
+ await assert.rejects(f.lifecycle.cleanup());assert.ok(!f.events.includes('remove'));
+});
+
+test('invalid configured or saved consent modes fail closed',async()=>{
+ for(const ownerConsentRequired of ['true',null,1])assert.throws(()=>fixture({ownerConsentRequired}),/Explicit consent mode/);
+ for(const invalid of ['true',null,1]){
+  const f=fixture();await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});f.state.ownerConsentRequired=invalid;
+  await assert.rejects(f.lifecycle.provisionSecrets(secrets),/consent mode differs/);
+  await assert.rejects(f.lifecycle.disable(),/consent mode differs/);
+  assert.ok(!f.events.includes('provision'));
+ }
+});
+
+test('selector drift after activation still allows distinct OFF while preserving saved required policy',async()=>{
+ const f=fixture({ownerConsentRequired:true});await f.lifecycle.preflight({account:'a'.repeat(32),credential:f.credential});await f.lifecycle.provisionSecrets(secrets);await f.lifecycle.activate();
+ f.lifecycle.ownerConsentRequired=false;await assert.rejects(f.lifecycle.activate(),/consent mode differs/);
+ await f.lifecycle.disable();await f.lifecycle.cleanup();
+ assert.equal(f.state.ownerConsentRequired,true);assert.equal(f.consentBinding,false);assert.equal(f.state.phase,'cleaned');
+ assert.equal(f.events.filter(e=>e==='deploy:true').length,1);assert.equal(f.events.filter(e=>e==='deploy:false').length,1);
 });

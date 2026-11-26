@@ -4,7 +4,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: exp710-build-only-8fb5949
+  group: exp710-build-only-703c118
   cancel-in-progress: false
 jobs:
   qualify:
@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      REVISION: 8fb5949c400018146ef58e594697859403c0d247
+      REVISION: 703c118c66277ca42c45808a2f6cc620429c6718
       RUNTIME: agent-a2a
     steps:
       - name: Read reviewed qualification tools
@@ -23,7 +23,7 @@ jobs:
       - name: Read immutable candidate source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 8fb5949c400018146ef58e594697859403c0d247
+          ref: 703c118c66277ca42c45808a2f6cc620429c6718
           path: candidate
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -35,9 +35,17 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C candidate rev-parse HEAD)" = "$REVISION"
-          test "$(git -C candidate rev-parse 'HEAD^{tree}')" = 1259458a9dd19d4f03173005951846424d7bb766
+          test "$(git -C candidate rev-parse 'HEAD^{tree}')" = a5578cb57829d36f4f2c0bb7f1b507af8783a023
           test -z "$(git -C candidate status --porcelain)"
           python3 -m unittest discover -s qualification/.github/scripts -p 'test_qualify_agent_oci.py'
+      - name: Verify pinned hosted consent enable, OFF and rollback contract
+        working-directory: candidate/deploy/cloudflare
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          node --test test/agent-runtime.test.ts test/hosted-consent-supervisor.test.mjs test/deploy-artifact.test.mjs
+          npm run typecheck
       - name: Build local AMD64 image and OCI archive without publication
         working-directory: candidate
         shell: bash
@@ -56,14 +64,14 @@ jobs:
       - name: Retain bounded qualification receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: agent-runtime-receipt-8fb5949-${{ github.run_id }}
+          name: agent-runtime-receipt-703c118-${{ github.run_id }}
           path: ${{ runner.temp }}/oci-qualification.json
           if-no-files-found: error
           retention-days: 7
       - name: Retain OCI archive only in GitHub artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: agent-runtime-oci-8fb5949-${{ github.run_id }}
+          name: agent-runtime-oci-703c118-${{ github.run_id }}
           path: ${{ runner.temp }}/agent-runtime.oci.tar
           if-no-files-found: error
           retention-days: 7

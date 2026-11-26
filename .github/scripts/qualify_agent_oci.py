@@ -6,7 +6,7 @@ import re
 import sys
 import tarfile
 
-REVISION = "8fb5949c400018146ef58e594697859403c0d247"
+REVISION = "703c118c66277ca42c45808a2f6cc620429c6718"
 DIGEST = re.compile(r"sha256:([a-f0-9]{64})\Z")
 
 

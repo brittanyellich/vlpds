@@ -286,6 +286,7 @@ async fn ident_link_binding_requires_both_consents_and_either_party_can_revoke()
     bridge.check_denials(&alice, &bob, &alice_binding).await;
     bridge.revoke_in_flight(&s, &alice, "race").await;
     bridge.check(&bob, "bob", Some(&bob_binding)).await;
+    bridge.check_chat(&s, [(&alice, &agent), (&bob, &bob_agent)]).await;
 
     let restore = plc.data(&agent.did).unwrap()["alsoKnownAs"].clone();
     let (server, oauth_server, directory, owner, operator) = (&s, &srv, &plc, &alice, &agent);

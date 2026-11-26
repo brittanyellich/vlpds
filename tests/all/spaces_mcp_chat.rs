@@ -5,9 +5,10 @@ use crate::common::spaces::SpaceClient;
 use crate::common::{Resp, TestServer, J};
 use serde_json::json;
 use std::future::Future;
+use vlpds::xrpc::agent_chat::{ChatSession, ToolResult, HISTORY, SEND, START};
 
 mod auth;
-mod http;
+pub(crate) mod http;
 
 const SPACE_TYPE: &str = "com.example.mcpchat";
 const MESSAGE: &str = "com.example.mcpchat.message";
@@ -17,28 +18,6 @@ const SCOPE: &str = concat!(
     "&collection=com.example.mcpchat.message&collection=com.example.mcpchat.thread",
 );
 
-const START: &str = "spaces_chat_start";
-const SEND: &str = "spaces_chat_send";
-const HISTORY: &str = "spaces_chat_history";
-
-fn tools() -> J {
-    let id = json!({"type": "string", "pattern": "^[a-z0-9]{1,64}$"});
-    let text = json!({"type": "string", "minLength": 1, "maxLength": 4096});
-    let tool = |name, description, properties: J, required: J| {
-        json!({"name": name, "description": description, "inputSchema": {
-            "type": "object", "properties": properties, "required": required, "additionalProperties": false
-        }})
-    };
-    json!({"tools": [
-        tool(START, "Start or reopen the approved conversation as its owner", json!({}), json!([])),
-        tool(SEND, "Append one message using a stable client-generated ID",
-            json!({"conversationId": id, "messageId": id, "text": text}),
-            json!(["conversationId", "messageId", "text"])),
-        tool(HISTORY, "Resume a conversation and read its messages",
-            json!({"conversationId": id}), json!(["conversationId"])),
-    ]})
-}
-
 struct Chat<'a> {
     caller: &'a SpaceClient,
     owner: &'a str,
@@ -47,74 +26,49 @@ struct Chat<'a> {
     conversation: &'a str,
 }
 
-type ToolResult = Result<J, &'static str>;
-
-fn id<'a>(input: &'a J, name: &str) -> Option<&'a str> {
-    let value = input[name].as_str()?;
-    if value.is_empty() || value.len() > 64 || !value.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) {
-        return None;
+impl ChatSession for Chat<'_> {
+    fn conversation(&self) -> &str {
+        self.conversation
     }
-    Some(value)
+
+    async fn start(&self) -> ToolResult {
+        if self.caller.did != self.owner {
+            return Err("conversation_unavailable");
+        }
+        let record = json!({"$type": THREAD, "agent": self.agent});
+        let response = self.create_record(THREAD, "self", &record).await;
+        if response.json["error"] == "RecordAlreadyExists" {
+            let credential = self.credential().await?;
+            if self.thread(&credential).await? != record {
+                return Err("conversation_unavailable");
+            }
+        } else if response.status != 200 {
+            return Err("storage_error");
+        }
+        Ok(json!({"conversationId": self.conversation}))
+    }
+
+    async fn send(&self, message_id: &str, text: &str) -> ToolResult {
+        self.active_thread().await?;
+        self.write_message(message_id, text).await
+    }
+
+    async fn history(&self) -> ToolResult {
+        let credential = self.active_thread().await?;
+        self.read_history(&credential).await
+    }
 }
 
 impl Chat<'_> {
-    async fn call(&self, name: &str, input: J) -> J {
-        let result = self.dispatch(name, input).await;
-        let (value, is_error) = match result {
-            Ok(value) => (value, false),
-            Err(code) => (json!({"code": code}), true),
-        };
-        json!({
-            "content": [{"type": "text", "text": value.to_string()}],
-            "structuredContent": value,
-            "isError": is_error,
-        })
-    }
-
-    async fn dispatch(&self, name: &str, input: J) -> ToolResult {
-        let count = input.as_object().ok_or("invalid_arguments")?.len();
-        let text = match name {
-            START if count == 0 => None,
-            HISTORY if count == 1 && id(&input, "conversationId").is_some() => None,
-            SEND if count == 3 && id(&input, "conversationId").is_some() && id(&input, "messageId").is_some() => Some(
-                input["text"]
-                    .as_str()
-                    .filter(|s| !s.is_empty() && s.chars().count() <= 4096)
-                    .ok_or("invalid_arguments")?,
-            ),
-            _ => return Err("invalid_arguments"),
-        };
+    async fn active_thread(&self) -> Result<String, &'static str> {
         if self.caller.did != self.owner && self.caller.did != self.agent {
-            return Err("conversation_unavailable");
-        }
-        if name == START {
-            if self.caller.did != self.owner {
-                return Err("conversation_unavailable");
-            }
-            let record = json!({"$type": THREAD, "agent": self.agent});
-            let response = self.create_record(THREAD, "self", &record).await;
-            if response.json["error"] == "RecordAlreadyExists" {
-                let credential = self.credential().await?;
-                if self.thread(&credential).await? != record {
-                    return Err("conversation_unavailable");
-                }
-            } else if response.status != 200 {
-                return Err("storage_error");
-            }
-            return Ok(json!({"conversationId": self.conversation}));
-        }
-
-        if input["conversationId"] != self.conversation {
             return Err("conversation_unavailable");
         }
         let credential = self.credential().await?;
         if self.thread(&credential).await?["agent"] != self.agent {
             return Err("conversation_unavailable");
         }
-        match text {
-            Some(text) => self.send(input["messageId"].as_str().unwrap(), text).await,
-            None => self.history(&credential).await,
-        }
+        Ok(credential)
     }
 
     async fn credential(&self) -> Result<String, &'static str> {
@@ -149,7 +103,7 @@ impl Chat<'_> {
             .await
     }
 
-    async fn send(&self, message_id: &str, text: &str) -> ToolResult {
+    async fn write_message(&self, message_id: &str, text: &str) -> ToolResult {
         let record = json!({"$type": MESSAGE, "text": text});
         let response = self.create_record(MESSAGE, message_id, &record).await;
         let stored = match (response.status, response.json["error"].as_str()) {
@@ -180,7 +134,7 @@ impl Chat<'_> {
         Ok(json!({"messageId": message_id, "authorDid": self.caller.did, "cid": stored.json["cid"]}))
     }
 
-    async fn history(&self, credential: &str) -> ToolResult {
+    async fn read_history(&self, credential: &str) -> ToolResult {
         let mut messages = Vec::new();
         for repo in [self.owner, self.agent] {
             let mut cursor: Option<String> = None;
@@ -241,6 +195,18 @@ async fn chat_session(
     }
     let scoped = SpaceClient::for_account(server, &caller.did, &caller.handle, &caller.session_jwt, &scope).await;
     http::Session::new(scoped, &owner.did, &agent.did, space, conversation)
+}
+
+pub(crate) async fn owner_session(
+    server: &TestServer,
+    owner: &crate::oauth::Account,
+    agent: &crate::oauth::Account,
+    conversation: &str,
+) -> http::Session {
+    let owner = SpaceClient::for_account(server, &owner.did, &owner.handle, &owner.jwt, SCOPE).await;
+    let agent = SpaceClient::for_account(server, &agent.did, &agent.handle, &agent.jwt, "atproto").await;
+    let space = approved_space(&owner, &agent, conversation).await;
+    chat_session(server, &owner, &owner, &agent, &space, conversation).await
 }
 
 pub(crate) async fn check_verified_bridge<F, Fut>(

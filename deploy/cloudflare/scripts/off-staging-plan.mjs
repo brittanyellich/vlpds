@@ -40,7 +40,7 @@ export function prepareOffStageConfig(env){
 export function rollbackDeployment(){
  // Supported Workers deployment API: select the existing version, never upload
  // current source and mislabel it a restoration of the old Worker.
- return {strategy:'percentage',versions:[{version_id:OFF_STAGE.worker,percentage:100}]};
+ return {strategy:'percentage',versions:[{version_id:OFF_STAGE.worker,percentage:100}],code_update_strategy:'immediate'};
 }
 export function validateOffSnapshot(s,{account,worker,digest,script,ordinary,now,healthy=true}){
  if(!Number.isSafeInteger(now)||!Number.isSafeInteger(s?.observedAt)||s.observedAt>now||now-s.observedAt>30||!uuid(worker)||s.meta?.id!==worker)throw fail();
@@ -84,17 +84,21 @@ export async function qualifyOffTransition({operation,grant,account,transport,no
   if(prepared?.revision!==OFF_STAGE.revision||prepared.manifest!==OFF_STAGE.candidate||prepared.ociConfig!==OFF_STAGE.config||!/^[a-f0-9]{64}$/.test(prepared.script??''))throw fail();
  }
  if(now()>=grant.expiresAt||await transport.claim(grant.id)!==true||now()>=grant.expiresAt)throw fail();
- let worker;
+ const immediate=await transport.snapshot();
+ validateOffSnapshot(immediate,{account,worker:sourceWorker,digest:sourceDigest,script:before.meta.scriptEtag,ordinary,now:now(),healthy:operation==='stage'});
+ if(now()>=grant.expiresAt)throw fail();
+ let worker,expectedScript;
  if(operation==='stage'){
   const published=await transport.publish(prepared);
-  if(published?.script!==prepared.script||published.revision!==prepared.revision||published.manifest!==prepared.manifest||published.ociConfig!==prepared.ociConfig)throw fail();
-  worker=published.worker;
+  if(published?.script!==prepared.script||published.revision!==prepared.revision||published.manifest!==prepared.manifest||published.ociConfig!==prepared.ociConfig||!/^[a-f0-9]{64}$/.test(published.scriptEtag??''))throw fail();
+  worker=published.worker;expectedScript=published.scriptEtag;
  }
  else {await transport.restore(rollbackDeployment());worker=OFF_STAGE.worker;}
  if(!uuid(worker)||operation==='stage'&&worker===OFF_STAGE.worker)throw fail();
  const target=operation==='stage'?OFF_STAGE.candidate:OFF_STAGE.rollback;
  const selected=await transport.snapshot();
- validateOffSnapshot(selected,{account,worker,digest:target,script:operation==='rollback'?OFF_STAGE.script:prepared.script,ordinary,now:now(),healthy:false});
+ validateOffSnapshot(selected,{account,worker,digest:target,script:operation==='rollback'?OFF_STAGE.script:expectedScript,ordinary,now:now(),healthy:false});
+ if(operation==='stage'&&selected.contentHash!==prepared.script)throw fail();
  // Check authority again immediately before the second write. A partially
  // completed transition must be reconciled; it never extends its own grant.
  if(now()>=grant.expiresAt)throw fail();

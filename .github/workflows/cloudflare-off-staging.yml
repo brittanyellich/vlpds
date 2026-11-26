@@ -1,0 +1,78 @@
+name: Stage qualified agent OFF (manual only)
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: One OFF stage or exact historical Worker recovery (separate approval required)
+        type: choice
+        options: [stage, rollback]
+        required: true
+      exclusive_window:
+        description: Confirm approved exclusive Worker/config/secret write freeze through final readback
+        type: boolean
+        default: false
+        required: true
+      stage_run:
+        description: Exact successful stage run for rollback (same reviewed workflow revision)
+        type: string
+        default: ''
+      reviewed_head:
+        description: Exact reviewed main SHA approved for this operation
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+  deployments: write
+concurrency:
+  group: crate-pds-cloudflare-production
+  cancel-in-progress: false
+jobs:
+  off:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.exclusive_window
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 703c118c66277ca42c45808a2f6cc620429c6718
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.12.1'
+      - name: Install pinned tooling without image build or registry authorization
+        run: |
+          npm ci --prefix deploy/cloudflare --ignore-scripts --no-audit --no-fund
+          npm ci --prefix candidate/deploy/cloudflare --ignore-scripts --no-audit --no-fund
+          npm run postinstall --prefix candidate/deploy/cloudflare
+      - name: Authenticate exact GitHub source evidence (no provider access)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPERATION: ${{ inputs.operation }}
+          STAGE_RUN: ${{ inputs.stage_run }}
+        run: python3 .github/scripts/off_staging_evidence.py
+      - name: Claim one durable intent and perform only approved OFF transition
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPERATION: ${{ inputs.operation }}
+          EXCLUSIVE_WINDOW: ${{ inputs.exclusive_window }}
+          REVIEWED_HEAD: ${{ inputs.reviewed_head }}
+          CANDIDATE_ROOT: ${{ github.workspace }}/candidate
+          DEPLOY_CONFIG: ${{ secrets.DEPLOY_CONFIG }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          VLPDS_DEPLOY_TOKEN: ${{ secrets.VLPDS_DEPLOY_TOKEN }}
+        run: node deploy/cloudflare/scripts/off-staging-transport.mjs
+      - name: Retain bounded sanitized transition receipt only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: exp710-off-staging-${{ github.run_id }}
+          path: ${{ runner.temp }}/exp710-off-staging-receipt.json
+          if-no-files-found: error
+          retention-days: 7

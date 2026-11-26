@@ -132,6 +132,7 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm test
       - run: npm run typecheck
+      - run: python3 -m unittest discover -s ../../.github/scripts -p test_off_staging_evidence.py
       - run: npm run test:runtime
 
   container:

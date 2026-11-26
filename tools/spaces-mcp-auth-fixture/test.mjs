@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { packagePreview } from "./preview-package.mjs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,27 +47,11 @@ const directory = await mkdtemp(join(tmpdir(), "exp711-mcp-auth-"));
 let child;
 try {
   if (verifyBinding) await phase(`issuer ${origin}`);
-  await copyFile(new URL("./worker.mjs", import.meta.url), join(directory, "worker.mjs"));
-  await copyFile(provider, join(directory, "provider.mjs"));
-  const config = join(directory, "fixture.capnp");
-  await writeFile(config, `
-using Workerd = import "/workerd/workerd.capnp";
-const config :Workerd.Config = (
-  services = [(name = "fixture", worker = (
-    compatibilityDate = "2026-11-17",
-    compatibilityFlags = ["global_fetch_strictly_public"],
-    modules = [(name = "worker.mjs", esModule = embed "worker.mjs"),
-               (name = "provider.mjs", esModule = embed "provider.mjs")],
-    bindings = [(name = "ORIGIN", text = "${origin}"),
-                (name = "SPACES", service = "spaces"),
-                (name = "SPACES_URL", text = "http://${backend}/mcp"),
-                (name = "BINDINGS", text = ${JSON.stringify(verifyBinding ? signedBindings : workerBindings)}),
-                (name = "BRIDGE_TOKEN", text = ${JSON.stringify(bridgeToken ?? "")}),
-                (name = "SIGNER", text = ${JSON.stringify(signer ? JSON.stringify(signer) : "")})]
-  )), (name = "spaces", external = (address = "${backend}", http = ()) )],
-  sockets = [(name = "http", address = "${address}", http = (), service = "fixture")]
-);
-`, { mode: 0o600 });
+  const config = await packagePreview({
+    directory, provider, listener: address, backend,
+    bindings: verifyBinding ? signedBindings : workerBindings,
+    bridgeToken, signer,
+  });
   child = spawn(workerd, ["serve", config], { stdio: ["ignore", "inherit", "inherit"] });
   let response;
   for (let attempt = 0; attempt < 40 && !response; attempt++) {

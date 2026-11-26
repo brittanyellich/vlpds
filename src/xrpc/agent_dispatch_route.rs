@@ -1,7 +1,8 @@
 //! Opt-in HTTP transport for a signed MCP dispatch consumer.
 
+use super::agent_chat::{dispatch_scoped, ScopedSession, SessionScope};
 use super::agent_dispatch::Binding;
-use super::agent_dispatch_auth::{admit, Authority, MAX_BODY_BYTES, METHOD};
+use super::agent_dispatch_auth::{admit_request, Admission, Authority, MAX_BODY_BYTES, METHOD};
 use super::App;
 use axum::{
     body::Bytes,
@@ -15,7 +16,7 @@ use futures::future::BoxFuture;
 use std::future::Future;
 use std::sync::Arc;
 
-type Handler = dyn Fn(Binding, Bytes) -> BoxFuture<'static, Response> + Send + Sync;
+type Handler = dyn Fn(Arc<App>, Admission, Bytes) -> BoxFuture<'static, Response> + Send + Sync;
 
 #[derive(Clone)]
 pub struct Mount {
@@ -31,6 +32,14 @@ impl Mount {
     pub fn new<F, Fut>(signer: &str, issuer: &str, resource: &str, dispatch: F) -> anyhow::Result<Self>
     where
         F: Fn(Binding, Bytes) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        Self::with_admission(signer, issuer, resource, move |_, admission, body| dispatch(admission.binding, body))
+    }
+
+    fn with_admission<F, Fut>(signer: &str, issuer: &str, resource: &str, dispatch: F) -> anyhow::Result<Self>
+    where
+        F: Fn(Arc<App>, Admission, Bytes) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response> + Send + 'static,
     {
         anyhow::ensure!(vlatproto::syntax::valid_did(signer), "Invalid MCP dispatch signer DID");
@@ -51,7 +60,23 @@ impl Mount {
             signer: signer.into(),
             issuer: issuer.into(),
             resource: resource.into(),
-            dispatch: Arc::new(move |binding, body| Box::pin(dispatch(binding, body))),
+            dispatch: Arc::new(move |app, admission, body| Box::pin(dispatch(app, admission, body))),
+        })
+    }
+
+    /// Open a fresh server-owned chat session only after signed admission.
+    /// The provider supplies scoped credentials for this binding from
+    /// trusted server state, independently of the MCP request body.
+    pub fn chat<S, F, Fut>(signer: &str, issuer: &str, resource: &str, open: F) -> anyhow::Result<Self>
+    where
+        S: ScopedSession + Send + 'static,
+        F: Fn(SessionScope) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<S>> + Send + 'static,
+    {
+        let open = Arc::new(open);
+        Self::with_admission(signer, issuer, resource, move |app, admission, body| {
+            let open = open.clone();
+            async move { dispatch_scoped(&app, &*open, admission, &body).await }
         })
     }
 
@@ -73,10 +98,10 @@ async fn request(State((app, mount)): State<(Arc<App>, Mount)>, uri: Uri, header
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let authority = Authority { signer: &mount.signer, issuer: &mount.issuer, resource: &mount.resource };
-    let Ok(binding) = admit(&app, &authority, token, &body).await else {
+    let Ok(admission) = admit_request(&app, &authority, token, &body).await else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let mut response = (mount.dispatch)(binding, body).await;
+    let mut response = (mount.dispatch)(app, admission, body).await;
     response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
 }

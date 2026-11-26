@@ -1,5 +1,5 @@
 use super::*;
-use crate::spaces_mcp_chat::{http::Session, owner_session};
+use crate::spaces_mcp_chat::{http::Session, owner_session, reopen_owner_session};
 use axum::{response::IntoResponse, Json};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
 use sha2::{Digest, Sha256};
@@ -79,6 +79,97 @@ impl Bridge {
         .unwrap()
     }
 
+    pub(super) async fn check_scoped_restart(
+        &mut self,
+        plc: &MockPlc,
+        rotation: Arc<Keypair>,
+        store: Arc<object_store::memory::InMemory>,
+        alice: &Account,
+        bob: &Account,
+    ) {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Weak,
+        };
+        use vlpds::xrpc::agent_chat::{HISTORY, SEND};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let opened = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        let server = Arc::new(OnceLock::<Weak<TestServer>>::new());
+        let bob_access = Arc::new(Account { did: bob.did.clone(), handle: bob.handle.clone(), jwt: bob.jwt.clone() });
+        let open = {
+            let (server, calls, opened, resume) = (server.clone(), calls.clone(), opened.clone(), resume.clone());
+            move |scope: vlpds::xrpc::agent_chat::SessionScope| {
+                let (server, calls, bob, opened, resume) =
+                    (server.clone(), calls.clone(), bob_access.clone(), opened.clone(), resume.clone());
+                async move {
+                    let call = calls.fetch_add(1, Ordering::Relaxed);
+                    let server = server.get()?.upgrade()?;
+                    if scope.owner() != bob.did {
+                        return None;
+                    }
+                    let session = reopen_owner_session(&server, &bob, scope).await;
+                    if call == 4 {
+                        opened.notify_one();
+                        resume.notified().await;
+                    }
+                    Some(session)
+                }
+            }
+        };
+        let mount = Mount::chat(&self.signer, ISSUER, RESOURCE, open).unwrap();
+        let restarted = Arc::new(node(plc, rotation, store, "scoped-chat-restarted", Some(mount)).await);
+        assert!(server.set(Arc::downgrade(&restarted)).is_ok());
+        self.connect(&restarted).await;
+
+        let alice_args = json!({"conversationId": "mountedalice"});
+        assert_eq!(self.chat_call(alice, "chat-alice", HISTORY, alice_args.clone()).await.status(), 401);
+        assert_eq!(self.chat_call(alice, "chat-bob", HISTORY, alice_args.clone()).await.status(), 401);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let denied = Self::chat_result(self.chat_call(bob, "chat-bob", HISTORY, alice_args).await).await;
+        assert_eq!(denied["code"], "conversation_unavailable");
+        let message = json!({"conversationId": "mountedbob", "messageId": "restart", "text": "Synthetic restart"});
+        let receipt = Self::chat_result(self.chat_call(bob, "chat-bob", SEND, message.clone()).await).await;
+        assert_eq!(receipt["authorDid"], bob.did);
+        assert_eq!(Self::chat_result(self.chat_call(bob, "chat-bob", SEND, message).await).await, receipt);
+        let bob_args = json!({"conversationId": "mountedbob"});
+        let history = Self::chat_result(self.chat_call(bob, "chat-bob", HISTORY, bob_args.clone()).await).await;
+        let messages = history["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["cid"], receipt["cid"]);
+
+        let raced = json!({"conversationId": "mountedbob", "messageId": "raced", "text": "Revoked during opening"});
+        let (response, ()) = tokio::join!(self.chat_call(bob, "chat-bob", SEND, raced), async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), opened.notified()).await.unwrap();
+            let credentials = owner_credentials(&restarted, bob).await;
+            revoke(&restarted.app, &credentials, grant(bob, "chat-bob"))
+                .await
+                .unwrap_or_else(|e| panic!("{}", e.message));
+            resume.notify_one();
+        });
+        assert_eq!(response.status(), 401);
+        assert_eq!(self.chat_call(bob, "chat-bob", HISTORY, bob_args).await.status(), 401);
+        assert_eq!(calls.load(Ordering::Relaxed), 5);
+    }
+
+    async fn chat_call(&self, owner: &Account, id: &str, name: &str, args: J) -> reqwest::Response {
+        let body = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": args},
+        }))
+        .unwrap();
+        let mut claims = self.claims(owner, id);
+        claims["body_sha256"] = json!(hex::encode(Sha256::digest(&body)));
+        let token = Self::sign(&self.key, &claims);
+        self.send(&token, &body).await
+    }
+
+    async fn chat_result(response: reqwest::Response) -> J {
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        response.error_for_status().unwrap().json::<J>().await.unwrap()["result"]["structuredContent"].clone()
+    }
+
     pub(super) async fn check_chat(&self, s: &TestServer, pairs: [(&Account, &Account); 2]) {
         use vlpds::xrpc::agent_chat::{HISTORY, SEND, START};
 
@@ -93,46 +184,33 @@ impl Bridge {
         }
         assert!(self.chats.set([alice_chat, bob_chat]).is_ok());
 
-        let invoke = |owner: &Account, id: &str, name: &str, args: J| {
-            let body = serde_json::to_vec(&json!({
-                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"name": name, "arguments": args},
-            }))
-            .unwrap();
-            let mut claims = self.claims(owner, id);
-            claims["body_sha256"] = json!(hex::encode(Sha256::digest(&body)));
-            let token = Self::sign(&self.key, &claims);
-            async move { self.send(&token, &body).await }
-        };
-        async fn result(response: reqwest::Response) -> J {
-            assert_eq!(response.headers()["cache-control"], "no-store");
-            response.error_for_status().unwrap().json::<J>().await.unwrap()["result"]["structuredContent"].clone()
-        }
-
         for (owner, grant, conversation) in [(alice, "chat-alice", "mountedalice"), (bob, "chat-bob", "mountedbob")] {
             assert_eq!(
-                result(invoke(owner, grant, START, json!({})).await).await,
+                Self::chat_result(self.chat_call(owner, grant, START, json!({})).await).await,
                 json!({"conversationId": conversation})
             );
         }
         let message =
             json!({"conversationId": "mountedalice", "messageId": "first", "text": "Mounted synthetic message"});
-        let receipt = result(invoke(alice, "chat-alice", SEND, message.clone()).await).await;
+        let receipt = Self::chat_result(self.chat_call(alice, "chat-alice", SEND, message.clone()).await).await;
         assert_eq!(receipt["authorDid"], alice.did);
-        assert_eq!(result(invoke(alice, "chat-alice", SEND, message.clone()).await).await, receipt);
-        assert_eq!(invoke(bob, "chat-alice", SEND, message.clone()).await.status(), 401);
-        let denied = result(invoke(bob, "chat-bob", SEND, message).await).await;
+        assert_eq!(Self::chat_result(self.chat_call(alice, "chat-alice", SEND, message.clone()).await).await, receipt);
+        assert_eq!(self.chat_call(bob, "chat-alice", SEND, message.clone()).await.status(), 401);
+        let denied = Self::chat_result(self.chat_call(bob, "chat-bob", SEND, message).await).await;
         assert_eq!(denied["code"], "conversation_unavailable");
 
         let alice_args = json!({"conversationId": "mountedalice"});
-        let alice_history = result(invoke(alice, "chat-alice", HISTORY, alice_args.clone()).await).await;
+        let alice_history =
+            Self::chat_result(self.chat_call(alice, "chat-alice", HISTORY, alice_args.clone()).await).await;
         let messages = alice_history["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["cid"], receipt["cid"]);
         let credentials = owner_credentials(s, alice).await;
         revoke(&s.app, &credentials, grant(alice, "chat-alice")).await.unwrap_or_else(|e| panic!("{}", e.message));
-        assert_eq!(invoke(alice, "chat-alice", HISTORY, alice_args).await.status(), 401);
-        let bob_history = result(invoke(bob, "chat-bob", HISTORY, json!({"conversationId": "mountedbob"})).await).await;
+        assert_eq!(self.chat_call(alice, "chat-alice", HISTORY, alice_args).await.status(), 401);
+        let bob_history =
+            Self::chat_result(self.chat_call(bob, "chat-bob", HISTORY, json!({"conversationId": "mountedbob"})).await)
+                .await;
         assert_eq!(bob_history["messages"], json!([]));
     }
 

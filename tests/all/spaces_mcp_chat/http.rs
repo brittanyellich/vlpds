@@ -19,8 +19,7 @@ use vlpds::xrpc::agent_chat::{self, VERSION, VERSION_HEADER};
 pub(crate) struct Session {
     caller: SpaceClient,
     owner: String,
-    agent: String,
-    space: String,
+    binding: Binding,
     conversation: String,
     token: String,
 }
@@ -30,15 +29,14 @@ impl Session {
         Self {
             caller,
             owner: owner.into(),
-            agent: agent.into(),
-            space: space.into(),
+            binding: Binding { agent: agent.into(), space: space.into() },
             conversation: conversation.into(),
             token: format!("{:032x}{:032x}", rand::random::<u128>(), rand::random::<u128>()),
         }
     }
 
     pub(crate) fn binding(&self) -> Binding {
-        Binding { agent: self.agent.clone(), space: self.space.clone() }
+        self.binding.clone()
     }
 
     async fn owner_credentials(&self) -> vlpds::xrpc::XResult<vlpds::xrpc::authn::Credentials> {
@@ -51,17 +49,41 @@ impl Session {
     }
 
     pub(crate) async fn dispatch(&self, body: &[u8]) -> Response {
-        agent_chat::handle(&self.chat(), body).await
+        agent_chat::handle(self, body).await
     }
 
     fn chat(&self) -> Chat<'_> {
         Chat {
             caller: &self.caller,
             owner: &self.owner,
-            agent: &self.agent,
-            space: &self.space,
+            agent: &self.binding.agent,
+            space: &self.binding.space,
             conversation: &self.conversation,
         }
+    }
+}
+
+impl agent_chat::ChatSession for Session {
+    fn conversation(&self) -> &str {
+        &self.conversation
+    }
+
+    async fn start(&self) -> agent_chat::ToolResult {
+        self.chat().start().await
+    }
+
+    async fn send(&self, message_id: &str, text: &str) -> agent_chat::ToolResult {
+        self.chat().send(message_id, text).await
+    }
+
+    async fn history(&self) -> agent_chat::ToolResult {
+        self.chat().history().await
+    }
+}
+
+impl agent_chat::ScopedSession for Session {
+    fn binding(&self) -> &Binding {
+        &self.binding
     }
 }
 
@@ -269,7 +291,12 @@ impl Server {
             .caller
             .get(
                 "com.atproto.space.getRecord",
-                &[("space", &session.space), ("repo", &session.owner), ("collection", super::MESSAGE), ("rkey", key)],
+                &[
+                    ("space", &session.binding.space),
+                    ("repo", &session.owner),
+                    ("collection", super::MESSAGE),
+                    ("rkey", key),
+                ],
             )
             .await
             .err(400, "RecordNotFound");

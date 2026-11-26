@@ -79,7 +79,7 @@ export function inspectArtifact(image, runtime, revision, run = docker, configDi
     // Prove the baked workerd and supervisor/bridge can start without a real token or network.
     if (!run([...base, '--entrypoint', '/opt/agent-home/.cache/kody/workerd/1.20260815.1-linux-64/workerd', info.Id, '--version']).includes('2026-08-15')) throw new Error('Baked workerd missing');
     const enabledHelp = run([...base,
-      '-e', 'VLPDS_AGENT_A2A_ENABLED=true', '-e', 'VLPDS_AGENT_A2A_CALLER=did:plc:vsgwub3c3pupqt3yhxfmecma',
+      '-e', 'VLPDS_AGENT_A2A_ENABLED=true', '-e', 'VLPDS_AGENT_A2A_REQUIRE_OWNER_CONSENT=true', '-e', 'VLPDS_AGENT_A2A_CALLER=did:plc:vsgwub3c3pupqt3yhxfmecma',
       '-e', `VLPDS_AGENT_BRIDGE_KEY=${'a'.repeat(64)}`, '-e', 'VLPDS_AGENT_KODY_TOKEN=kody_at_SYNTHETIC_ARTIFACT_CHECK',
       '-e', 'VLPDS_AGENT_A2A_SIGNED_CARD={"helpOnly":true}', '-e', 'VLPDS_AGENT_A2A_CARD_KEY=zSyntheticPublicPin', info.Id, '--help']);
     if (!enabledHelp.includes('--agent-a2a-config')) throw new Error('Opt-in supervisor readiness missing');

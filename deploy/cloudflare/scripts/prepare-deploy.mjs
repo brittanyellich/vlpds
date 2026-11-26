@@ -21,6 +21,13 @@ export function prepareDeployment(env, artifact, { preflight = false } = {}) {
       !config.routes?.some(r => r.pattern === 'admin.crate.social/*')) {
     throw new Error('Production configuration does not match the known live deployment');
   }
+  const consent = config.vars.AGENT_A2A_REQUIRE_OWNER_CONSENT;
+  if (consent !== undefined && consent !== 'true' && consent !== 'false') {
+    throw new Error('Explicit boolean owner consent configuration required');
+  }
+  if (consent === 'true' && runtime !== 'agent-a2a' && OPERATION !== 'rollback') {
+    throw new Error('Owner consent admission requires agent-capable runtime');
+  }
   // Stage capable images without activating anything. Secret provisioning and
   // activation require their own reviewed, explicitly approved workflow change.
   if (config.vars.AGENT_A2A_ENABLED !== undefined && config.vars.AGENT_A2A_ENABLED !== 'false') {
@@ -31,6 +38,9 @@ export function prepareDeployment(env, artifact, { preflight = false } = {}) {
   }
   config.main = 'src/index.ts';
   config.vars.AGENT_A2A_ENABLED = 'false';
+  // Absence preserves the existing default-off binding set; rollback removes opt-in.
+  if (OPERATION === 'rollback' || consent === undefined) delete config.vars.AGENT_A2A_REQUIRE_OWNER_CONSENT;
+  else config.vars.AGENT_A2A_REQUIRE_OWNER_CONSENT = consent;
   if (runtime === 'agent-a2a') config.vars.AGENT_A2A_RUNTIME = 'native-profile-v1';
   if (OPERATION === 'rollback' && runtime === 'pds-runtime') {
     registryImage(ROLLBACK_IMAGE, account);

@@ -24,6 +24,8 @@ pub struct Config {
     pub agent_owner_consent: Option<crate::agent_enrollment::OwnerConsentTransport>,
     /// Optional signed MCP transport. Requires an embedding tool handler.
     pub agent_dispatch: Option<crate::xrpc::agent_dispatch_route::Mount>,
+    /// Explicit fixed-pilot public discovery mount; None leaves the method unsupported.
+    pub agent_discovery: Option<crate::agent_discovery_route::Mount>,
     pub handle_domain: String,
     pub service_did: String,
     pub jwt_secret: String,
@@ -279,6 +281,7 @@ impl Default for Config {
             agent_a2a: None,
             agent_owner_consent: None,
             agent_dispatch: None,
+            agent_discovery: None,
             handle_domain: "vlpds.test".into(),
             service_did: "did:web:localhost".into(),
             jwt_secret: DEV_JWT_SECRET.into(),
@@ -391,6 +394,9 @@ pub async fn build(cfg: Config) -> anyhow::Result<Arc<xrpc::App>> {
         cfg.agent_a2a.is_none() || cfg.agent_contact_pilot.is_none(),
         "Choose native A2A or dev pilot, not both"
     );
+    if let Some(mount) = &cfg.agent_discovery {
+        mount.validate(&cfg.public_url, &cfg.service_did, cfg.dev_mode)?;
+    }
     if let Some(a2a) = &cfg.agent_a2a {
         a2a.validate(cfg.dev_mode, &cfg.public_url)?;
         a2a.validate_owner_consent(cfg.agent_owner_consent.as_ref())?;
@@ -764,6 +770,10 @@ const PEER_ONLY_HEADERS: [&str; 5] = [
 pub fn public_router(app: &Arc<xrpc::App>) -> axum::Router {
     let router = router(app);
     let router = match &app.config.agent_dispatch {
+        Some(mount) => router.merge(xrpc::with_http_layers(mount.routes(app.clone()), app)),
+        None => router,
+    };
+    let router = match &app.config.agent_discovery {
         Some(mount) => router.merge(xrpc::with_http_layers(mount.routes(app.clone()), app)),
         None => router,
     };

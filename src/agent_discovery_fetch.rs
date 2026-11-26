@@ -129,7 +129,7 @@ async fn observe_resolution(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::agent_discovery::tests::{proof, Fixture};
     use crate::agent_endorsement_fetch::fixture_transport::{deny_real_https, scope_bytes};
@@ -141,7 +141,7 @@ mod tests {
     use vlatproto::cid::Cid;
 
     #[derive(Clone, Copy, Debug)]
-    enum Mode {
+    pub(crate) enum Mode {
         Valid,
         ContactAbsent,
         EndorsementAbsent,
@@ -161,7 +161,7 @@ mod tests {
         Tampered,
     }
 
-    fn fixture(
+    pub(crate) fn fixture(
         mode: Mode,
     ) -> (Arc<dyn Fn(&reqwest::Url) -> Result<reqwest::Response, String> + Send + Sync>, Arc<Mutex<Vec<String>>>) {
         let mut f = Fixture::new_at(PDS, AUDIENCE);

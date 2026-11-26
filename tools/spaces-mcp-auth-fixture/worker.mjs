@@ -31,6 +31,38 @@ const owners = new Map([
   ["owner-b-session", { userId: "owner-b", binding: "b-chat" }],
 ]);
 const scope = "mcp:chat";
+const consent = new Map();
+const consentLifetime = 120_000;
+
+function escapeHtml(value) {
+  const entities = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+  return String(value).replace(/[&<>"']/g, (character) => entities[character]);
+}
+
+function consentPage(authorizationUrl, auth) {
+  const now = Date.now();
+  for (const [id, entry] of consent) if (entry.expires <= now) consent.delete(id);
+  if (consent.size >= 32) return new Response(null, { status: 503 });
+  const id = crypto.randomUUID();
+  consent.set(id, { authorizationUrl, expires: now + consentLifetime });
+  return new Response(`<!doctype html><meta charset="utf-8">
+    <title>Approve disposable Spaces chat</title>
+    <h1>Approve disposable Spaces chat</h1>
+    <p>Sign in with a disposable PDS owner account to allow access to its approved private chat Space.</p>
+    <p>Client <code>${escapeHtml(auth.clientId)}</code></p>
+    <p>Resource <code>${escapeHtml(auth.resource)}</code></p>
+    <form action="/authorize" method="post">
+      <input type="hidden" name="consent" value="${id}">
+      <label>Owner handle <input name="handle" autocomplete="username" required></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      <button>Sign in and approve</button>
+    </form>`, { headers: {
+      "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      "Referrer-Policy": "no-referrer",
+    } });
+}
+
 
 const encoder = new TextEncoder();
 const base64url = (bytes) => btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
@@ -55,7 +87,10 @@ async function signDispatch(signer, issuer, resource, owner, grant, body) {
 export default {
   async fetch(request, { ORIGIN: origin, SPACES, SPACES_URL, BINDINGS, BRIDGE_TOKEN, SIGNER }, ctx) {
     const url = new URL(request.url);
-    if (url.origin !== origin || request.headers.has("Origin")) {
+    const browserApproval = BRIDGE_TOKEN && url.pathname === "/authorize" && request.method === "POST";
+    if (url.origin !== origin || (browserApproval
+      ? request.headers.get("Origin") !== origin || Boolean(url.search)
+      : request.headers.has("Origin"))) {
       return new Response(null, { status: 403 });
     }
     const mcp = origin + "/mcp";
@@ -74,7 +109,28 @@ export default {
       body: JSON.stringify({ operation, ...evidence }),
     });
     if (url.pathname === "/authorize" || url.pathname === "/fixture/revoke") {
-      const ownerSession = request.headers.get("X-Fixture-Owner-Session");
+      let ownerSession = request.headers.get("X-Fixture-Owner-Session");
+      let authorizationRequest = request;
+      if (BRIDGE_TOKEN && url.pathname === "/authorize") {
+        if (request.method === "GET") {
+          const auth = await api.parseAuthRequest(request);
+          return consentPage(request.url, auth);
+        }
+        if (!browserApproval) return new Response(null, { status: 405 });
+        if (!request.headers.get("Content-Type")?.startsWith("application/x-www-form-urlencoded")) {
+          return new Response(null, { status: 415 });
+        }
+        const form = await request.formData();
+        const id = form.get("consent");
+        const pending = consent.get(id);
+        consent.delete(id);
+        if (!pending || pending.expires <= Date.now()) return new Response(null, { status: 400 });
+        const login = await recordGrant("sign-in", "", { handle: form.get("handle"), password: form.get("password") });
+        if (!login.ok) return new Response(null, { status: 401 });
+        const { session } = await login.json();
+        ownerSession = `Bearer ${session}`;
+        authorizationRequest = new Request(pending.authorizationUrl);
+      }
       let owner;
       if (BRIDGE_TOKEN && ownerSession) {
         const identity = await recordGrant("owner", ownerSession);
@@ -110,8 +166,8 @@ export default {
         await api.revokeGrant(grantId, owner.userId);
         return new Response(null, { status: 204 });
       }
-      if (url.pathname === "/authorize" && request.method === "GET") {
-        const auth = await api.parseAuthRequest(request);
+      if (url.pathname === "/authorize" && (browserApproval || request.method === "GET")) {
+        const auth = await api.parseAuthRequest(authorizationRequest);
         const granted = auth.scope.filter((requested) => requested === scope || requested === "offline_access");
         const durable = BRIDGE_TOKEN && (auth.resource === mcp || (auth.resource?.length === 1 && auth.resource[0] === mcp));
         let evidence;

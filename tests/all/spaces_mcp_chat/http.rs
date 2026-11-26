@@ -215,6 +215,7 @@ impl Server {
                     binding["token"] = json!(session.token);
                 } else {
                     binding["ownerSession"] = json!(session.caller.session_jwt);
+                    binding["ownerHandle"] = json!(session.caller.handle);
                 }
                 binding
             })
@@ -228,6 +229,7 @@ impl Server {
         let input = json!({
             "backend": self.endpoint.authority, "bindings": bindings, "foreignToken": foreign_token, "signer": signer,
             "verifyBinding": self.endpoint.signer.is_some(),
+            "ownerPassword": self.endpoint.signer.is_some().then_some(crate::oauth::PASSWORD),
             "bridgeToken": self.endpoint.signer.is_some().then_some(&self.endpoint.bridge_token),
         });
         let mut stdin = child.stdin.take().unwrap();
@@ -366,6 +368,30 @@ async fn grant_consent(State(endpoint): State<Arc<Endpoint>>, headers: HeaderMap
         || bearer(&headers) != Some(endpoint.bridge_token.as_str())
     {
         return denied();
+    }
+    if body["operation"] == "sign-in" {
+        let (Some(handle), Some(password)) = (body["handle"].as_str(), body["password"].as_str()) else {
+            return denied();
+        };
+        let Some(session) = endpoint.sessions.iter().find(|session| session.caller.handle == handle) else {
+            return denied();
+        };
+        let srv = &session.caller.srv;
+        let url = format!("{}/xrpc/com.atproto.server.createSession", srv.base);
+        let Ok(response) = srv.http.post(url).json(&json!({"identifier": handle, "password": password})).send().await
+        else {
+            return denied();
+        };
+        if !response.status().is_success() {
+            return denied();
+        }
+        let Ok(result) = response.json::<J>().await else {
+            return denied();
+        };
+        let Some(jwt) = result["accessJwt"].as_str().filter(|_| result["did"] == session.owner) else {
+            return denied();
+        };
+        return ([(header::CACHE_CONTROL, "no-store")], Json(json!({"session": jwt}))).into_response();
     }
     let (Some(session_jwt), Some(first)) = (headers.get("x-fixture-owner-session"), endpoint.sessions.first()) else {
         return denied();

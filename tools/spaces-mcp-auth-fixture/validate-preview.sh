@@ -22,7 +22,11 @@ if ! cargo test --offline --locked --test all -- ident_link_binding spaces_mcp_c
 fi
 
 # A passing Rust suite alone is insufficient when Worker checks were skipped.
-for marker in     'Passed OAuth consent bound to authenticated disposable PDS owner sessions'     'Passed OAuth-authorized Spaces writes/history, two-owner binding, audience isolation, and grant revocation'     'Passed fresh ident.link verification at MCP dispatch on already-issued tokens'
+for marker in \
+    'Passed browser sign-in and one-time OAuth consent over the disposable PDS route' \
+    'Passed OAuth consent bound to authenticated disposable PDS owner sessions' \
+    'Passed OAuth-authorized Spaces writes/history, two-owner binding, audience isolation, and grant revocation' \
+    'Passed fresh ident.link verification at MCP dispatch on already-issued tokens'
 do
     grep -Fxq "$marker" "$log" || { echo "Missing preview evidence: $marker" >&2; exit 1; }
     printf '%s\n' "$marker"

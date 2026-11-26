@@ -11,6 +11,7 @@ pub mod agent_a2a_store;
 pub mod agent_admission;
 pub mod agent_card;
 pub mod agent_contact_pilot;
+pub mod agent_discovery;
 pub mod agent_endorsement;
 pub mod agent_endorsement_fetch;
 pub mod agent_enrollment;

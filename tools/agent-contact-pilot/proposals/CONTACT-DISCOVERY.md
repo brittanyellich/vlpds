@@ -1,0 +1,11 @@
+# Fixed-pilot contact discovery contract
+
+This local, network-free slice validates the existing experimental `link.ident.agent/self` pointer. It does not publish a record, mount a route, fetch a URL, index an agent or admit a caller. It is deliberately limited to the existing fixed pilot agent/principal and signed Card template; a second agent and a general directory remain follow-up work.
+
+The resolver must independently obtain fresh trusted DID documents and repository heads before/after bounded reads. `agent_discovery::discover_fixed` then composes the existing native ident.link endorsement verifier, signed agent-repository inclusion/absence proof, independent record read and existing Card signature/origin checks. Its public result contains only the fixed DID-scoped HTTPS Card and JSON-RPC endpoint plus proof CIDs. No caller, credential, private profile or Space reference is accepted or returned.
+
+The proposed opt-in record has exactly `$type: link.ident.agent` and `agentCardUrl`, at the fixed agent's `self` key. The URL must equal its current PDS origin plus the existing stable per-agent Card path. Arbitrary override URLs, unknown fields, contact-record/CAR mismatch, changed heads, missing or unavailable evidence, invalid signatures and changed Card authority fail closed. Signed contact or endorsement removal stops discovery. This is a local contract qualification, not a claim that this draft NSID has been published or its DNS authority delegated.
+
+Discovery provides routing evidence only. Native dispatch still requires its independent caller service JWT, allowlist, owner consent, current endorsement, disable/revocation policy and idempotency checks before cached reply or bridge execution. Do not use a `Contact` value as an authorization grant or stale fallback. The existing Card server is unchanged; hosted fetch/mount and routing integration must be separately qualified with disposable fixtures before staging.
+
+Next integration: wire the bounded trusted resolver to these exact proof inputs, test Card/record publication and removal using disposable repositories, then connect the resolved DID endpoint to the existing scoped admission path. Keep public metadata and private consent separate. No production enablement, live identity changes or new credential operation is included.

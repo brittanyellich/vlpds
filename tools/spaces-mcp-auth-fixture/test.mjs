@@ -96,7 +96,7 @@ const config :Workerd.Config = (
     body: new URLSearchParams({ client_id: clientId, ...params }),
   });
 
-  async function authorize(owner, resource) {
+  async function authorize(owner, resource, loseRedirect = false) {
     const verifier = randomBytes(32).toString("base64url");
     const state = randomBytes(16).toString("base64url");
     const redirect = origin + "/callback";
@@ -108,6 +108,21 @@ const config :Workerd.Config = (
       code_challenge_method: "S256",
       owner: "owner-b",
     });
+    if (loseRedirect) {
+      const denied = await fetch(url, {
+        headers: { "X-Fixture-Owner": owner, "X-Fixture-Lose-Redirect": "yes" }, redirect: "manual",
+      });
+      assert.equal(denied.status, 503);
+      assert.equal(denied.headers.get("Location"), null);
+      // Reorder request parameters and add an ignored field. The validated
+      // authorization parameters still identify the original operation.
+      url.searchParams.sort();
+      url.searchParams.set("untrusted", "ignored");
+      const retry = await fetch(url, { headers: { "X-Fixture-Owner": owner }, redirect: "manual" });
+      assert.equal(retry.status, 409);
+      assert.equal(retry.headers.get("Location"), null);
+      return;
+    }
     const approved = await fetch(url, { headers: { "X-Fixture-Owner": owner }, redirect: "manual" });
     assert.equal(approved.status, 303, await approved.text());
     const callback = new URL(approved.headers.get("Location"));
@@ -122,6 +137,19 @@ const config :Workerd.Config = (
     assert.equal(issued.resource, resource);
     assert.ok(issued.refresh_token);
     return issued;
+  }
+
+  if (verifyBinding) {
+    const request = (owner, grantId) => fetch(origin + "/fixture/revoke", {
+      headers: { "X-Fixture-Owner": owner },
+      ...(grantId ? { method: "POST", body: JSON.stringify({ grantId }) } : {}),
+    });
+    await authorize("owner-a-session", mcp, true);
+    const lostGrants = await (await request("owner-a-session")).json();
+    assert.equal(lostGrants.length, 1);
+    assert.equal((await request("owner-b-session", lostGrants[0])).status, 404);
+    assert.equal((await request("owner-a-session", lostGrants[0])).status, 204);
+    assert.deepEqual(await (await request("owner-a-session")).json(), []);
   }
 
   const a = await authorize("owner-a-session", mcp);

@@ -66,10 +66,10 @@ export default {
       scopesSupported: [scope, "offline_access"],
     });
     const api = issuer.getOAuthApi(env);
-    const recordGrant = (operation, userId, grantId) => SPACES.fetch(new URL("/fixture/grant", SPACES_URL), {
+    const recordGrant = (operation, userId, evidence) => SPACES.fetch(new URL("/fixture/grant", SPACES_URL), {
       method: "POST",
       headers: { Authorization: `Bearer ${BRIDGE_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ operation, userId, grantId }),
+      body: JSON.stringify({ operation, userId, ...evidence }),
     });
     if (url.pathname === "/fixture/client" && request.method === "POST") {
       const { clientId } = await api.createClient({
@@ -95,8 +95,12 @@ export default {
         const grant = items.find(({ id }) => id === grantId);
         if (!grant) return new Response(null, { status: 404 });
         if (BRIDGE_TOKEN && grant.resource === mcp) {
-          const revoked = await recordGrant("revoke", owner.userId, grantId);
+          const evidence = { ...grant.metadata, clientId: grant.clientId, grantId };
+          const revoked = await recordGrant("revoke", owner.userId, evidence);
           if (!revoked.ok) return new Response(null, { status: 503 });
+          await api.revokeGrant(grantId, owner.userId);
+          const acknowledged = await recordGrant("issuer-cleaned", owner.userId, evidence);
+          return new Response(null, { status: acknowledged.ok ? 204 : 503 });
         }
         await api.revokeGrant(grantId, owner.userId);
         return new Response(null, { status: 204 });
@@ -104,23 +108,38 @@ export default {
       if (url.pathname === "/authorize" && request.method === "GET") {
         const auth = await api.parseAuthRequest(request);
         const granted = auth.scope.filter((requested) => requested === scope || requested === "offline_access");
-        const approvalId = crypto.randomUUID();
+        const durable = BRIDGE_TOKEN && (auth.resource === mcp || (auth.resource?.length === 1 && auth.resource[0] === mcp));
+        let evidence;
+        if (durable) {
+          const canonical = JSON.stringify({ ...auth, scope: [...new Set(auth.scope)].sort(), resource: mcp });
+          const approval = hex(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(canonical))));
+          const begin = await recordGrant("begin", owner.userId, { approval, clientId: auth.clientId });
+          if (!begin.ok) return new Response(null, { status: begin.status });
+          const { correlation } = await begin.json();
+          evidence = { approval, clientId: auth.clientId, correlation };
+        }
         const { redirectTo } = await api.completeAuthorization({
           request: auth,
           userId: owner.userId,
-          metadata: { approvalId },
+          metadata: evidence,
           props: owner,
           // The durable adapter must acknowledge revocation separately.
           ...(BRIDGE_TOKEN ? { revokeExistingGrants: false } : {}),
           scope: granted,
         });
-        if (BRIDGE_TOKEN && (auth.resource === mcp || (auth.resource?.length === 1 && auth.resource[0] === mcp))) {
+        if (durable) {
           const { items } = await api.listUserGrants(owner.userId);
-          const grant = items.find(({ metadata, resource }) => metadata?.approvalId === approvalId && resource === mcp);
+          const grant = items.find(({ metadata, resource, userId, clientId }) =>
+            metadata?.correlation === evidence.correlation && resource === mcp &&
+            userId === owner.userId && clientId === auth.clientId);
           if (!grant) return new Response(null, { status: 503 });
-          const approved = await recordGrant("approve", owner.userId, grant.id);
+          const observed = { ...evidence, grantId: grant.id };
+          if (request.headers.get("X-Fixture-Lose-Redirect") === "yes") {
+            // The issuer grant exists, but the browser never receives its code.
+            return new Response(null, { status: 503 });
+          }
+          const approved = await recordGrant("approve", owner.userId, observed);
           if (!approved.ok) {
-            await api.revokeGrant(grant.id, owner.userId);
             return new Response(null, { status: 403 });
           }
         }

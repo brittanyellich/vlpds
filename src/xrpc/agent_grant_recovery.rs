@@ -84,10 +84,20 @@ enum GrantWrite {
 
 impl<'a> Recovery<'a> {
     pub async fn for_owner(app: &'a App, credentials: &Credentials, owner: &str) -> XResult<Self> {
-        if active_owner(app, credentials).await? != owner {
+        let recovery = Self::for_session(app, credentials).await?;
+        if recovery.owner() != owner {
             return Err(XrpcError::auth("Recovery owner does not match the signed-in account"));
         }
-        Ok(Self { app, owner: owner.into() })
+        Ok(recovery)
+    }
+
+    /// Derive the owner from a verified PDS session for consent front ends.
+    pub async fn for_session(app: &'a App, credentials: &Credentials) -> XResult<Self> {
+        Ok(Self { app, owner: active_owner(app, credentials).await? })
+    }
+
+    pub fn owner(&self) -> &str {
+        &self.owner
     }
 
     pub async fn reserve(&self, operation: &str, request: Request) -> XResult<Intent> {

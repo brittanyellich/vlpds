@@ -25,8 +25,8 @@ const workerBindings = JSON.stringify({
   "b-chat": { token: bob.token },
 });
 const signedBindings = JSON.stringify({
-  "owner-a": { ownerDid: alice.authorDid },
-  "owner-b": { ownerDid: bob.authorDid },
+  [Buffer.from(alice.authorDid).toString("base64url")]: { ownerDid: alice.authorDid },
+  [Buffer.from(bob.authorDid).toString("base64url")]: { ownerDid: bob.authorDid },
 });
 assert.equal(Boolean(signer), Boolean(verifyBinding));
 
@@ -95,6 +95,13 @@ try {
     body: new URLSearchParams({ client_id: clientId, ...params }),
   });
 
+  function ownerHeaders(owner) {
+    if (!verifyBinding) return { "X-Fixture-Owner": owner };
+    const session = { "owner-a-session": alice.ownerSession, "owner-b-session": bob.ownerSession }[owner];
+    assert.ok(session);
+    return { "X-Fixture-Owner-Session": `Bearer ${session}` };
+  }
+
   async function authorize(owner, resource, loseRedirect = false) {
     const verifier = randomBytes(32).toString("base64url");
     const state = randomBytes(16).toString("base64url");
@@ -109,7 +116,7 @@ try {
     });
     if (loseRedirect) {
       const denied = await fetch(url, {
-        headers: { "X-Fixture-Owner": owner, "X-Fixture-Lose-Redirect": "yes" }, redirect: "manual",
+        headers: { ...ownerHeaders(owner), "X-Fixture-Lose-Redirect": "yes" }, redirect: "manual",
       });
       assert.equal(denied.status, 503);
       assert.equal(denied.headers.get("Location"), null);
@@ -117,12 +124,12 @@ try {
       // authorization parameters still identify the original operation.
       url.searchParams.sort();
       url.searchParams.set("untrusted", "ignored");
-      const retry = await fetch(url, { headers: { "X-Fixture-Owner": owner }, redirect: "manual" });
+      const retry = await fetch(url, { headers: ownerHeaders(owner), redirect: "manual" });
       assert.equal(retry.status, 409);
       assert.equal(retry.headers.get("Location"), null);
       return;
     }
-    const approved = await fetch(url, { headers: { "X-Fixture-Owner": owner }, redirect: "manual" });
+    const approved = await fetch(url, { headers: ownerHeaders(owner), redirect: "manual" });
     assert.equal(approved.status, 303, await approved.text());
     const callback = new URL(approved.headers.get("Location"));
     assert.equal(callback.searchParams.get("state"), state);
@@ -140,15 +147,21 @@ try {
 
   if (verifyBinding) {
     const request = (owner, grantId) => fetch(origin + "/fixture/revoke", {
-      headers: { "X-Fixture-Owner": owner },
+      headers: ownerHeaders(owner),
       ...(grantId ? { method: "POST", body: JSON.stringify({ grantId }) } : {}),
     });
+    for (const headers of [{ "X-Fixture-Owner": "owner-a-session" },
+      { "X-Fixture-Owner-Session": "Bearer invalid" },
+      { "X-Fixture-Owner-Session": `Bearer ${foreignToken}` }]) {
+      assert.equal((await fetch(origin + "/fixture/revoke", { headers })).status, 401);
+    }
     await authorize("owner-a-session", mcp, true);
     const lostGrants = await (await request("owner-a-session")).json();
     assert.equal(lostGrants.length, 1);
     assert.equal((await request("owner-b-session", lostGrants[0])).status, 404);
     assert.equal((await request("owner-a-session", lostGrants[0])).status, 204);
     assert.deepEqual(await (await request("owner-a-session")).json(), []);
+    console.log("Passed OAuth consent bound to authenticated disposable PDS owner sessions");
   }
 
   const a = await authorize("owner-a-session", mcp);
@@ -240,7 +253,7 @@ try {
 
   if (!verifyBinding) {
     const ownerRequest = (owner, options = {}) => fetch(origin + "/fixture/revoke", {
-      ...options, headers: { "X-Fixture-Owner": owner },
+      ...options, headers: ownerHeaders(owner),
     });
     const [grantId] = await (await ownerRequest("owner-b-session")).json();
     const revoke = (owner) => ownerRequest(owner, {

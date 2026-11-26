@@ -188,8 +188,10 @@ async fn chat_session(
     space: &str,
     conversation: &str,
 ) -> http::Session {
-    let mut scope =
-        format!("space:{SPACE_TYPE}?authority={}&action=read&action=create&collection={MESSAGE}", owner.did);
+    let mut scope = format!(
+        "space:{SPACE_TYPE}?authority={}&skey={conversation}&action=read&action=create&collection={MESSAGE}",
+        owner.did
+    );
     if caller.did == owner.did {
         scope.push_str(&format!("&collection={THREAD}"));
     }

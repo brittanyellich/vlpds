@@ -213,6 +213,8 @@ impl Server {
                 let mut binding = json!({"conversationId": session.conversation, "authorDid": session.caller.did});
                 if self.endpoint.signer.is_none() {
                     binding["token"] = json!(session.token);
+                } else {
+                    binding["ownerSession"] = json!(session.caller.session_jwt);
                 }
                 binding
             })
@@ -348,14 +350,6 @@ impl Drop for Server {
     }
 }
 
-fn fixture_owner(user_id: &str) -> Option<usize> {
-    match user_id {
-        "owner-a" => Some(0),
-        "owner-b" => Some(1),
-        _ => None,
-    }
-}
-
 fn matches_listener(endpoint: &Endpoint, headers: &HeaderMap) -> bool {
     !headers.contains_key(header::ORIGIN)
         && headers.get(header::HOST).and_then(|h| h.to_str().ok()) == Some(endpoint.authority.as_str())
@@ -373,18 +367,32 @@ async fn grant_consent(State(endpoint): State<Arc<Endpoint>>, headers: HeaderMap
     {
         return denied();
     }
-    let Some(index) = body["userId"].as_str().and_then(fixture_owner) else {
+    let (Some(session_jwt), Some(first)) = (headers.get("x-fixture-owner-session"), endpoint.sessions.first()) else {
         return denied();
     };
-    let (Some(issuer), Some(operation), Some(client), Some(session)) =
-        (endpoint.issuer.get(), body["approval"].as_str(), body["clientId"].as_str(), endpoint.sessions.get(index))
+    let Ok((parts, _)) = axum::http::Request::builder()
+        .header(header::AUTHORIZATION, session_jwt)
+        .body(())
+        .map(axum::http::Request::into_parts)
     else {
         return denied();
     };
-    let Ok(credentials) = session.owner_credentials().await else {
+    let app = &first.caller.srv.app;
+    let Ok(credentials) = vlpds::xrpc::authn::authenticate(app, &parts).await else {
         return denied();
     };
-    let Ok(recovery) = Recovery::for_owner(&session.caller.srv.app, &credentials, &session.owner).await else {
+    let Ok(recovery) = Recovery::for_session(app, &credentials).await else {
+        return denied();
+    };
+    let Some((index, session)) = endpoint.sessions.iter().enumerate().find(|(_, s)| s.owner == recovery.owner()) else {
+        return denied();
+    };
+    if body["operation"] == "owner" {
+        return Json(json!({"did": recovery.owner()})).into_response();
+    }
+    let (Some(issuer), Some(operation), Some(client)) =
+        (endpoint.issuer.get(), body["approval"].as_str(), body["clientId"].as_str())
+    else {
         return denied();
     };
     let resource = format!("{issuer}/mcp");

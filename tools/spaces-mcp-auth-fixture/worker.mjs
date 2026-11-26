@@ -67,13 +67,27 @@ export default {
       scopesSupported: [scope, "offline_access"],
     });
     const api = issuer.getOAuthApi(env);
-    const recordGrant = (operation, userId, evidence) => SPACES.fetch(new URL("/fixture/grant", SPACES_URL), {
+    const recordGrant = (operation, ownerSession, evidence) => SPACES.fetch(new URL("/fixture/grant", SPACES_URL), {
       method: "POST",
-      headers: { Authorization: `Bearer ${BRIDGE_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ operation, userId, ...evidence }),
+      headers: { Authorization: `Bearer ${BRIDGE_TOKEN}`, "Content-Type": "application/json",
+        "X-Fixture-Owner-Session": ownerSession },
+      body: JSON.stringify({ operation, ...evidence }),
     });
     if (url.pathname === "/authorize" || url.pathname === "/fixture/revoke") {
-      const owner = owners.get(request.headers.get("X-Fixture-Owner"));
+      const ownerSession = request.headers.get("X-Fixture-Owner-Session");
+      let owner;
+      if (BRIDGE_TOKEN && ownerSession) {
+        const identity = await recordGrant("owner", ownerSession);
+        if (identity.ok) {
+          const { did } = await identity.json();
+          // The issuer uses colon-delimited storage keys. Encode the DID
+          // losslessly as its issuer subject and retain the DID for dispatch.
+          const userId = base64url(encoder.encode(did));
+          if (JSON.parse(BINDINGS)[userId]?.ownerDid === did) owner = { userId };
+        }
+      } else if (!BRIDGE_TOKEN) {
+        owner = owners.get(request.headers.get("X-Fixture-Owner"));
+      }
       if (!owner) return new Response(null, { status: 401 });
 
       if (url.pathname === "/fixture/revoke" && request.method === "GET") {
@@ -87,10 +101,10 @@ export default {
         if (!grant) return new Response(null, { status: 404 });
         if (BRIDGE_TOKEN && grant.resource === mcp) {
           const evidence = { ...grant.metadata, clientId: grant.clientId, grantId };
-          const revoked = await recordGrant("revoke", owner.userId, evidence);
+          const revoked = await recordGrant("revoke", ownerSession, evidence);
           if (!revoked.ok) return new Response(null, { status: 503 });
           await api.revokeGrant(grantId, owner.userId);
-          const acknowledged = await recordGrant("issuer-cleaned", owner.userId, evidence);
+          const acknowledged = await recordGrant("issuer-cleaned", ownerSession, evidence);
           return new Response(null, { status: acknowledged.ok ? 204 : 503 });
         }
         await api.revokeGrant(grantId, owner.userId);
@@ -104,7 +118,7 @@ export default {
         if (durable) {
           const canonical = JSON.stringify({ ...auth, scope: [...new Set(auth.scope)].sort(), resource: mcp });
           const approval = hex(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(canonical))));
-          const begin = await recordGrant("begin", owner.userId, { approval, clientId: auth.clientId });
+          const begin = await recordGrant("begin", ownerSession, { approval, clientId: auth.clientId });
           if (!begin.ok) return new Response(null, { status: begin.status });
           const { correlation } = await begin.json();
           evidence = { approval, clientId: auth.clientId, correlation };
@@ -129,7 +143,7 @@ export default {
             // The issuer grant exists, but the browser never receives its code.
             return new Response(null, { status: 503 });
           }
-          const approved = await recordGrant("approve", owner.userId, observed);
+          const approved = await recordGrant("approve", ownerSession, observed);
           if (!approved.ok) {
             return new Response(null, { status: 403 });
           }

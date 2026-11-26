@@ -24,6 +24,8 @@ Run `node --test tools/spaces-mcp-auth-fixture/preview-package.test.mjs` before 
 
 To qualify a client that cannot reach loopback, first provide a separate authenticated preview deployment. Its public issuer and resource must agree with discovery and token audience, and its private dispatch target must use the configured signer and owner-scoped session provider. Use isolated grant and Space storage and a real owner consent flow. No hosted deployment package is provided here.
 
+See the [isolated client preview runbook](CLIENT-PREVIEW.md) for the validated command, hosted origin and consent checklist, and teardown steps.
+
 ## Qualify Muse and Duet
 
 1. Record the exact client build and execution environment. For each client, confirm it can reach the test endpoint, supports MCP Streamable HTTP with JSON responses, and can complete browser-based OAuth authorization code with S256 PKCE. Record which registration path it supports and its exact redirect URI. Check whether it requires SSE or a server session ID before proceeding. The fixture uses protocol version `2025-06-18` and a stateless JSON transport. A deployment may need an adapter if a client requires a transport feature outside that contract.

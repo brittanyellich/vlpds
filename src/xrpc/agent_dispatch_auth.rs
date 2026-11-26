@@ -28,10 +28,42 @@ struct Assertion {
     body_sha256: String,
 }
 
+pub(super) struct Admission {
+    pub binding: Binding,
+    claims: Assertion,
+}
+
+impl Assertion {
+    fn grant(&self) -> Grant<'_> {
+        Grant { issuer: &self.issuer, resource: &self.resource, id: &self.grant, owner: &self.owner }
+    }
+
+    fn unexpired(&self) -> bool {
+        self.exp > vlatproto::tid::now_micros() / 1_000_000
+    }
+}
+
+impl Admission {
+    pub async fn is_current(&self, app: &App) -> bool {
+        self.claims.unexpired()
+            && resolve(app, self.claims.grant()).await.as_ref() == Some(&self.binding)
+            && self.claims.unexpired()
+    }
+}
+
 /// Check the exact request bytes before admitting a tool operation. The
 /// caller must pass server-configured authority values and mount only POST
 /// on the dedicated method path.
 pub async fn admit(app: &App, authority: &Authority<'_>, token: &str, body: &[u8]) -> XResult<Binding> {
+    Ok(admit_request(app, authority, token, body).await?.binding)
+}
+
+pub(super) async fn admit_request(
+    app: &App,
+    authority: &Authority<'_>,
+    token: &str,
+    body: &[u8],
+) -> XResult<Admission> {
     let refused = || XrpcError::auth("Dispatch assertion refused");
     if body.len() > MAX_BODY_BYTES {
         return Err(refused());
@@ -59,10 +91,9 @@ pub async fn admit(app: &App, authority: &Authority<'_>, token: &str, body: &[u8
     if !super::internal::claim_replay_anywhere(app, &claims.owner, &replay_key, claims.exp as i64).await? {
         return Err(refused());
     }
-    let grant = Grant { issuer: &claims.issuer, resource: &claims.resource, id: &claims.grant, owner: &claims.owner };
-    let binding = resolve(app, grant).await.ok_or_else(refused)?;
-    if claims.exp <= vlatproto::tid::now_micros() / 1_000_000 {
+    let binding = resolve(app, claims.grant()).await.ok_or_else(refused)?;
+    if !claims.unexpired() {
         return Err(refused());
     }
-    Ok(binding)
+    Ok(Admission { binding, claims })
 }

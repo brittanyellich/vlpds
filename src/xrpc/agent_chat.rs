@@ -1,5 +1,7 @@
 //! Stateless MCP tool handler for a preauthorized, scoped Spaces session.
 
+use super::{agent_dispatch::Binding, agent_dispatch_auth::Admission, App};
+use crate::oauth::scopes::{SpaceAccess, SpacePermission, SpaceTarget};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -20,6 +22,75 @@ pub trait ChatSession: Sync {
     fn start(&self) -> impl Future<Output = ToolResult> + Send;
     fn send(&self, message_id: &str, text: &str) -> impl Future<Output = ToolResult> + Send;
     fn history(&self) -> impl Future<Output = ToolResult> + Send;
+}
+
+/// The exact account and Space a server-owned session provider may open.
+/// Constructed only from an admitted dispatch binding.
+pub struct SessionScope {
+    binding: Binding,
+    owner: String,
+    space_type: String,
+    conversation: String,
+}
+
+impl SessionScope {
+    fn from_binding(binding: Binding) -> Option<Self> {
+        let uri = vlatproto::syntax::parse_space_uri(&binding.space)?;
+        let conversation = uri.skey;
+        if uri.record.is_some() || !valid_id(conversation) {
+            return None;
+        }
+        let (owner, space_type, conversation) = (uri.authority.into(), uri.space_type.into(), conversation.into());
+        Some(Self { binding, owner, space_type, conversation })
+    }
+
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    pub fn binding(&self) -> &Binding {
+        &self.binding
+    }
+
+    pub fn conversation(&self) -> &str {
+        &self.conversation
+    }
+
+    /// Use the PDS scope format to pin access to this authority and Space
+    /// key, with create access confined to the two chat collections.
+    pub fn oauth_scope(&self, thread: &str, message: &str) -> String {
+        let target = SpaceTarget { authority: &self.owner, space_type: &self.space_type, skey: &self.conversation };
+        [SpaceAccess::Read, SpaceAccess::Write("create", thread), SpaceAccess::Write("create", message)]
+            .map(|access| SpacePermission::needed_for(&target, access))
+            .join(" ")
+    }
+}
+
+/// Server-owned backend obtained for a single approved binding.
+pub trait ScopedSession: ChatSession {
+    fn binding(&self) -> &Binding;
+}
+
+pub(super) async fn dispatch_scoped<S, F, Fut>(app: &App, open: &F, admission: Admission, body: &[u8]) -> Response
+where
+    S: ScopedSession,
+    F: Fn(SessionScope) -> Fut,
+    Fut: Future<Output = Option<S>>,
+{
+    let Some(scope) = SessionScope::from_binding(admission.binding.clone()) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let conversation = scope.conversation.clone();
+    let Some(session) = open(scope).await else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    if session.binding() != &admission.binding || session.conversation() != conversation {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if !admission.is_current(app).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    handle(&session, body).await
 }
 
 pub const START: &str = "spaces_chat_start";
@@ -46,10 +117,11 @@ fn tools() -> J {
 
 fn id<'a>(input: &'a J, name: &str) -> Option<&'a str> {
     let value = input[name].as_str()?;
-    if value.is_empty() || value.len() > 64 || !value.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) {
-        return None;
-    }
-    Some(value)
+    valid_id(value).then_some(value)
+}
+
+fn valid_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 
 async fn call(session: &impl ChatSession, name: &str, input: J) -> J {

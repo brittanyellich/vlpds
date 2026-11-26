@@ -376,7 +376,7 @@ async fn ident_link_binding_requires_both_consents_and_either_party_can_revoke()
 
     assert!(vlpds::server::shutdown_gracefully(&s.app, std::time::Duration::from_secs(5)).await);
     drop((srv, s));
-    let restarted = node(&plc, rotation_key, store, "ident-restarted", None).await;
+    let restarted = node(&plc, rotation_key.clone(), store.clone(), "ident-restarted", None).await;
     bridge.check_default_off(&restarted).await;
     grant_recovery::after_restart(&restarted, &alice, recovery_issuer).await;
     assert_eq!(agents(&restarted, &alice).await, json!([]));
@@ -391,6 +391,9 @@ async fn ident_link_binding_requires_both_consents_and_either_party_can_revoke()
         );
         assert_eq!(resolve(&restarted.app, bob_grant.grant(&resource, &alice.did)).await, None);
     }
+    assert!(vlpds::server::shutdown_gracefully(&restarted.app, std::time::Duration::from_secs(5)).await);
+    drop(restarted);
+    bridge.check_scoped_restart(&plc, rotation_key, store, &alice, &bob).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

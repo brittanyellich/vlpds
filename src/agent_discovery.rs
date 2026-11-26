@@ -143,7 +143,7 @@ pub fn discover_fixed(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
     use p256::ecdsa::{signature::Signer, Signature, SigningKey};
@@ -156,7 +156,7 @@ mod tests {
     const ORIGIN: &str = "https://discovery.invalid";
     const AUD: &str = "did:web:discovery.invalid";
 
-    fn proof(did: &str, key: &Keypair, path: &str, value: Option<J>) -> (Cid, Vec<u8>, Option<J>) {
+    pub(crate) fn proof(did: &str, key: &Keypair, path: &str, value: Option<J>) -> (Cid, Vec<u8>, Option<J>) {
         let mut blocks = Vec::new();
         let mut tree = Tree::new();
         let record = value.map(|value| {
@@ -194,17 +194,20 @@ mod tests {
             None => RecordRead::Absent,
         }
     }
-    struct Fixture {
-        agent_key: Keypair,
-        principal_key: Keypair,
-        agent: J,
-        principal: J,
-        card: J,
-        endorsement: (Cid, Vec<u8>, Option<J>),
-        contact: (Cid, Vec<u8>, Option<J>),
+    pub(crate) struct Fixture {
+        pub(crate) agent_key: Keypair,
+        pub(crate) principal_key: Keypair,
+        pub(crate) agent: J,
+        pub(crate) principal: J,
+        pub(crate) card: J,
+        pub(crate) endorsement: (Cid, Vec<u8>, Option<J>),
+        pub(crate) contact: (Cid, Vec<u8>, Option<J>),
     }
     impl Fixture {
         fn new() -> Self {
+            Self::new_at(ORIGIN, AUD)
+        }
+        pub(crate) fn new_at(origin: &str, audience: &str) -> Self {
             let agent_key = Keypair::generate();
             let principal_key = Keypair::generate();
             let card_key = SigningKey::from_bytes((&rand::random::<[u8; 32]>()).into()).unwrap();
@@ -214,9 +217,9 @@ mod tests {
             let agent = json!({"id":AGENT,"alsoKnownAs":[format!("https://ident.link/agent-of/{PRINCIPAL}")],
                 "verificationMethod":[{"id":format!("{AGENT}#atproto"),"controller":AGENT,"type":"Multikey","publicKeyMultibase":agent_key.public_multibase()},
                 {"id":format!("{AGENT}#card-signing"),"controller":AGENT,"type":"Multikey","publicKeyMultibase":pin}],
-                "service":[{"id":"#atproto_pds","type":"AtprotoPersonalDataServer","serviceEndpoint":ORIGIN}]});
-            let principal = json!({"id":PRINCIPAL,"verificationMethod":[{"id":format!("{PRINCIPAL}#atproto"),"controller":PRINCIPAL,"type":"Multikey","publicKeyMultibase":principal_key.public_multibase()}]});
-            let mut card = agent_card::template(ORIGIN, AUD);
+                "service":[{"id":"#atproto_pds","type":"AtprotoPersonalDataServer","serviceEndpoint":origin}]});
+            let principal = json!({"id":PRINCIPAL,"verificationMethod":[{"id":format!("{PRINCIPAL}#atproto"),"controller":PRINCIPAL,"type":"Multikey","publicKeyMultibase":principal_key.public_multibase()}],"service":[{"id":"#atproto_pds","type":"AtprotoPersonalDataServer","serviceEndpoint":origin}]});
+            let mut card = agent_card::template(origin, audience);
             let protected =
                 B64.encode(format!("{{\"alg\":\"ES256\",\"typ\":\"JOSE\",\"kid\":\"{AGENT}#card-signing\"}}"));
             let signature: Signature =
@@ -233,7 +236,7 @@ mod tests {
                 AGENT,
                 &agent_key,
                 "link.ident.agent/self",
-                Some(json!({"$type":"link.ident.agent","agentCardUrl":format!("{ORIGIN}{CARD_PATH}")})),
+                Some(json!({"$type":"link.ident.agent","agentCardUrl":format!("{origin}{CARD_PATH}")})),
             );
             Self { agent_key, principal_key, agent, principal, card, endorsement, contact }
         }

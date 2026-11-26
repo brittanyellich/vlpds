@@ -523,6 +523,11 @@ async fn xrpc_target(
     req: Request,
 ) -> Result<(Request, Option<String>), Response> {
     let nsid = req.uri().path().strip_prefix("/xrpc/").unwrap_or("");
+    // Fixed public metadata has no caller-owned shard. In particular, a disabled
+    // node must not forward it to an enabled node based on an unverified token.
+    if nsid == crate::agent_discovery_route::METHOD {
+        return Ok((req, None));
+    }
     if !nsid.starts_with("com.atproto.") && !nsid.starts_with("vlpds.") {
         // e.g. tools.ozone.moderation.getRepo?did= still routes by caller
         let sub = token_sub(&req);
@@ -1103,6 +1108,20 @@ mod tests {
         assert_eq!(token_iss(&req(format!("Bearer {tok}"))).as_deref(), Some("did:plc:me"));
         assert_eq!(token_sub(&req(format!("Bearer {tok}"))), None);
         assert_eq!(token_iss(&req(format!("DPoP {tok}"))), None);
+    }
+
+    #[tokio::test]
+    async fn discovery_does_not_route_by_caller_or_query() {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"sub":"did:plc:remote"}"#);
+        for suffix in ["", "?did=did:plc:remote"] {
+            let req = Request::builder()
+                .uri(format!("{}{suffix}", crate::agent_discovery_route::PATH))
+                .header("authorization", format!("Bearer h.{payload}.s"))
+                .body(Body::empty())
+                .unwrap();
+            let (_, target) = xrpc_target(&Fixed(None), None, req).await.ok().unwrap();
+            assert!(target.is_none());
+        }
     }
 
     #[tokio::test]

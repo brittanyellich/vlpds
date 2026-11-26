@@ -3,7 +3,7 @@ macro_rules! suite_only {
     ($($i:item)*) => {};
 }
 #[path = "../tests/all/common/mod.rs"]
-mod common;
+pub(crate) mod common;
 use crate::{
     agent_a2a::NativeA2a,
     agent_contact_pilot::AGENT_PATH,

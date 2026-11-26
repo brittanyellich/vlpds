@@ -156,8 +156,9 @@ def publish(root, env, execute=command, verify=verify_local):
                  'docker://' + destination], env=safe_env, cwd=private, timeout=660)
         if digestfile.read_text().strip() != MANIFEST:
             raise ValueError('Published digest differs')
-        for flag, expected in [('--raw', MANIFEST), ('--config', CONFIG)]:
-            raw = execute(['skopeo', 'inspect', flag, '--retry-times', '0', '--tls-verify=true',
+        # --config alone reserializes OCI JSON; digest verification needs raw bytes.
+        for flags, expected in [(['--raw'], MANIFEST), (['--config', '--raw'], CONFIG)]:
+            raw = execute(['skopeo', 'inspect', *flags, '--retry-times', '0', '--tls-verify=true',
                            '--authfile', str(authfile), 'docker://' + destination], env=safe_env, cwd=private)
             if not digest_matches(raw, expected):
                 raise ValueError('Remote content differs')

@@ -43,7 +43,7 @@ class PublicationTests(unittest.TestCase):
     def exercise(self, failure=None):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); calls = []; authpaths = []
-            raw_manifest, raw_config = b'fixed manifest', b'fixed config'
+            raw_manifest, raw_config = b'fixed manifest', b'{"architecture":"amd64","os":"linux"}'
             manifest = 'sha256:' + hashlib.sha256(raw_manifest).hexdigest()
             config = 'sha256:' + hashlib.sha256(raw_config).hexdigest()
             account = 'a'*32
@@ -76,8 +76,12 @@ class PublicationTests(unittest.TestCase):
                     if failure == 'copy': raise TimeoutError('Synthetic ambiguous copy')
                     Path(args[args.index('--digestfile')+1]).write_text(manifest if failure != 'digest' else 'sha256:'+'0'*64)
                     return b''
+                if '--config' in args:
+                    # Model Skopeo: --config alone parses and pretty-prints OCI JSON.
+                    if '--raw' not in args:
+                        return json.dumps(json.loads(raw_config), indent=4).encode() + b'\n'
+                    return b'wrong' if failure == 'config' else raw_config
                 if '--raw' in args: return b'wrong' if failure == 'remote' else raw_manifest
-                if '--config' in args: return b'wrong' if failure == 'config' else raw_config
                 raise AssertionError('Unexpected command')
             with patch.object(publication, 'ACCOUNT_SHA256', hashlib.sha256(account.encode()).hexdigest()), \
                  patch.object(publication, 'MANIFEST', manifest), patch.object(publication, 'CONFIG', config):
@@ -99,7 +103,10 @@ class PublicationTests(unittest.TestCase):
             return calls
 
     def test_exact_copy_once_private_auth_and_readback(self):
-        self.exercise()
+        calls = self.exercise()
+        config_reads = [c for c in calls if isinstance(c, list) and '--config' in c]
+        self.assertEqual(len(config_reads), 1)
+        self.assertIn('--raw', config_reads[0])
 
     def test_failures_never_replay_and_remove_private_auth(self):
         for phase in ['local', 'auth', 'copy', 'digest', 'remote', 'config']:

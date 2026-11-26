@@ -4,12 +4,20 @@ import {PILOT,activationPlan,transferSecrets} from './pilot-activation-plan.mjs'
 import {checkBindings,ProviderPending} from './pilot-provider.mjs';
 import {transitionReason} from './pilot-transition-diagnostic.mjs';
 export class PilotLifecycle {
- constructor({provider,save,load,deploy,provision,introspect,remove,card,now,sleep,identity,reportProvision=()=>{},reportActivation=()=>{},reportOff=()=>{}}) {
+ constructor({provider,save,load,deploy,provision,introspect,remove,card,now,sleep,identity,reportProvision=()=>{},reportActivation=()=>{},reportOff=()=>{},ownerConsentRequired=false}) {
+  if(typeof ownerConsentRequired!=='boolean')throw new Error('Explicit consent mode required');
+  this.ownerConsentRequired=ownerConsentRequired;
   Object.assign(this,{provider,save,load,deploy,provision,introspect,remove,card,now,sleep,identity,reportProvision,reportActivation,reportOff});
+ }
+ async loadForPolicy({off=false}={}) {
+  const state=await this.load();
+  const selected=state.ownerConsentRequired===undefined?false:state.ownerConsentRequired;
+  if(typeof selected!=='boolean'||(!off&&selected!==this.ownerConsentRequired))throw new Error('Pilot consent mode differs from saved state');
+  return state;
  }
  async inspect(enabled,provisioned,baseline,deadline,mark=()=>{}) {
   const checkedAt=this.now();mark('runtime-status');await this.provider.status();mark('card-authority');await this.provider.currentCardKey();
-  mark('worker-metadata');const meta=await this.provider.metadata();mark('worker-bindings');const ordinaryHash=checkBindings(meta,{enabled,baseline,provisioned,card:this.card,deadline});
+  mark('worker-metadata');const meta=await this.provider.metadata();mark('worker-bindings');const ordinaryHash=checkBindings(meta,{enabled,baseline,provisioned,card:this.card,deadline,ownerConsentRequired:this.ownerConsentRequired});
   mark('public-checks');const card=await this.provider.publicChecks(enabled);
   if(enabled && !this.sameCard(card.bytes,this.card))throw new Error('Served Card mismatch');
   mark('runtime-status-final');await this.provider.status();if(this.now()-checkedAt>30)throw new Error('Stale pilot checks');
@@ -26,12 +34,12 @@ export class PilotLifecycle {
   // Hash+current key bind exact previously crypto-verified local Card artifact.
   // Runner separately hashes actual bytes; this planner receipt is not a verifier.
   if(!credential || credential.maxExpiresAt-this.now()<900)throw new Error('Acceptance window unavailable');
-  const state={version:1,phase:'preflight',baseline:ordinaryHash,offScriptEtag:meta.scriptEtag,credential,deadline:this.now()+600,...this.identity};
+  const state={version:1,phase:'preflight',ownerConsentRequired:this.ownerConsentRequired,baseline:ordinaryHash,offScriptEtag:meta.scriptEtag,credential,deadline:this.now()+600,...this.identity};
   await this.save(state);return plan;
  }
  async provisionSecrets(secrets) {
   const step=async(stage,run)=>{this.reportProvision(stage,'started');try{const result=await run();this.reportProvision(stage,'passed');return result;}catch(error){this.reportProvision(stage,'failed',error);throw error;}};
-  const s=await step('load-private-state',()=>this.load());
+  const s=await step('load-private-state',()=>this.loadForPolicy());
   await step('phase-and-lease',()=>{if(s.phase!=='preflight'||this.now()>=s.deadline)throw new Error('Pilot phase refused');});
   await step('fresh-off-state',()=>this.inspect(false,false,s.baseline));
   const candidate=secrets.profileToken;
@@ -54,17 +62,17 @@ export class PilotLifecycle {
  }
  async activate() {
   const step=(stage,run)=>this.transitionStep(true,stage,run);
-  const s=await step('load-state',()=>this.load());
+  const s=await step('load-state',()=>this.loadForPolicy());
   await step('phase-lease',()=>{if(s.phase!=='provisioned'||s.deadline-this.now()<300)throw new Error('Pilot phase refused');});
   await step('fresh-off-state',async()=>{const before=await this.inspect(false,true,s.baseline);if(before.meta.id!==s.provisionWorker||before.meta.scriptEtag!==s.offScriptEtag)throw new Error('Worker changed');});
   await step('save-attempt',async()=>{s.phase='activation-attempted';await this.save(s);});
-  const deployedVersion=await step('publish-ack',()=>this.deploy(true,s.deadline));
-  const meta=await step('worker-config',async()=>{const m=await this.provider.metadata();if(m.id!==deployedVersion)throw new Error('Published Worker mismatch');checkBindings(m,{enabled:true,provisioned:true,baseline:s.baseline,card:this.card,deadline:s.deadline});return m;});
+  const deployedVersion=await step('publish-ack',()=>this.deploy(true,s.deadline,{ownerConsentRequired:this.ownerConsentRequired}));
+  const meta=await step('worker-config',async()=>{const m=await this.provider.metadata();if(m.id!==deployedVersion)throw new Error('Published Worker mismatch');checkBindings(m,{enabled:true,provisioned:true,baseline:s.baseline,card:this.card,deadline:s.deadline,ownerConsentRequired:this.ownerConsentRequired});return m;});
   await step('save-worker',async()=>{s.activeWorker=meta.id;await this.save(s);});
   await step('runtime-restart',()=>this.provider.restart('activate'));
   await step('readiness',()=>this.ready(true,s));
   await step('persist-active',async()=>{if(s.deadline-this.now()<120)throw new Error('Insufficient acceptance window');s.phase='active';await this.save(s);});
-  return {version:1,kind:'exp710-activation-ready',...this.identity,digest:PILOT.digest,workerVersion:s.activeWorker,
+  return {version:1,kind:'exp710-activation-ready',...(this.ownerConsentRequired?{ownerConsentRequired:true}:{}),...this.identity,digest:PILOT.digest,workerVersion:s.activeWorker,
     caller:PILOT.caller,recipient:'did:plc:6tlvgafuonoighfrtpejff5m',profile:PILOT.profile,artifactRevision:PILOT.revision,cardKey:PILOT.cardKey,cardArtifactSha256:PILOT.cardHash,
     checkedAt:this.now(),deadline:s.deadline,cardPayloadSha256:'0239e2b2eb803c6865f8f7f62203da37eeba64f11ceea25a05a54735d866bf43'};
  }
@@ -76,28 +84,28 @@ export class PilotLifecycle {
  }
  async disable() {
   const step=(stage,run)=>this.transitionStep(false,stage,run);
-  const s=await step('load-state',()=>this.load());if(['cleaned','disabled'].includes(s.phase))return;
+  const s=await step('load-state',()=>this.loadForPolicy({off:true}));if(['cleaned','disabled'].includes(s.phase))return;
   if(['provision-attempted','provisioned'].includes(s.phase)) {
    await step('reconcile-provisioned-off',async()=>{
     await this.provider.status();const meta=await this.provider.metadata();
     const count=meta.bindings.filter(b=>['AGENT_A2A_BRIDGE_KEY','AGENT_A2A_KODY_TOKEN'].includes(b.name)).length;
     if(![0,2].includes(count))throw new Error('Partial pilot bindings; reconcile');
-    checkBindings(meta,{enabled:false,provisioned:count===2,baseline:s.baseline,card:this.card,deadline:s.deadline});
+    checkBindings(meta,{enabled:false,provisioned:count===2,baseline:s.baseline,card:this.card,deadline:s.deadline,ownerConsentRequired:this.ownerConsentRequired});
     await this.provider.publicChecks(false);s.provisioned=count===2;
    });
    await step('persist-disabled',async()=>{s.phase='disabled';await this.save(s);});return;
   }
   // Distinct OFF rollback after ambiguous activation; never replay activation.
   await step('save-attempt',async()=>{s.phase='disable-attempted';await this.save(s);});
-  const deployedVersion=await step('publish-ack',()=>this.deploy(false));
-  const meta=await step('worker-config',async()=>{const m=await this.provider.metadata();if(m.id!==deployedVersion)throw new Error('OFF Worker mismatch');checkBindings(m,{enabled:false,provisioned:true,baseline:s.baseline,card:this.card,deadline:s.deadline});return m;});
+  const deployedVersion=await step('publish-ack',()=>this.deploy(false,undefined,{ownerConsentRequired:this.ownerConsentRequired}));
+  const meta=await step('worker-config',async()=>{const m=await this.provider.metadata();if(m.id!==deployedVersion)throw new Error('OFF Worker mismatch');checkBindings(m,{enabled:false,provisioned:true,baseline:s.baseline,card:this.card,deadline:s.deadline,ownerConsentRequired:this.ownerConsentRequired});return m;});
   await step('runtime-restart',()=>this.provider.restart('disable'));
   await step('readiness',()=>this.ready(false,s));
   await step('persist-disabled',async()=>{s.phase='disabled';s.offWorker=meta.id;await this.save(s);});
  }
 
  async cleanup() {
-  const s=await this.load();if(s.phase!=='disabled')throw new Error('Cleanup requires verified OFF');
+  const s=await this.loadForPolicy({off:true});if(s.phase!=='disabled')throw new Error('Cleanup requires verified OFF');
   await this.inspect(false,s.provisioned!==false,s.baseline);s.phase='cleanup-attempted';await this.save(s);if(s.provisioned!==false)await this.remove();
   await this.inspect(false,false,s.baseline);s.phase='cleaned';await this.save(s);
   return {kind:'exp710-off-cleaned',...this.identity,digest:PILOT.digest,tokenId:s.credential.id,revocation:'custodian-confirmation-required'};

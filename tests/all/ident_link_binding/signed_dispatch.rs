@@ -1,8 +1,10 @@
 use super::*;
+use crate::spaces_mcp_chat::{http::Session, owner_session};
 use axum::{response::IntoResponse, Json};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
 use sha2::{Digest, Sha256};
 use std::future::Future;
+use std::sync::OnceLock;
 use tokio::sync::Notify;
 use vlatproto::crypto::Purpose;
 use vlpds::xrpc::{
@@ -23,6 +25,7 @@ pub(super) struct Bridge {
     audience: String,
     url: String,
     client: reqwest::Client,
+    chats: Arc<OnceLock<[Session; 2]>>,
 }
 
 impl Bridge {
@@ -51,15 +54,86 @@ impl Bridge {
             .status()
             .is_success());
 
-        Self { key, signer, audience: String::new(), url: String::new(), client }
+        Self { key, signer, audience: String::new(), url: String::new(), client, chats: Arc::default() }
     }
 
     pub(super) fn mount(&self) -> Mount {
-        Mount::new(&self.signer, ISSUER, RESOURCE, |binding, body| async move {
-            assert_eq!(body.as_ref(), BODY);
-            Json(binding).into_response()
+        let chats = Arc::downgrade(&self.chats);
+        Mount::new(&self.signer, ISSUER, RESOURCE, move |binding, body| {
+            let chats = chats.clone();
+            async move {
+                if body.as_ref() == BODY {
+                    return Json(binding).into_response();
+                }
+                let chats = chats.upgrade();
+                let Some(session) = chats
+                    .as_deref()
+                    .and_then(OnceLock::get)
+                    .and_then(|sessions| sessions.iter().find(|session| session.binding() == binding))
+                else {
+                    return axum::http::StatusCode::FORBIDDEN.into_response();
+                };
+                session.dispatch(&body).await
+            }
         })
         .unwrap()
+    }
+
+    pub(super) async fn check_chat(&self, s: &TestServer, pairs: [(&Account, &Account); 2]) {
+        use vlpds::xrpc::agent_chat::{HISTORY, SEND, START};
+
+        let [(alice, alice_agent), (bob, bob_agent)] = pairs;
+        let alice_chat = owner_session(s, alice, alice_agent, "mountedalice").await;
+        let bob_chat = owner_session(s, bob, bob_agent, "mountedbob").await;
+        for (owner, id, chat) in [(alice, "chat-alice", &alice_chat), (bob, "chat-bob", &bob_chat)] {
+            let credentials = owner_credentials(s, owner).await;
+            approve(&s.app, &credentials, grant(owner, id), chat.binding())
+                .await
+                .unwrap_or_else(|e| panic!("{}", e.message));
+        }
+        assert!(self.chats.set([alice_chat, bob_chat]).is_ok());
+
+        let invoke = |owner: &Account, id: &str, name: &str, args: J| {
+            let body = serde_json::to_vec(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": name, "arguments": args},
+            }))
+            .unwrap();
+            let mut claims = self.claims(owner, id);
+            claims["body_sha256"] = json!(hex::encode(Sha256::digest(&body)));
+            let token = Self::sign(&self.key, &claims);
+            async move { self.send(&token, &body).await }
+        };
+        async fn result(response: reqwest::Response) -> J {
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            response.error_for_status().unwrap().json::<J>().await.unwrap()["result"]["structuredContent"].clone()
+        }
+
+        for (owner, grant, conversation) in [(alice, "chat-alice", "mountedalice"), (bob, "chat-bob", "mountedbob")] {
+            assert_eq!(
+                result(invoke(owner, grant, START, json!({})).await).await,
+                json!({"conversationId": conversation})
+            );
+        }
+        let message =
+            json!({"conversationId": "mountedalice", "messageId": "first", "text": "Mounted synthetic message"});
+        let receipt = result(invoke(alice, "chat-alice", SEND, message.clone()).await).await;
+        assert_eq!(receipt["authorDid"], alice.did);
+        assert_eq!(result(invoke(alice, "chat-alice", SEND, message.clone()).await).await, receipt);
+        assert_eq!(invoke(bob, "chat-alice", SEND, message.clone()).await.status(), 401);
+        let denied = result(invoke(bob, "chat-bob", SEND, message).await).await;
+        assert_eq!(denied["code"], "conversation_unavailable");
+
+        let alice_args = json!({"conversationId": "mountedalice"});
+        let alice_history = result(invoke(alice, "chat-alice", HISTORY, alice_args.clone()).await).await;
+        let messages = alice_history["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["cid"], receipt["cid"]);
+        let credentials = owner_credentials(s, alice).await;
+        revoke(&s.app, &credentials, grant(alice, "chat-alice")).await.unwrap_or_else(|e| panic!("{}", e.message));
+        assert_eq!(invoke(alice, "chat-alice", HISTORY, alice_args).await.status(), 401);
+        let bob_history = result(invoke(bob, "chat-bob", HISTORY, json!({"conversationId": "mountedbob"})).await).await;
+        assert_eq!(bob_history["messages"], json!([]));
     }
 
     pub(super) async fn connect(&mut self, s: &TestServer) {

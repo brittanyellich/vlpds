@@ -1,4 +1,4 @@
-use super::{tools, Chat, SpaceClient, HISTORY, J, SEND, START};
+use super::{Chat, SpaceClient, J};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -14,10 +14,9 @@ use vlpds::plc::mock::MockPlc;
 use vlpds::xrpc::agent_dispatch::{self, Binding, Grant};
 use vlpds::xrpc::agent_dispatch_auth::{admit, Authority, MAX_BODY_BYTES, METHOD};
 
-const VERSION: &str = "2025-06-18";
-const VERSION_HEADER: &str = "mcp-protocol-version";
+use vlpds::xrpc::agent_chat::{self, VERSION, VERSION_HEADER};
 
-pub(super) struct Session {
+pub(crate) struct Session {
     caller: SpaceClient,
     owner: String,
     agent: String,
@@ -38,7 +37,7 @@ impl Session {
         }
     }
 
-    fn binding(&self) -> Binding {
+    pub(crate) fn binding(&self) -> Binding {
         Binding { agent: self.agent.clone(), space: self.space.clone() }
     }
 
@@ -49,6 +48,10 @@ impl Session {
             .unwrap()
             .into_parts();
         vlpds::xrpc::authn::authenticate(&self.caller.srv.app, &parts).await
+    }
+
+    pub(crate) async fn dispatch(&self, body: &[u8]) -> Response {
+        agent_chat::handle(&self.chat(), body).await
     }
 
     fn chat(&self) -> Chat<'_> {
@@ -317,10 +320,6 @@ impl Drop for Server {
     }
 }
 
-fn error(id: J, code: i32, message: &str) -> Response {
-    Json(json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})).into_response()
-}
-
 fn fixture_owner(user_id: &str) -> Option<usize> {
     match user_id {
         "owner-a" => Some(0),
@@ -417,50 +416,7 @@ async fn request(
         // The JSON transport has no SSE stream.
         return (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "POST")]).into_response();
     }
-    let Ok(body) = serde_json::from_slice::<J>(&body) else {
-        return error(J::Null, -32700, "Parse error");
-    };
-    let id = body["id"].clone();
-    let method = body["method"].as_str();
-    if body["jsonrpc"] != "2.0" || method.is_none() {
-        return error(J::Null, -32600, "Invalid request");
-    }
-    if body.get("id").is_none() {
-        // This stateless transport has no server-initiated requests.
-        return StatusCode::ACCEPTED.into_response();
-    }
-    if !id.is_string() && !id.is_i64() && !id.is_u64() {
-        return error(J::Null, -32600, "Invalid request ID");
-    }
-
-    let params = &body["params"];
-    let result = match method {
-        Some("initialize") => {
-            if !params["protocolVersion"].is_string()
-                || !params["capabilities"].is_object()
-                || !params["clientInfo"]["name"].is_string()
-                || !params["clientInfo"]["version"].is_string()
-            {
-                return error(id, -32602, "Invalid initialize parameters");
-            }
-            json!({
-                "protocolVersion": VERSION,
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "vlpds-spaces-chat-fixture", "version": "0.1.0"}
-            })
-        }
-        Some("ping") => json!({}),
-        Some("tools/list") => tools(),
-        Some("tools/call") => {
-            let Some(name @ (START | SEND | HISTORY)) = params["name"].as_str() else {
-                return error(id, -32602, "Unknown or missing tool name");
-            };
-            let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            session.chat().call(name, arguments).await
-        }
-        _ => return error(id, -32601, "Method not found"),
-    };
-    Json(json!({"jsonrpc": "2.0", "id": id, "result": result})).into_response()
+    session.dispatch(&body).await
 }
 
 pub(super) struct Client {

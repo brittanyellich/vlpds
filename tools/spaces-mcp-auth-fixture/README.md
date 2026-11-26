@@ -16,7 +16,7 @@ The shell guards matter because the Rust tests skip the Worker-specific checks w
 
 The reference exercises protected-resource and issuer discovery, dynamic client registration via issuer metadata, authorization code with S256 PKCE, resource-bound token exchange, MCP initialization and tool discovery, chat start/send/history, stable retry receipts, two-owner isolation, and revocation. It also covers an issuer grant whose redirect is lost. The retry gets no second grant or redirect, and the owner can explicitly revoke the original grant.
 
-The Worker calls a private loopback fixture bridge that uses the PDS admission verifier. A separate Rust test exercises the normal opt-in PDS signed dispatch route, including scoped session reopening after restart and revocation during session acquisition. The Worker run uses synthetic owner sign-in and the OAuth library’s standard registration endpoint. These checks qualify the two boundaries locally. The harness is a test runner and does not expose a persistent endpoint for Muse or Duet.
+The Worker calls a private loopback fixture bridge that uses the PDS admission verifier. A separate Rust test exercises the normal opt-in PDS signed dispatch route, including scoped session reopening after restart and revocation during session acquisition. The signed Worker path verifies a disposable full PDS session at consent and derives the owner DID from that session. The harness supplies the session in memory and uses the OAuth library’s standard registration endpoint. A browser-facing sign-in and consent UI remains a separate integration. These checks qualify the two boundaries locally. The harness is a test runner and does not expose a persistent endpoint for Muse or Duet.
 
 ## Validate the isolated package
 

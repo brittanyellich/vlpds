@@ -86,10 +86,24 @@ const config :Workerd.Config = (
   assert.equal(resourceMetadata.resource, mcp);
   assert.deepEqual(resourceMetadata.authorization_servers, [origin]);
 
-  const registration = await fetch(origin + "/fixture/client", { method: "POST" });
-  assert.equal(registration.status, 200);
-  const { clientId } = await registration.json();
+  assert.equal(metadata.registration_endpoint, origin + "/register");
+  const registration = await fetch(metadata.registration_endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_name: "Disposable MCP client",
+      redirect_uris: [origin + "/callback"],
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+    }),
+  });
+  assert.equal(registration.status, 201, await registration.clone().text());
+  const { client_id: clientId, redirect_uris: redirects, token_endpoint_auth_method: authMethod } =
+    await registration.json();
   assert.ok(clientId);
+  assert.deepEqual(redirects, [origin + "/callback"]);
+  assert.equal(authMethod, "none");
 
   const token = (params) => fetch(metadata.token_endpoint, {
     method: "POST",

@@ -1533,6 +1533,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         public_url: args.public_url.clone(),
         agent_owner_consent,
         agent_dispatch: None,
+        agent_discovery: None,
         agent_a2a,
         agent_contact_pilot: args
             .agent_contact_pilot

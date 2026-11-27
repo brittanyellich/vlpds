@@ -11,9 +11,9 @@ use vlatproto::cid::Cid;
 pub(crate) mod fixture_transport;
 
 const PLC: &str = "https://plc.directory";
-const PDS: &str = "https://pds.crate.social";
+pub(crate) const PDS: &str = "https://pds.crate.social";
 
-async fn read(url: reqwest::Url, limit: usize, json_body: bool) -> Result<(u16, Vec<u8>), String> {
+pub(crate) async fn read(url: reqwest::Url, limit: usize, json_body: bool) -> Result<(u16, Vec<u8>), String> {
     if ![PLC, PDS].contains(&url.origin().ascii_serialization().as_str()) {
         return Err("Unconfigured identity authority".into());
     }
@@ -29,7 +29,15 @@ async fn read(url: reqwest::Url, limit: usize, json_body: bool) -> Result<(u16, 
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
+    let declared_length = response
+        .headers()
+        .get("content-length")
+        .map(|v| {
+            v.to_str().map_err(|_| "Invalid identity length")?.parse::<u64>().map_err(|_| "Invalid identity length")
+        })
+        .transpose()?;
     if response.status().is_redirection()
+        || declared_length.is_some_and(|n| n > limit as u64)
         || response.content_length().is_some_and(|n| n > limit as u64)
         || response.headers().get("content-encoding").is_some_and(|v| v != "identity")
         || (json_body && !["application/json", "application/did+ld+json"].contains(&media.as_str()))
@@ -56,6 +64,10 @@ async fn fetch_response(url: &reqwest::Url, json_body: bool) -> Result<reqwest::
             .map_err(|_| "Identity fetch failed")?;
     }
     #[cfg(test)]
+    if let Some(reply) = fixture_transport::byte_reply(url) {
+        return reply;
+    }
+    #[cfg(test)]
     if fixture_transport::https_denied() {
         return Err("Unscoped fixture identity read refused".into());
     }
@@ -72,12 +84,12 @@ async fn fetch_response(url: &reqwest::Url, json_body: bool) -> Result<reqwest::
     Ok(response)
 }
 
-fn rpc(method: &str, params: &[(&str, &str)]) -> reqwest::Url {
+pub(crate) fn rpc(method: &str, params: &[(&str, &str)]) -> reqwest::Url {
     let mut u = reqwest::Url::parse(&format!("{PDS}/xrpc/{method}")).expect("constant URL");
     u.query_pairs_mut().extend_pairs(params.iter().copied());
     u
 }
-async fn document(did: &str) -> Result<J, String> {
+pub(crate) async fn document(did: &str) -> Result<J, String> {
     let mut u = reqwest::Url::parse(PLC).expect("constant URL");
     u.path_segments_mut().unwrap().push(did);
     let (status, bytes) = read(u, 32768, true).await?;
@@ -90,7 +102,7 @@ async fn document(did: &str) -> Result<J, String> {
     }
     Ok(doc)
 }
-fn check_pds(doc: &J) -> Result<(), String> {
+pub(crate) fn check_pds(doc: &J) -> Result<(), String> {
     let services = doc["service"].as_array().ok_or("Missing PDS")?;
     if services.len() > 64 {
         return Err("PDS service limit".into());
@@ -105,7 +117,13 @@ fn check_pds(doc: &J) -> Result<(), String> {
     Ok(())
 }
 async fn head() -> Result<Cid, String> {
-    let (status, bytes) = read(rpc("com.atproto.sync.getLatestCommit", &[("did", PRINCIPAL)]), 4096, true).await?;
+    head_for(PRINCIPAL).await
+}
+pub(crate) async fn head_for(did: &str) -> Result<Cid, String> {
+    if ![AGENT, PRINCIPAL].contains(&did) {
+        return Err("Unconfigured repository head".into());
+    }
+    let (status, bytes) = read(rpc("com.atproto.sync.getLatestCommit", &[("did", did)]), 4096, true).await?;
     if status != 200 {
         return Err("Current head unavailable".into());
     }

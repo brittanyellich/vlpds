@@ -90,16 +90,33 @@ pub(crate) struct Authority {
 enum Context {
     DenyHttps,
     Authority(Arc<Authority>),
+    Bytes(Arc<dyn Fn(&reqwest::Url) -> Result<reqwest::Response, String> + Send + Sync>),
 }
 tokio::task_local! {static CURRENT:Context;}
 pub(crate) fn current() -> Option<Arc<Authority>> {
     CURRENT
         .try_with(|c| match c {
             Context::Authority(a) => Some(a.clone()),
-            Context::DenyHttps => None,
+            Context::DenyHttps | Context::Bytes(_) => None,
         })
         .ok()
         .flatten()
+}
+/// Test-only bounded raw responses; unknown requests must be rejected by the fixture.
+pub(crate) fn byte_reply(url: &reqwest::Url) -> Option<Result<reqwest::Response, String>> {
+    CURRENT
+        .try_with(|c| match c {
+            Context::Bytes(reply) => Some(reply(url)),
+            _ => None,
+        })
+        .ok()
+        .flatten()
+}
+pub(crate) async fn scope_bytes<T>(
+    reply: Arc<dyn Fn(&reqwest::Url) -> Result<reqwest::Response, String> + Send + Sync>,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    CURRENT.scope(Context::Bytes(reply), future).await
 }
 pub(crate) fn https_denied() -> bool {
     CURRENT.try_with(|c| matches!(c, Context::DenyHttps)).unwrap_or(false)

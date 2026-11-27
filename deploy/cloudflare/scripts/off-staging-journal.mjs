@@ -3,7 +3,9 @@
 const REPO='brittanyellich/vlpds';
 const refused=()=>new Error('OFF execution journal refused; no replay');
 export function createOffJournal({token,head,run,operation,fetchImpl=fetch}){
- if(!/^[A-Za-z0-9_]{20,256}$/.test(token??'')||!/^[a-f0-9]{40}$/.test(head??'')||!/^\d{8,20}$/.test(String(run))||!['stage','rollback'].includes(operation))throw refused();
+ // Treat installation tokens as opaque header values, including stateless JWTs.
+ // Local bounds/ASCII checks prevent header injection; GitHub authenticates them.
+ if(typeof token!=='string'||token.length<20||token.length>8192||/[^\x21-\x7e]/.test(token)||!/^[a-f0-9]{40}$/.test(head??'')||!/^\d{8,20}$/.test(String(run))||!['stage','rollback'].includes(operation))throw refused();
  const task=operation==='stage'?'exp710-off-stage-ea8627d4':'exp710-off-rollback-93724e8b';
  let deployment,claimed=false;
  async function api(path,method='GET',body){

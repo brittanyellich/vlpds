@@ -15,7 +15,7 @@ assert.ok(workerd && provider, "Usage: node test.mjs /absolute/path/to/workerd /
 // The Rust harness supplies only disposable credentials and a loopback target.
 const input = createInterface({ input: process.stdin });
 const commands = input[Symbol.asyncIterator]();
-const { backend, bindings, foreignToken, verifyBinding, bridgeToken, signer } = JSON.parse((await commands.next()).value);
+const { backend, bindings, foreignToken, verifyBinding, bridgeToken, signer, ownerPassword } = JSON.parse((await commands.next()).value);
 assert.match(backend, /^127\.0\.0\.1:[1-9][0-9]{0,4}$/);
 assert.equal(bindings.length, 2);
 assert.ok(foreignToken);
@@ -114,22 +114,43 @@ try {
       code_challenge_method: "S256",
       owner: "owner-b",
     });
-    if (loseRedirect) {
-      const denied = await fetch(url, {
-        headers: { ...ownerHeaders(owner), "X-Fixture-Lose-Redirect": "yes" }, redirect: "manual",
+    async function approve(url, headers = {}, password = ownerPassword) {
+      if (!verifyBinding) return fetch(url, { headers: { ...ownerHeaders(owner), ...headers }, redirect: "manual" });
+      const page = await fetch(url, { headers: ownerHeaders(owner), redirect: "manual" });
+      assert.equal(page.status, 200);
+      assert.equal(page.headers.get("Location"), null);
+      const nonce = (await page.text()).match(/name="consent" value="([^"]+)"/)?.[1];
+      assert.ok(nonce);
+      const target = new URL("/authorize", origin);
+      const handle = owner === "owner-a-session" ? alice.ownerHandle : bob.ownerHandle;
+      const submit = (submissionOrigin, password) => fetch(target, {
+        method: "POST", headers: { Origin: submissionOrigin, ...headers },
+        body: new URLSearchParams({ consent: nonce, handle, password }), redirect: "manual",
       });
+      assert.equal((await submit("http://127.0.0.1:1", ownerPassword)).status, 403);
+      const result = await submit(origin, password);
+      assert.equal((await submit(origin, ownerPassword)).status, 400);
+      return result;
+    }
+    if (loseRedirect) {
+      if (verifyBinding) {
+        const invalid = await approve(url, {}, "incorrect disposable password");
+        assert.equal(invalid.status, 401);
+        assert.equal(invalid.headers.get("Location"), null);
+      }
+      const denied = await approve(url, { "X-Fixture-Lose-Redirect": "yes" });
       assert.equal(denied.status, 503);
       assert.equal(denied.headers.get("Location"), null);
       // Reorder request parameters and add an ignored field. The validated
       // authorization parameters still identify the original operation.
       url.searchParams.sort();
       url.searchParams.set("untrusted", "ignored");
-      const retry = await fetch(url, { headers: ownerHeaders(owner), redirect: "manual" });
+      const retry = await approve(url);
       assert.equal(retry.status, 409);
       assert.equal(retry.headers.get("Location"), null);
       return;
     }
-    const approved = await fetch(url, { headers: ownerHeaders(owner), redirect: "manual" });
+    const approved = await approve(url);
     assert.equal(approved.status, 303, await approved.text());
     const callback = new URL(approved.headers.get("Location"));
     assert.equal(callback.searchParams.get("state"), state);
@@ -161,6 +182,7 @@ try {
     assert.equal((await request("owner-b-session", lostGrants[0])).status, 404);
     assert.equal((await request("owner-a-session", lostGrants[0])).status, 204);
     assert.deepEqual(await (await request("owner-a-session")).json(), []);
+    console.log("Passed browser sign-in and one-time OAuth consent over the disposable PDS route");
     console.log("Passed OAuth consent bound to authenticated disposable PDS owner sessions");
   }
 

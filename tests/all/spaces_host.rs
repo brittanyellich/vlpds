@@ -915,6 +915,10 @@ async fn shard_open_sends_registrations_a_catch_up() {
     assert!(heard(rev2.clone()).await);
     let repos = list().await;
     let (before, newest) = (repos[repos.len() - 2].clone(), repos[repos.len() - 1].clone());
+    // The syncer records the request before the sender retires its lane.
+    // Model a reopened shard with no previous lane for this revision.
+    let fanout = &s.app.spaces.as_ref().unwrap().fanout;
+    wait_until("the lane drains", Duration::from_secs(10), || fanout.lanes() == 0).await;
     let sent = notifies().len();
 
     // as a shard open does: one forward of the newest writer

@@ -24,18 +24,20 @@ export function offImage(account,digest){
 }
 // Protected DEPLOY_CONFIG is preserved except for the exact image and OFF
 // variables. Refuse stale policy/secrets instead of silently deleting them.
-export function prepareOffStage(env){
+export function prepareOffStage(env,{onStage=()=>{}}={}){
+ onStage('protected-account');
  if(sha(env.CLOUDFLARE_ACCOUNT_ID??'')!==OFF_STAGE.accountHash)throw fail();
- return prepareOffStageConfig(env);
+ return prepareOffStageConfig(env,{onStage});
 }
 // Pure config projection, separately testable with a synthetic account. The
 // production boundary must use prepareOffStage, not this unbound projection.
-export function prepareOffStageConfig(env){
- const original=JSON.parse(env.DEPLOY_CONFIG);
+export function prepareOffStageConfig(env,{onStage=()=>{}}={}){
+ onStage('protected-json');const original=JSON.parse(env.DEPLOY_CONFIG);
+ onStage('protected-variable-policy');
  if(original.keep_vars===true)throw fail();
- const agent=Object.entries(original.vars??{}).filter(([k])=>k.startsWith('AGENT_A2A_'));
+ onStage('protected-agent-off');const agent=Object.entries(original.vars??{}).filter(([k])=>k.startsWith('AGENT_A2A_'));
  if(agent.length!==2||!agent.some(([k,v])=>k==='AGENT_A2A_ENABLED'&&v==='false')||!agent.some(([k,v])=>k==='AGENT_A2A_RUNTIME'&&v==='native-profile-v1'))throw fail();
- return prepareDeployment({...env,OPERATION:'rollback',RUNTIME:'pds-runtime',ROLLBACK_IMAGE:offImage(env.CLOUDFLARE_ACCOUNT_ID,OFF_STAGE.candidate)});
+ onStage('protected-deployment-contract');return prepareDeployment({...env,OPERATION:'rollback',RUNTIME:'pds-runtime',ROLLBACK_IMAGE:offImage(env.CLOUDFLARE_ACCOUNT_ID,OFF_STAGE.candidate)});
 }
 export function rollbackDeployment(){
  // Supported Workers deployment API: select the existing version, never upload

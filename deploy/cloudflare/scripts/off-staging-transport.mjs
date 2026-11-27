@@ -14,7 +14,7 @@ const uuid=v=>typeof v==='string'&&/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/
 const PUBLIC='https://pds.crate.social',ADMIN='https://admin.crate.social';
 const TREE='a5578cb57829d36f4f2c0bb7f1b507af8783a023';
 // Receipt diagnostics are a closed vocabulary, never error messages or values.
-export const OFF_STAGE_CATEGORIES=Object.freeze(['execution-context','source-evidence','private-workspace','journal-setup','provider-setup','transition-authority','provider-metadata','runtime-status','container-map','public-health','public-ui','public-card','provider-stability','off-bindings','snapshot-validation','source-prepare','source-identity','source-cleanliness','toolchain','protected-config','config-contract','bundle-build','bundle-artifact','config-live-match','latest-uploaded-version','prepared-source-validation','journal-claim','provider-execution']);
+export const OFF_STAGE_CATEGORIES=Object.freeze(['execution-context','source-evidence','private-workspace','journal-setup','provider-setup','transition-authority','provider-metadata','runtime-status','container-map','public-health','public-ui','public-card','provider-stability','off-bindings','snapshot-validation','source-prepare','source-identity','source-cleanliness','toolchain','protected-config','protected-account','protected-json','protected-variable-policy','protected-agent-off','protected-deployment-contract','config-contract','bundle-build','bundle-artifact','config-live-match','latest-uploaded-version','prepared-source-validation','journal-claim','provider-execution']);
 export function createOffDiagnostics(){
  let active='execution-context',failed=null;
  return {mark:stage=>{if(!OFF_STAGE_CATEGORIES.includes(stage))throw new Error('Invalid OFF diagnostic category');if(failed===null)active=stage;},capture:()=>{failed??=active;},snapshot:()=>({version:1,failedStage:failed})};
@@ -45,7 +45,7 @@ export function prepareOffBundle({env,root,tmp,execute=execFileSync,onStage=()=>
  onStage('toolchain');
  if(JSON.parse(exactFile(join(root,'node_modules/wrangler/package.json'),8192)).version!=='4.158.0')throw fail();
  onStage('protected-config');
- const config=prepareOffStage(env),input=join(tmp,'source.json'),bundle=join(tmp,'bundle'),upload=join(tmp,'upload.json');
+ const config=prepareOffStage(env,{onStage}),input=join(tmp,'source.json'),bundle=join(tmp,'bundle'),upload=join(tmp,'upload.json');
  onStage('config-contract');validateStageConfig(config);
  config.main=join(root,'src/index.ts');
  onStage('bundle-build');mkdirSync(bundle,{mode:0o700});privateJSON(input,config);

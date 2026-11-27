@@ -7,11 +7,11 @@ const bindings=()=>pairs.map(([name,type])=>({name,type,...(type==='plain_text'?
 function fixture(){
  let time=100, reads=0, worker=P.worker, script=P.script,digest=P.rollback,current=P.rollback;
  const events=[],claimed=new Set();
- const snapshot=()=>({observedAt:time,meta:{id:worker,scriptEtag:script,bindings:bindings()},status:{desired:offImage(account,digest),current:offImage(account,current),running:true},health:{ok:true,version:'1.3.0+'+(current===P.candidate?P.revision:P.rollbackRevision)},uiOk:true,cardStatus:404});
+ const snapshot=()=>({observedAt:time,contentHash:'b'.repeat(64),meta:{id:worker,scriptEtag:script,bindings:bindings()},status:{desired:offImage(account,digest),current:offImage(account,current),running:true},health:{ok:true,version:'1.3.0+'+(current===P.candidate?P.revision:P.rollbackRevision)},uiOk:true,cardStatus:404});
  const transport={snapshot:async()=>{reads++;events.push('read');return snapshot();},
   prepare:async pins=>({...pins,script:'b'.repeat(64)}),
   claim:async id=>{events.push('claim');if(claimed.has(id))return false;claimed.add(id);return true;},
-  publish:async p=>{events.push('publish');digest=p.manifest;worker=nextWorker;script=p.script;return {...p,worker};},
+  publish:async p=>{events.push('publish');digest=p.manifest;worker=nextWorker;script=p.script;return {...p,worker,scriptEtag:script};},
   restore:async body=>{events.push('restore');assert.deepEqual(body,rollbackDeployment());worker=P.worker;script=P.script;digest=P.rollback;},
   restart:async image=>{events.push('restart');assert.equal(image,offImage(account,digest));current=digest;return{status:202,body:{desired:image,starting:true,restarted:true}};},
   ready:async()=>{events.push('ready');return snapshot();}};
@@ -21,7 +21,7 @@ function fixture(){
 test('stage and exact-version rollback need independent OFF readiness after one accepted restart each',async()=>{
  const f=fixture(),staged=await f.run();assert.equal(staged.worker,nextWorker);assert.equal(staged.nativeOffSelfAttestation,false);
  const restored=await f.run('rollback',staged);assert.equal(restored.worker,P.worker);assert.equal(restored.digest,P.rollback);
- assert.deepEqual(f.events,['read','read','claim','publish','read','restart','ready','read','read','claim','restore','read','restart','ready']);
+ assert.deepEqual(f.events,['read','read','claim','read','publish','read','restart','ready','read','read','claim','read','restore','read','restart','ready']);
 });
 test('reject baseline drift, stale/future reads, extra bindings, lease, activation, health and image mismatch before writing',async()=>{
  const changes=[s=>s.meta.id=nextWorker,s=>s.meta.scriptEtag='b'.repeat(64),s=>s.observedAt=69,s=>s.observedAt=101,s=>s.meta.bindings.push({name:'OTHER',type:'plain_text'}),s=>s.meta.bindings.push({name:'AGENT_A2A_EXPIRES_AT',type:'plain_text',text:'999'}),s=>s.meta.bindings.find(b=>b.name==='AGENT_A2A_ENABLED').text='true',s=>s.status.current='other',s=>s.status.desired='other',s=>s.health.ok=false,s=>s.cardStatus=200];

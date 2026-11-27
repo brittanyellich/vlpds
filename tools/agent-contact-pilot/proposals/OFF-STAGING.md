@@ -153,3 +153,25 @@ recovery to Worker `93724e8b` plus image `2e254f` if required, during a confirme
 exclusive write window. No activation, enrollment, token mint, publication,
 permanent revocation or unrelated settings changes. Do not request execution
 approval before those gates pass. The actual stage and recovery have not run.
+
+## Bounded failure-stage diagnostics
+
+Run `46021619201` stopped before durable intent/provider writes, but its original
+receipt does not identify the refused preflight gate. Synthetic fixtures can
+produce that same failure summary from distinct guards; the historical cause
+remains unverified. No raw Actions output or protected configuration was read.
+
+Future receipts include `diagnostics: {version: 1, failedStage: <category|null>}`.
+The category is the fixed stage in progress when a failure is observed, not an
+exception message or proof of a specific predicate within that stage. Categories
+distinguish provider metadata/status/container-map reads, public health/UI/Card,
+snapshot validation, source/toolchain preparation, protected config versus live
+vars, latest-version checks and journal claim. The first captured failure stays
+fixed through best-effort reconciliation and cleanup; success emits `null`.
+Only the closed vocabulary is accepted. No bodies, URLs, binding/credential
+values, exception text or stack traces enter these diagnostics.
+
+The diagnostic observer adds no IO, retry, permission or gate override. Source,
+image, account, OFF/lease/binding, ownership and expiry checks remain unchanged.
+Changes to executed files change the existing execution-code fingerprint, as
+required. Landing diagnostics does not authorize another staging run or recovery.

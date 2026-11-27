@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
-import {mkdtempSync,writeFileSync,rmSync,readFileSync} from 'node:fs';
+import {mkdtempSync,writeFileSync,rmSync,readFileSync,mkdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {OFF_STAGE as P,offImage,qualifyOffTransition} from '../scripts/off-staging-plan.mjs';
-import {createOffTransport,moduleHash,runOffStage,validateStageConfig} from '../scripts/off-staging-transport.mjs';
+import {createOffTransport,moduleHash,runOffStage,validateStageConfig,createOffDiagnostics,OFF_STAGE_CATEGORIES,prepareOffBundle} from '../scripts/off-staging-transport.mjs';
 import {createOffJournal} from '../scripts/off-staging-journal.mjs';
 const pairs=[["ADMIN_HOST","plain_text"],["ADMIN_TOKEN","secret_text"],["AGENT_A2A_ENABLED","plain_text"],["AGENT_A2A_RUNTIME","plain_text"],["CF_ACCOUNT_ID","secret_text"],["DEPLOY_TOKEN","secret_text"],["EMAIL_API_TOKEN","secret_text"],["EMAIL_API_URL","secret_text"],["EMAIL_FROM_ADDRESS","secret_text"],["ENABLED","plain_text"],["HANDLE_DOMAIN","plain_text"],["INTERNAL_TOKEN","secret_text"],["JWT_SECRET","secret_text"],["KEK","secret_text"],["OPERATOR_DID","plain_text"],["PDS","durable_object_namespace"],["PLC_RECOVERY_DID_KEY","secret_text"],["PLC_ROTATION_KEY_HEX","secret_text"],["PUBLIC_HOST","plain_text"],["S3_ACCESS_KEY","secret_text"],["S3_BUCKET","plain_text"],["S3_PREFIX","plain_text"],["S3_SECRET_KEY","secret_text"]];
 const account='a'.repeat(32),worker='11111111-1111-1111-1111-111111111111',head='c'.repeat(40),hash=b=>createHash('sha256').update(b).digest('hex');
@@ -43,7 +43,7 @@ function fixture(t){
  const journal={claim:async id=>{if(claimed.has(id))return false;claimed.add(id);return true;},phase:async phase=>events.push(['journal',phase])};
  const prepare=()=>({revision:P.revision,manifest:P.candidate,ociConfig:P.config,script:hash(bundle),bundlePath,configPath,configHash:hash(configBytes)});
  const make=overrides=>createOffTransport({account,cfToken:'c'.repeat(40),deployToken:'d'.repeat(64),root:tmp,tmp,journal,env:{},fetchImpl:fetcher,now:()=>time,sleep:async ms=>{time+=ms/1000;},prepare,...overrides});
- const run=(transport,operation='stage',staged)=>qualifyOffTransition({operation,account,transport,now:()=>time,staged,grant:{operation,id:operation==='stage'?'22222222-2222-2222-2222-222222222222':'33333333-3333-3333-3333-333333333333',candidate:P.candidate,rollbackWorker:P.worker,exclusiveWindow:true,expiresAt:600}});
+ const run=(transport,operation='stage',staged,onStage)=>qualifyOffTransition({operation,account,transport,now:()=>time,staged,onStage,grant:{operation,id:operation==='stage'?'22222222-2222-2222-2222-222222222222':'33333333-3333-3333-3333-333333333333',candidate:P.candidate,rollbackWorker:P.worker,exclusiveWindow:true,expiresAt:600}});
  return {make,run,events,fetcher,journal,prepare,tmp,configPath,bundlePath,setDelay:n=>delay=n,setTime:v=>time=v,setContent:b=>content=b,setDrift:v=>drift=v};
 }
 test('real transport performs exact candidate stage and exact existing-version recovery against synthetic provider only',async t=>{
@@ -69,7 +69,7 @@ test('module inspection rejects wrong entrypoint, duplicates and non-module resp
  const f=new FormData();f.append('index.js',new File(['a'],'index.js'));f.append('index.js',new File(['b'],'index.js'));const r=new Response(f);r.headers.set('cf-entrypoint','index.js');await assert.rejects(moduleHash(r));
 });
 test('production entry rejects foreign account/context before any IO and retains only sanitized receipt',async t=>{
- const f=fixture(t);let calls=0;const result=await runOffStage({RUNNER_TEMP:f.tmp,OPERATION:'stage',GITHUB_RUN_ID:'45843254751',GITHUB_SHA:head},{fetchImpl:async()=>{calls++;throw new Error('SECRET');}});assert.equal(result.result,'failed');assert.equal(calls,0);assert.ok(!readFileSync(join(f.tmp,'exp710-off-staging-receipt.json'),'utf8').includes('SECRET'));
+ const f=fixture(t);let calls=0;const result=await runOffStage({RUNNER_TEMP:f.tmp,OPERATION:'stage',GITHUB_RUN_ID:'45843254751',GITHUB_SHA:head},{fetchImpl:async()=>{calls++;throw new Error('SECRET');}});assert.equal(result.result,'failed');assert.equal(calls,0);assert.ok(!readFileSync(join(f.tmp,'exp710-off-staging-receipt.json'),'utf8').includes('SECRET'));assert.deepEqual(result.diagnostics,{version:1,failedStage:'execution-context'});
 });
 test('durable GitHub journal blocks duplicates across fresh objects and ambiguous intent never repeats',async()=>{
  let records=[],creates=0;const fetchImpl=async(url,r)=>{assert.ok(url.startsWith('https://api.github.com/repos/brittanyellich/vlpds/deployments'));assert.equal(r.redirect,'error');if(r.method==='GET')return json(records);creates++;const b=JSON.parse(r.body);assert.equal(b.auto_merge,false);records=[{...b,id:42,sha:head}];return json(records[0],201);};
@@ -138,4 +138,55 @@ test('known old deployments may propagate for a bounded period without replaying
  const f=fixture(t);f.setDelay(4);const staged=await f.run(f.make());f.setDelay(4);await f.run(f.make(),'rollback',staged);
  assert.equal(f.events.filter(e=>e[0]==='POST'&&e[1].endsWith('/deployments')).length,2);assert.equal(f.events.filter(e=>e[0]==='POST'&&e[1].endsWith('/restart')).length,2);
  const g=fixture(t);g.setDelay(1000);await assert.rejects(g.run(g.make()));assert.equal(g.events.filter(e=>e[0]==='POST'&&e[1].endsWith('/deployments')).length,1);assert.ok(!g.events.some(e=>e[0]==='POST'&&e[1].endsWith('/restart')));
+});
+
+test('closed diagnostic categories never retain arbitrary error/value text and preserve first failure',()=>{
+ const d=createOffDiagnostics();assert.throws(()=>d.mark('SECRET/raw/url/or/token'));d.mark('runtime-status');d.capture();d.mark('public-health');d.capture();assert.deepEqual(d.snapshot(),{version:1,failedStage:'runtime-status'});assert.ok(!JSON.stringify(d.snapshot()).includes('SECRET'));assert.ok(OFF_STAGE_CATEGORIES.includes(d.snapshot().failedStage));
+});
+test('synthetic preflight refusals retain distinct bounded categories with zero provider writes',async t=>{
+ const cases=[
+  ['provider-metadata',url=>url.endsWith('/deployments'),()=>json({error:'SECRET'},403)],
+  ['runtime-status',url=>url.endsWith('/_deploy/status'),()=>json({desired:'SECRET',current:'SECRET',running:true})],
+  ['container-map',url=>url.includes('/versions/'),async response=>{const v=await response.json();v.result.resources.script_runtime.containers=[];return json(v);} ],
+  ['public-health',url=>url.endsWith('/_health'),()=>json({error:'SECRET'},401)],
+  ['public-ui',url=>url.endsWith('/account/spaces'),()=>new Response('SECRET',{status:418})],
+  ['public-card',url=>url.includes('/.well-known/agent-card.json'),()=>new Response('SECRET',{status:200})],
+  ['off-bindings',url=>url.includes('/versions/'),async response=>{const v=await response.json();v.result.resources.bindings.find(b=>b.name==='AGENT_A2A_ENABLED').text='true';return json(v);} ],
+  ['snapshot-validation',url=>url.endsWith('/_health'),()=>json({version:'SECRET'})],
+  ['latest-uploaded-version',url=>url.endsWith('/versions?per_page=1'),()=>json({success:true,result:{items:[{id:worker}]}})],
+ ];
+ for(const [stage,matches,change] of cases){const f=fixture(t),d=createOffDiagnostics();const fetchImpl=async(url,r)=>{const response=await f.fetcher(url,r);return matches(url)?change(response):response;};await assert.rejects(f.run(f.make({fetchImpl,onStage:d.mark,onFailure:d.capture}),'stage',undefined,d.mark));d.capture();assert.equal(d.snapshot().failedStage,stage);assert.ok(!JSON.stringify(d.snapshot()).includes('SECRET'));assert.ok(!f.events.some(e=>e[0]==='POST'||e[0]==='journal'));}
+});
+test('config mismatch and injected source preparation remain distinguishable without exposing values',async t=>{
+ for(const stage of ['config-live-match','source-prepare']){const f=fixture(t),d=createOffDiagnostics();if(stage==='config-live-match')writeFileSync(f.configPath,JSON.stringify({vars:{SECRET:'SECRET'}}));const options={onStage:d.mark,onFailure:d.capture,...(stage==='source-prepare'?{prepare:()=>{throw new Error('SECRET');}}:{})};await assert.rejects(f.run(f.make(options),'stage',undefined,d.mark));d.capture();assert.equal(d.snapshot().failedStage,stage);assert.ok(!JSON.stringify(d.snapshot()).includes('SECRET'));assert.ok(!f.events.some(e=>e[0]==='POST'));}
+});
+test('source identity, toolchain and protected-config diagnostics run without credentials or subprocesses',t=>{
+ const f=fixture(t);mkdirSync(join(f.tmp,'node_modules/wrangler'),{recursive:true});writeFileSync(join(f.tmp,'node_modules/wrangler/package.json'),JSON.stringify({version:'4.158.0'}));
+ const execute=(_,args)=>Buffer.from(args[0]==='rev-parse'?(args[1]==='HEAD'?P.revision:'a5578cb57829d36f4f2c0bb7f1b507af8783a023'):'');
+ const d=createOffDiagnostics();assert.throws(()=>prepareOffBundle({env:{CLOUDFLARE_ACCOUNT_ID:account},root:f.tmp,tmp:f.tmp,execute,onStage:d.mark}));d.capture();assert.equal(d.snapshot().failedStage,'protected-config');
+ const wrong=createOffDiagnostics();assert.throws(()=>prepareOffBundle({env:{},root:f.tmp,tmp:f.tmp,execute:()=>Buffer.from('wrong'),onStage:wrong.mark}));wrong.capture();assert.equal(wrong.snapshot().failedStage,'source-identity');
+ writeFileSync(join(f.tmp,'node_modules/wrangler/package.json'),JSON.stringify({version:'wrong'}));const tool=createOffDiagnostics();assert.throws(()=>prepareOffBundle({env:{},root:f.tmp,tmp:f.tmp,execute,onStage:tool.mark}));tool.capture();assert.equal(tool.snapshot().failedStage,'toolchain');
+});
+
+test('diagnostics add no IO and keep successful transition output unchanged',async t=>{
+ const plain=fixture(t),observed=fixture(t),d=createOffDiagnostics();const a=await plain.run(plain.make());const b=await observed.run(observed.make({onStage:d.mark,onFailure:d.capture}),'stage',undefined,d.mark);assert.deepEqual(a,b);assert.deepEqual(plain.events,observed.events);assert.deepEqual(d.snapshot(),{version:1,failedStage:null});
+});
+test('first execution failure survives read-only reconciliation without error text',async t=>{
+ const f=fixture(t),d=createOffDiagnostics();const fetchImpl=async(url,r)=>{const response=await f.fetcher(url,r);if(r.method==='POST'&&url.endsWith('/deployments'))throw new Error('SECRET/auth/header/body');return response;};await assert.rejects(f.run(f.make({fetchImpl,onStage:d.mark,onFailure:d.capture}),'stage',undefined,d.mark));d.capture();assert.deepEqual(d.snapshot(),{version:1,failedStage:'provider-execution'});assert.ok(!JSON.stringify(d.snapshot()).includes('SECRET'));
+});
+
+test('post-read validation and readiness timeout use snapshot-validation diagnostics',async t=>{
+ for(const invalid of [false,true]){
+  const f=fixture(t),d=createOffDiagnostics();let restarted=false;
+  const fetchImpl=async(url,r)=>{
+   const response=await f.fetcher(url,r);
+   if(url.endsWith('/_deploy/restart'))restarted=true;
+   if(restarted&&url.endsWith('/_health'))return json({version:invalid?'SECRET':'1.3.0+'+P.revision});
+   if(restarted&&url.endsWith('/_deploy/status')&&!invalid){const body=await response.json();body.current=offImage(account,P.rollback);return json(body);}
+   return response;
+  };
+  await assert.rejects(f.run(f.make({fetchImpl,onStage:d.mark,onFailure:d.capture}),'stage',undefined,d.mark));d.capture();
+  assert.deepEqual(d.snapshot(),{version:1,failedStage:'snapshot-validation'});assert.ok(!JSON.stringify(d.snapshot()).includes('SECRET'));
+  assert.equal(f.events.filter(e=>e[0]==='POST'&&e[1].endsWith('/restart')).length,1);
+ }
 });

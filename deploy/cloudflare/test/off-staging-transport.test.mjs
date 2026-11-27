@@ -163,7 +163,7 @@ test('config mismatch and injected source preparation remain distinguishable wit
 test('source identity, toolchain and protected-config diagnostics run without credentials or subprocesses',t=>{
  const f=fixture(t);mkdirSync(join(f.tmp,'node_modules/wrangler'),{recursive:true});writeFileSync(join(f.tmp,'node_modules/wrangler/package.json'),JSON.stringify({version:'4.158.0'}));
  const execute=(_,args)=>Buffer.from(args[0]==='rev-parse'?(args[1]==='HEAD'?P.revision:'a5578cb57829d36f4f2c0bb7f1b507af8783a023'):'');
- const d=createOffDiagnostics();assert.throws(()=>prepareOffBundle({env:{CLOUDFLARE_ACCOUNT_ID:account},root:f.tmp,tmp:f.tmp,execute,onStage:d.mark}));d.capture();assert.equal(d.snapshot().failedStage,'protected-config');
+ const d=createOffDiagnostics();assert.throws(()=>prepareOffBundle({env:{CLOUDFLARE_ACCOUNT_ID:account},root:f.tmp,tmp:f.tmp,execute,onStage:d.mark}));d.capture();assert.equal(d.snapshot().failedStage,'protected-account');
  const wrong=createOffDiagnostics();assert.throws(()=>prepareOffBundle({env:{},root:f.tmp,tmp:f.tmp,execute:()=>Buffer.from('wrong'),onStage:wrong.mark}));wrong.capture();assert.equal(wrong.snapshot().failedStage,'source-identity');
  writeFileSync(join(f.tmp,'node_modules/wrangler/package.json'),JSON.stringify({version:'wrong'}));const tool=createOffDiagnostics();assert.throws(()=>prepareOffBundle({env:{},root:f.tmp,tmp:f.tmp,execute,onStage:tool.mark}));tool.capture();assert.equal(tool.snapshot().failedStage,'toolchain');
 });

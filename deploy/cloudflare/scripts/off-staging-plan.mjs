@@ -63,9 +63,10 @@ export function validateOffSnapshot(s,{account,worker,digest,script,ordinary,now
 // operation before any write; publish binds the Wrangler ACK to that preparation; restore selects
 // the existing Worker version; restart returns the actual HTTP ACK; ready is a
 // bounded GET-only observation (no restart retry). No transport is selected here.
-export async function qualifyOffTransition({operation,grant,account,transport,now,staged}){
+export async function qualifyOffTransition({operation,grant,account,transport,now,staged,onStage=()=>{}}){
  // The caller owns account binding; prepareOffStage enforces the production
  // fingerprint. Synthetic transports use a synthetic account here.
+ onStage('transition-authority');
  if(!['stage','rollback'].includes(operation)||!/^[a-f0-9]{32}$/.test(account??''))throw fail();
  const time=now();
  if(grant?.operation!==operation||grant.exclusiveWindow!==true||grant.candidate!==OFF_STAGE.candidate||grant.rollbackWorker!==OFF_STAGE.worker||!uuid(grant.id)||!Number.isSafeInteger(grant.expiresAt)||grant.expiresAt<=time||grant.expiresAt-time>600)throw fail();
@@ -73,38 +74,38 @@ export async function qualifyOffTransition({operation,grant,account,transport,no
  const sourceDigest=operation==='stage'?OFF_STAGE.rollback:OFF_STAGE.candidate;
  if(!uuid(sourceWorker)||sourceWorker===OFF_STAGE.worker&&operation==='rollback'||operation==='rollback'&&!/^[a-f0-9]{64}$/.test(staged?.ordinary??''))throw fail();
  const before=await transport.snapshot();
- const ordinary=validateOffSnapshot(before,{account,worker:sourceWorker,digest:sourceDigest,script:operation==='stage'?OFF_STAGE.script:staged.script,ordinary:staged?.ordinary,now:now(),healthy:operation==='stage'});
+ onStage('snapshot-validation');const ordinary=validateOffSnapshot(before,{account,worker:sourceWorker,digest:sourceDigest,script:operation==='stage'?OFF_STAGE.script:staged.script,ordinary:staged?.ordinary,now:now(),healthy:operation==='stage'});
  // A second authoritative read closes the local preparation gap. The API has
  // no compare-and-swap: the external exclusive write window remains required.
  const fresh=await transport.snapshot();
- validateOffSnapshot(fresh,{account,worker:sourceWorker,digest:sourceDigest,script:before.meta.scriptEtag,ordinary,now:now(),healthy:operation==='stage'});
+ onStage('snapshot-validation');validateOffSnapshot(fresh,{account,worker:sourceWorker,digest:sourceDigest,script:before.meta.scriptEtag,ordinary,now:now(),healthy:operation==='stage'});
  let prepared;
  if(operation==='stage'){
-  prepared=await transport.prepare({revision:OFF_STAGE.revision,manifest:OFF_STAGE.candidate,ociConfig:OFF_STAGE.config});
-  if(prepared?.revision!==OFF_STAGE.revision||prepared.manifest!==OFF_STAGE.candidate||prepared.ociConfig!==OFF_STAGE.config||!/^[a-f0-9]{64}$/.test(prepared.script??''))throw fail();
+  onStage('source-prepare');prepared=await transport.prepare({revision:OFF_STAGE.revision,manifest:OFF_STAGE.candidate,ociConfig:OFF_STAGE.config});
+  onStage('prepared-source-validation');if(prepared?.revision!==OFF_STAGE.revision||prepared.manifest!==OFF_STAGE.candidate||prepared.ociConfig!==OFF_STAGE.config||!/^[a-f0-9]{64}$/.test(prepared.script??''))throw fail();
  }
- if(now()>=grant.expiresAt||await transport.claim(grant.id)!==true||now()>=grant.expiresAt)throw fail();
+ onStage('journal-claim');if(now()>=grant.expiresAt||await transport.claim(grant.id)!==true||now()>=grant.expiresAt)throw fail();
  const immediate=await transport.snapshot();
- validateOffSnapshot(immediate,{account,worker:sourceWorker,digest:sourceDigest,script:before.meta.scriptEtag,ordinary,now:now(),healthy:operation==='stage'});
+ onStage('snapshot-validation');validateOffSnapshot(immediate,{account,worker:sourceWorker,digest:sourceDigest,script:before.meta.scriptEtag,ordinary,now:now(),healthy:operation==='stage'});
  if(now()>=grant.expiresAt)throw fail();
  let worker,expectedScript;
  if(operation==='stage'){
-  const published=await transport.publish(prepared);
+  onStage('provider-execution');const published=await transport.publish(prepared);
   if(published?.script!==prepared.script||published.revision!==prepared.revision||published.manifest!==prepared.manifest||published.ociConfig!==prepared.ociConfig||!/^[a-f0-9]{64}$/.test(published.scriptEtag??''))throw fail();
   worker=published.worker;expectedScript=published.scriptEtag;
  }
- else {await transport.restore(rollbackDeployment());worker=OFF_STAGE.worker;}
+ else {onStage('provider-execution');await transport.restore(rollbackDeployment());worker=OFF_STAGE.worker;}
  if(!uuid(worker)||operation==='stage'&&worker===OFF_STAGE.worker)throw fail();
  const target=operation==='stage'?OFF_STAGE.candidate:OFF_STAGE.rollback;
  const selected=await transport.snapshot();
- validateOffSnapshot(selected,{account,worker,digest:target,script:operation==='rollback'?OFF_STAGE.script:expectedScript,ordinary,now:now(),healthy:false});
+ onStage('snapshot-validation');validateOffSnapshot(selected,{account,worker,digest:target,script:operation==='rollback'?OFF_STAGE.script:expectedScript,ordinary,now:now(),healthy:false});
  if(operation==='stage'&&selected.contentHash!==prepared.script)throw fail();
  // Check authority again immediately before the second write. A partially
  // completed transition must be reconciled; it never extends its own grant.
  if(now()>=grant.expiresAt)throw fail();
- const ack=await transport.restart(offImage(account,target));
+ onStage('provider-execution');const ack=await transport.restart(offImage(account,target));
  if(ack?.status!==202||ack.body?.desired!==offImage(account,target)||ack.body.starting!==true||typeof ack.body.restarted!=='boolean')throw fail();
  const after=await transport.ready();
- validateOffSnapshot(after,{account,worker,digest:target,script:selected.meta.scriptEtag,ordinary,now:now()});
+ onStage('snapshot-validation');validateOffSnapshot(after,{account,worker,digest:target,script:selected.meta.scriptEtag,ordinary,now:now()});
  return {operation,worker,script:after.meta.scriptEtag,ordinary,digest:target,workerRestartAcknowledged:true,independentOffReadback:true,nativeOffSelfAttestation:false};
 }

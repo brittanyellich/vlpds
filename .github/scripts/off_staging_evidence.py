@@ -16,7 +16,7 @@ DIGEST = 'sha256:f2670b39cdab24404e2e00c4a13475a7e9cecfade332f04cc177589246c90d4
 CODE = ['.github/workflows/cloudflare-off-staging.yml', '.github/scripts/off_staging_evidence.py',
         '.github/scripts/publish_agent_oci.py', '.github/scripts/qualify_agent_oci.py',
         'deploy/cloudflare/package-lock.json'] + ['deploy/cloudflare/scripts/' + n for n in [
-        'off-staging-plan.mjs', 'off-staging-transport.mjs', 'off-staging-journal.mjs',
+        'off-staging-plan.mjs', 'off-config-gates.mjs', 'off-staging-transport.mjs', 'off-staging-journal.mjs',
         'pilot-provider.mjs', 'pilot-publish.mjs', 'pilot-update-mode.mjs',
         'prepare-deploy.mjs', 'verify-artifact.mjs', 'pilot-activation-plan.mjs']]
 

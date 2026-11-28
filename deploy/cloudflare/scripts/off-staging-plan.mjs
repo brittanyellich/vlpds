@@ -1,6 +1,7 @@
 // Local qualification core. No CLI, credential lookup, network, or automatic
 // workflow entry point. A future transport must implement the contracts below.
 import {createHash} from 'node:crypto';
+import {checkProtectedOffConfig} from './off-config-gates.mjs';
 import {prepareDeployment} from './prepare-deploy.mjs';
 import {checkBindings} from './pilot-provider.mjs';
 
@@ -32,15 +33,7 @@ export function prepareOffStage(env,{onStage=()=>{}}={}){
 // Pure config projection, separately testable with a synthetic account. The
 // production boundary must use prepareOffStage, not this unbound projection.
 export function prepareOffStageConfig(env,{onStage=()=>{}}={}){
- onStage('protected-json');const original=JSON.parse(env.DEPLOY_CONFIG);
- onStage('protected-variable-policy');
- if(original.keep_vars===true)throw fail();
- onStage('protected-agent-off-keys');const agent=Object.entries(original.vars??{}).filter(([k])=>k.startsWith('AGENT_A2A_'));
- if(agent.length!==2)throw fail();
- onStage('protected-agent-off-enabled');
- if(!agent.some(([k,v])=>k==='AGENT_A2A_ENABLED'&&v==='false'))throw fail();
- onStage('protected-agent-off-runtime');
- if(!agent.some(([k,v])=>k==='AGENT_A2A_RUNTIME'&&v==='native-profile-v1'))throw fail();
+ checkProtectedOffConfig(env.DEPLOY_CONFIG,{onStage});
  onStage('protected-deployment-contract');return prepareDeployment({...env,OPERATION:'rollback',RUNTIME:'pds-runtime',ROLLBACK_IMAGE:offImage(env.CLOUDFLARE_ACCOUNT_ID,OFF_STAGE.candidate)});
 }
 export function rollbackDeployment(){

@@ -24,6 +24,9 @@ pub struct Grant<'a> {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Binding {
     pub agent: String,
+    // Stored grants from earlier alphas retain their identity on read. New
+    // approvals are still checked strictly by verify_binding.
+    #[serde(deserialize_with = "crate::state::stored_uri::deserialize")]
     pub space: String,
 }
 
@@ -49,7 +52,12 @@ impl Grant<'_> {
 }
 
 pub(super) fn encode(row: &Row) -> XResult<Bytes> {
-    serde_json::to_vec(row).map(Bytes::from).map_err(XrpcError::from_err)
+    let mut value = serde_json::to_value(row).map_err(XrpcError::from_err)?;
+    if let Row::Approved(binding) = row {
+        value["Approved"]["space"] =
+            serde_json::Value::String(crate::state::stored_space_uri(&binding.space).into_owned());
+    }
+    serde_json::to_vec(&value).map(Bytes::from).map_err(XrpcError::from_err)
 }
 
 async fn verify_owner(app: &App, owner_session: &Credentials, grant: Grant<'_>) -> XResult<()> {
@@ -115,4 +123,21 @@ pub async fn resolve(app: &App, grant: Grant<'_>) -> Option<Binding> {
     }
     let after = app.get_private(grant.owner, &row).await.ok()??;
     (before == after).then_some(binding)
+}
+
+#[cfg(test)]
+mod nov24_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_grant_storage_normalizes_without_rewriting_identity() {
+        let old = br#"{"Approved":{"agent":"did:plc:agent","space":"at://did:plc:owner/space/com.example.chat/main"}}"#;
+        let row: Row = serde_json::from_slice(old).unwrap();
+        let Row::Approved(binding) = &row else { panic!("approved fixture") };
+        assert_eq!(binding.space, "at:space/did:plc:owner/com.example.chat/main");
+        assert_eq!(encode(&row).unwrap_or_else(|e| panic!("{}", e.message)).as_ref(), old);
+        // Public representations remain canonical; only the durable row
+        // encoder preserves the legacy storage representation.
+        assert_eq!(serde_json::to_value(binding).unwrap()["space"], binding.space);
+    }
 }

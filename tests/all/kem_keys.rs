@@ -343,3 +343,40 @@ async fn rewrap_moves_kem_keys_to_the_new_kek() {
     c.app.log.checkpoint_all().await;
     vlpds::server::shutdown(&c.app).await;
 }
+
+/// Nov24 activation checks the KEM verification method in addition to the
+/// signing key, using only a disposable PLC directory and account.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn activation_requires_the_published_kem_key() {
+    let plc = MockPlc::start().await;
+    let rot = new_key();
+    let s = spaces_pds(&plc, &rot, "did:web:kem-activation.test").await;
+    let a = s.create_account("kemactivate").await;
+    let kem = kem_did_key(&s, &a.did).await.unwrap();
+    s.xrpc.post("com.atproto.server.deactivateAccount", &json!({}), &a.auth()).await.ok();
+    let p = vlpds::plc::Plc::new(&plc.url, rot, None);
+    for method in [None, Some(new_key().did_key()), Some(kem)] {
+        let valid = method.as_deref() == kem_did_key(&s, &a.did).await.as_deref();
+        let op = p
+            .update_op(&plc.last_op(&a.did).unwrap(), |m| {
+                match &method {
+                    Some(key) => {
+                        m["verificationMethods"]["atproto_kem"] = json!(key);
+                    }
+                    None => {
+                        m["verificationMethods"].as_object_mut().unwrap().remove("atproto_kem");
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        p.client.send(&a.did, &op, "submit").await.unwrap();
+        let r = s.xrpc.post_empty("com.atproto.server.activateAccount", &a.auth()).await;
+        if valid {
+            r.ok();
+        } else {
+            r.err(400, "InvalidRequest");
+            assert!(r.text().contains("expected KEM key"), "{}", r.text());
+        }
+    }
+}

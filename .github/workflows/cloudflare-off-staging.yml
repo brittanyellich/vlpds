@@ -63,7 +63,7 @@ jobs:
           EXCLUSIVE_WINDOW: ${{ inputs.exclusive_window }}
           REVIEWED_HEAD: ${{ inputs.reviewed_head }}
           CANDIDATE_ROOT: ${{ github.workspace }}/candidate
-          DEPLOY_CONFIG: ${{ secrets.DEPLOY_CONFIG }}
+          DEPLOY_CONFIG: ${{ secrets.VLPDS_CLOUDFLARE_CONFIG_JSON }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           VLPDS_DEPLOY_TOKEN: ${{ secrets.VLPDS_DEPLOY_TOKEN }}

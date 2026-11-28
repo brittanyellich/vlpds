@@ -7,7 +7,7 @@ const account='a'.repeat(32);
 const config=()=>({name:'crate-pds',account_id:account,main:'../src/index.ts',vars:{ENABLED:'true',PUBLIC_HOST:'pds.crate.social',HANDLE_DOMAIN:'crate.social',S3_BUCKET:'crate-pds',S3_PREFIX:'crate',ADMIN_HOST:'admin.crate.social',AGENT_A2A_ENABLED:'false',AGENT_A2A_RUNTIME:'native-profile-v1'},containers:[{class_name:'Pds',scheduling_policy:'durable_object',images:{pds:{image:offImage(account,P.rollback)}}}],durable_objects:{bindings:[{name:'PDS',class_name:'Pds'}]},routes:[{pattern:'admin.crate.social/*'}]});
 const env=c=>({DEPLOY_CONFIG:JSON.stringify(c),CLOUDFLARE_ACCOUNT_ID:account,CLOUDFLARE_API_TOKEN:'synthetic',DEPLOY_TOKEN:'a'.repeat(64)});
 test('protected config subdiagnostics distinguish synthetic refusals without retaining values',()=>{
- const cases=[['protected-json',()=>({...env(config()),DEPLOY_CONFIG:'SECRET/not-json'})],['protected-variable-policy',()=>env({...config(),keep_vars:true})],['protected-agent-off',()=>{const c=config();c.vars.AGENT_A2A_RUNTIME='SECRET';return env(c);}],['protected-deployment-contract',()=>{const c=config();c.vars.PUBLIC_HOST='SECRET';return env(c);}]];
+ const cases=[['protected-json',()=>({...env(config()),DEPLOY_CONFIG:'SECRET/not-json'})],['protected-variable-policy',()=>env({...config(),keep_vars:true})],['protected-agent-off-runtime',()=>{const c=config();c.vars.AGENT_A2A_RUNTIME='SECRET';return env(c);}],['protected-deployment-contract',()=>{const c=config();c.vars.PUBLIC_HOST='SECRET';return env(c);}]];
  for(const [stage,input] of cases){const d=createOffDiagnostics();assert.throws(()=>prepareOffStageConfig(input(),{onStage:d.mark}));d.capture();assert.deepEqual(d.snapshot(),{version:1,failedStage:stage});d.mark('provider-execution');d.capture();assert.equal(d.snapshot().failedStage,stage);assert.ok(!JSON.stringify(d.snapshot()).includes('SECRET'));}
 });
 test('account boundary remains bound and diagnostic observer preserves successful projection',()=>{
@@ -22,4 +22,31 @@ test('OFF workflow uses the established protected JSON input contract with no le
  assert.ok(established.includes(binding));assert.equal(workflow.split(binding).length-1,1);assert.ok(!workflow.includes('secrets.DEPLOY_CONFIG'));
  const syntheticSecret=JSON.stringify(config());const input={...env(config()),DEPLOY_CONFIG:syntheticSecret};assert.equal(prepareOffStageConfig(input).vars.AGENT_A2A_ENABLED,'false');
  const d=createOffDiagnostics();assert.throws(()=>prepareOffStageConfig({...input,DEPLOY_CONFIG:''},{onStage:d.mark}));d.capture();assert.deepEqual(d.snapshot(),{version:1,failedStage:'protected-json'});
+});
+
+const legacyAgentGate=vars=>{
+ const agent=Object.entries(vars??{}).filter(([k])=>k.startsWith('AGENT_A2A_'));
+ return agent.length===2&&agent.some(([k,v])=>k==='AGENT_A2A_ENABLED'&&v==='false')&&agent.some(([k,v])=>k==='AGENT_A2A_RUNTIME'&&v==='native-profile-v1');
+};
+test('agent OFF subcategories isolate key shape, enablement and runtime without relaxing the gate',()=>{
+ const cases=[
+  ['protected-agent-off-keys',{}],
+  ['protected-agent-off-keys',{AGENT_A2A_ENABLED:'false'}],
+  ['protected-agent-off-keys',{AGENT_A2A_ENABLED:'false',AGENT_A2A_RUNTIME:'native-profile-v1',AGENT_A2A_SECRET:'SECRET'}],
+  ['protected-agent-off-enabled',{AGENT_A2A_ENABLED:true,AGENT_A2A_RUNTIME:'native-profile-v1'}],
+  ['protected-agent-off-enabled',{AGENT_A2A_ENABLED:false,AGENT_A2A_RUNTIME:'native-profile-v1'}],
+  ['protected-agent-off-enabled',{AGENT_A2A_ENABLED:'true',AGENT_A2A_RUNTIME:'native-profile-v1'}],
+  ['protected-agent-off-enabled',{AGENT_A2A_OTHER:'SECRET',AGENT_A2A_RUNTIME:'native-profile-v1'}],
+  ['protected-agent-off-runtime',{AGENT_A2A_ENABLED:'false',AGENT_A2A_RUNTIME:'SECRET'}],
+  ['protected-agent-off-runtime',{AGENT_A2A_ENABLED:'false',AGENT_A2A_OTHER:'SECRET'}],
+  [null,{AGENT_A2A_ENABLED:'false',AGENT_A2A_RUNTIME:'native-profile-v1'}],
+ ];
+ for(const [stage,vars] of cases){
+  const c=config();for(const k of Object.keys(c.vars))if(k.startsWith('AGENT_A2A_'))delete c.vars[k];Object.assign(c.vars,vars);
+  const d=createOffDiagnostics();let out;try{out=prepareOffStageConfig(env(c),{onStage:d.mark});}catch{d.capture();}
+  assert.equal(Boolean(out),legacyAgentGate(c.vars));assert.deepEqual(d.snapshot(),{version:1,failedStage:stage});
+  const serialized=JSON.stringify(d.snapshot());assert.ok(!serialized.includes('SECRET'));assert.ok(!serialized.includes('AGENT_A2A_'));
+  if(stage){d.mark('provider-execution');d.capture();assert.equal(d.snapshot().failedStage,stage);}
+  else assert.deepEqual(out,prepareOffStageConfig(env(c)));
+ }
 });

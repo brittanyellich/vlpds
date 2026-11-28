@@ -26,6 +26,8 @@ for marker in \
     'Passed browser sign-in and one-time OAuth consent over the disposable PDS route' \
     'Passed OAuth consent bound to authenticated disposable PDS owner sessions' \
     'Passed OAuth-authorized Spaces writes/history, two-owner binding, audience isolation, and grant revocation' \
+    'Passed issuer restart with existing OAuth tokens and signed private Spaces chat' \
+    'Passed the same Worker grant across Worker and PDS restarts, with history, retry and revocation' \
     'Passed fresh ident.link verification at MCP dispatch on already-issued tokens'
 do
     grep -Fxq "$marker" "$log" || { echo "Missing preview evidence: $marker" >&2; exit 1; }

@@ -1,0 +1,15 @@
+{
+  "recoveryListen": "127.0.0.1:2584",
+  "enrollmentRedirect": "http://127.0.0.1:2583/exp711/spaces-callback",
+  "dispatchSigner": "<disposable signing DID resolvable by the local PLC>",
+  "issuer": "https://mcp-preview.crate.social",
+  "wrappingKeyFile": "/absolute/preview/wrapping-key",
+  "serviceTokenFile": "/absolute/preview/service-token",
+  "storage": {
+    "endpoint": "http://127.0.0.1:9000",
+    "bucket": "exp711-preview",
+    "accessKeyFile": "/absolute/preview/s3-access",
+    "secretKeyFile": "/absolute/preview/s3-secret"
+  },
+  "bindings": {}
+}

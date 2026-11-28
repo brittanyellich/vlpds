@@ -17,6 +17,8 @@ vlsync_heapprof::malloc_conf!();
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod exp711_preview;
+
 #[derive(Parser)]
 #[command(
     about = "vlpds: a very large atproto PDS on object storage",
@@ -26,6 +28,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 struct Args {
     #[arg(long, env = "VLPDS_LISTEN", default_value = "0.0.0.0:2583")]
     listen: String,
+    /// Boot an isolated EXP-711 PDS with a dedicated loopback S3 store and private recovery listener.
+    #[arg(long, requires_all = ["dev_mode", "spaces"], conflicts_with_all = ["memory", "kek", "kek_file", "peer_listen", "agent_a2a_config", "agent_contact_pilot"])]
+    exp711_preview_profile: Option<std::path::PathBuf>,
     /// Accept queue length for --listen (and --metrics-listen). The kernel
     /// clamps it to net.core.somaxconn on Linux (kern.ipc.somaxconn on
     /// macOS): raise that too, or connect bursts (1000 firehose
@@ -1529,6 +1534,22 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .transpose()?;
     let agent_owner_consent =
         agent_a2a.as_ref().map(vlpds::agent_a2a::NativeA2a::owner_consent_transport).transpose()?.flatten();
+    let preview = args
+        .exp711_preview_profile
+        .as_ref()
+        .map(|path| exp711_preview::Profile::load(path, &args.listen))
+        .transpose()?;
+    let preview_recovery = preview.as_ref().map(exp711_preview::Profile::recovery).transpose()?;
+    let preview_dispatch = preview.as_ref().map(|profile| profile.dispatch(&args.public_url)).transpose()?.flatten();
+    let preview_callback = preview.as_ref().map(|profile| profile.callback(&args.public_url)).transpose()?;
+    let preview_store = preview.as_ref().map(exp711_preview::Profile::store).transpose()?;
+    let kek = match &preview {
+        Some(profile) => vlpds::secrets::KekConfig {
+            local: Some(vlpds::secrets::KekBytes::from_file(&profile.wrapping_key_file)?),
+            ..Default::default()
+        },
+        None => kek_config(&args)?,
+    };
     let cfg = Config {
         public_url: args.public_url.clone(),
         agent_owner_consent,
@@ -1545,12 +1566,14 @@ async fn run(args: Args) -> anyhow::Result<()> {
         jwt_secret: secret(&args.jwt_secret, args.dev_mode, server::DEV_JWT_SECRET),
         admin_token: secret(&args.admin_token, args.dev_mode, server::DEV_ADMIN_TOKEN),
         internal_token: secret(&args.internal_token, args.dev_mode, server::DEV_INTERNAL_TOKEN),
-        s3: (!args.memory).then(|| S3Config {
-            endpoint: args.s3_endpoint.clone(),
-            bucket: args.s3_bucket.clone(),
-            access_key: args.s3_access_key.clone(),
-            secret_key: args.s3_secret_key.clone(),
-            region: args.s3_region.clone(),
+        s3: preview_store.or_else(|| {
+            (!args.memory).then(|| S3Config {
+                endpoint: args.s3_endpoint.clone(),
+                bucket: args.s3_bucket.clone(),
+                access_key: args.s3_access_key.clone(),
+                secret_key: args.s3_secret_key.clone(),
+                region: args.s3_region.clone(),
+            })
         }),
         prefix: args.prefix.clone(),
         inject_latency: args.inject_put_ms.map(|m| (m, args.inject_sigma)),
@@ -1602,7 +1625,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         crawl_interval: Duration::from_secs(args.crawl_interval_secs),
         dev_mode: args.dev_mode,
         allow_bulk_create: args.allow_bulk_create,
-        kek: kek_config(&args)?,
+        kek,
         mailer: vlpds::mail::from_flags(vlpds::mail::Flags {
             smtp_url: args.email_smtp_url.clone(),
             api_url: args.email_api_url.clone(),
@@ -1745,6 +1768,10 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Some(a) => Some(bind(a, args.listen_backlog).await?),
         None => None,
     };
+    let preview_listener = match &preview {
+        Some(profile) => Some(bind(&profile.recovery_listen.to_string(), args.listen_backlog).await?),
+        None => None,
+    };
     let app = server::build(cfg).await?;
     if let Some(c) = app.node.shard_disk_cache() {
         tracing::info!(dir = %c.dir.display(), shard_mb = c.shard_bytes >> 20, "SST disk cache (per shard)");
@@ -1780,12 +1807,34 @@ async fn run(args: Args) -> anyhow::Result<()> {
             "peer listener (mTLS, peer HTTP/2 settings)"
         );
     }
-    let router = server::public_router(&app);
+    let preview_cleanup = preview.as_ref().map(|profile| profile.schedule_cleanup(app.clone()));
+    let mut preview_serving = preview_listener.zip(preview_recovery).map(|(listener, mount)| {
+        let router = mount.private_router(app.clone());
+        let router = match preview_dispatch {
+            Some(dispatch) => router.merge(dispatch.routes(app.clone())),
+            None => router,
+        };
+        tokio::spawn(server::serve(listener, router))
+    });
+    let mut router = server::public_router(&app);
+    if let Some(callback) = preview_callback {
+        router = router.merge(callback);
+    }
     let opts = server::public_serve_options(&app);
     let mut serving = tokio::spawn(server::serve_with(listener, router, opts));
     tokio::select! {
+        r = async {
+            match &mut preview_serving {
+                Some(task) => task.await,
+                None => std::future::pending().await,
+            }
+        } => r?,
         r = &mut serving => r?,
         _ = shutdown_signal() => {
+            if let Some(task) = preview_cleanup {
+                task.abort();
+                let _ = task.await;
+            }
             let t = std::time::Instant::now();
             if !server::shutdown_gracefully(&app, server::SHUTDOWN_GRACE).await {
                 let grace_ms = server::SHUTDOWN_GRACE.as_millis() as u64;

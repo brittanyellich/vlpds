@@ -80,7 +80,38 @@ impl Mount {
         })
     }
 
-    pub(crate) fn routes(&self, app: Arc<App>) -> Router {
+    /// Compose the hosted preview from one canonical HTTPS origin and a
+    /// server-owned scoped session provider. The OAuth resource is always /mcp.
+    pub fn preview_chat<S, F, Fut>(signer: &str, origin: &str, open: F) -> anyhow::Result<Self>
+    where
+        S: ScopedSession + Send + 'static,
+        F: Fn(SessionScope) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<S>> + Send + 'static,
+    {
+        let url = reqwest::Url::parse(origin)?;
+        anyhow::ensure!(
+            url.scheme() == "https" && url.origin().ascii_serialization() == origin,
+            "MCP preview requires a canonical HTTPS origin"
+        );
+        Self::chat(signer, origin, &format!("{origin}/mcp"), open)
+    }
+
+    pub fn preview_runtime(signer: &str, origin: &str, listener: String) -> anyhow::Result<Self> {
+        let url = reqwest::Url::parse(origin)?;
+        anyhow::ensure!(
+            url.scheme() == "https" && url.origin().ascii_serialization() == origin,
+            "MCP preview requires a canonical HTTPS origin"
+        );
+        Self::with_admission(signer, origin, &format!("{origin}/mcp"), move |app, admission, body| {
+            let listener = listener.clone();
+            async move {
+                let open = |scope| super::agent_chat::runtime::Session::open(&app, scope, &listener);
+                dispatch_scoped(&app, &open, admission, &body).await
+            }
+        })
+    }
+
+    pub fn routes(&self, app: Arc<App>) -> Router {
         Router::new()
             .route(&format!("/xrpc/{METHOD}"), post(request))
             .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

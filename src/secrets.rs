@@ -96,6 +96,7 @@ pub enum Purpose {
     SignInProviderSecret,
     /// An account's `#atproto_kem` key. Subject: the DID.
     KemKey,
+    SpacesChatCredential,
 }
 
 impl Purpose {
@@ -107,6 +108,7 @@ impl Purpose {
             Purpose::PlcRotationKey => "plc-rotation-key",
             Purpose::SignInProviderSecret => "sign-in-provider-secret",
             Purpose::KemKey => "space-kem-key",
+            Purpose::SpacesChatCredential => "spaces-chat-credential",
         }
     }
 }

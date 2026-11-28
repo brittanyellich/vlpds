@@ -166,16 +166,30 @@ fn is_verified(result: Result<Outcome, String>) -> bool {
     matches!(result, Ok(Outcome::Verified { .. }))
 }
 
-async fn node(
+pub(crate) async fn node(
     plc: &MockPlc,
     rotation_key: Arc<Keypair>,
     store: Arc<object_store::memory::InMemory>,
     id: &str,
     dispatch: Option<vlpds::xrpc::agent_dispatch_route::Mount>,
 ) -> TestServer {
+    node_with_public_url(plc, rotation_key, store, id, dispatch, None).await
+}
+
+pub(crate) async fn node_with_public_url(
+    plc: &MockPlc,
+    rotation_key: Arc<Keypair>,
+    store: Arc<object_store::memory::InMemory>,
+    id: &str,
+    dispatch: Option<vlpds::xrpc::agent_dispatch_route::Mount>,
+    public_url: Option<String>,
+) -> TestServer {
     let url = plc.url.clone();
     cluster_node(id, store, 4, move |config| {
         config.plc_url = url;
+        if let Some(public_url) = public_url {
+            config.public_url = public_url;
+        }
         config.service_did = "did:web:pds.test".into();
         config.spaces = true;
         config.agent_dispatch = dispatch;
@@ -322,8 +336,47 @@ async fn ident_link_binding_requires_both_consents_and_either_party_can_revoke()
                 _ => panic!("unknown fixture phase"),
             }
         },
+        &rotation_key,
+        &store,
     )
     .await;
+    let (s, srv) = if worker_grants.is_some() {
+        let s = node_with_public_url(
+            &plc,
+            rotation_key.clone(),
+            store.clone(),
+            "ident-after-worker",
+            Some(bridge.mount()),
+            Some(s.url.clone()),
+        )
+        .await;
+        bridge.connect(&s).await;
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .proxy(reqwest::Proxy::all(&s.url).unwrap())
+            .build()
+            .unwrap();
+        let srv = Srv { app: s.app.clone(), base: srv.base, http };
+        (s, srv)
+    } else {
+        (s, srv)
+    };
+
+    let [alice_grant, bob_grant, agent_grant, bob_agent_grant] = if worker_grants.is_some() {
+        let mut refreshed = Vec::new();
+        for (flow, grant) in [
+            (&alice_flow, alice_grant),
+            (&bob_flow, bob_grant),
+            (&agent_flow, agent_grant),
+            (&bob_agent_flow, bob_agent_grant),
+        ] {
+            *flow.key.nonce.lock() = None;
+            refreshed.push(oauth::tokens(&oauth::refresh(&srv, flow, grant.refresh.as_deref().unwrap(), &[]).await));
+        }
+        refreshed.try_into().ok().unwrap()
+    } else {
+        [alice_grant, bob_grant, agent_grant, bob_agent_grant]
+    };
 
     // Owner revocation uses the existing full PDS session, separate from the
     // create-only approval. The current signed CAR proves record absence.
@@ -385,15 +438,10 @@ async fn ident_link_binding_requires_both_consents_and_either_party_can_revoke()
         use vlpds::xrpc::agent_dispatch::resolve;
         let resource = format!("{}/mcp", alice_grant.issuer);
         assert_eq!(resolve(&restarted.app, alice_grant.grant(&resource, &alice.did)).await, None);
-        assert_eq!(
-            resolve(&restarted.app, bob_grant.grant(&resource, &bob.did)).await.as_ref(),
-            Some(&bob_grant.binding)
-        );
+        assert_eq!(resolve(&restarted.app, bob_grant.grant(&resource, &bob.did)).await.as_ref(), None);
         assert_eq!(resolve(&restarted.app, bob_grant.grant(&resource, &alice.did)).await, None);
     }
-    assert!(vlpds::server::shutdown_gracefully(&restarted.app, std::time::Duration::from_secs(5)).await);
-    drop(restarted);
-    bridge.check_scoped_restart(&plc, rotation_key, store, &alice, &bob).await;
+    bridge.check_scoped_restart(&plc, restarted, rotation_key, store, &alice, &bob).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

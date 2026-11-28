@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { packagePreview } from "./preview-package.mjs";
 import { createServer } from "node:net";
+import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -15,7 +16,7 @@ assert.ok(workerd && provider, "Usage: node test.mjs /absolute/path/to/workerd /
 // The Rust harness supplies only disposable credentials and a loopback target.
 const input = createInterface({ input: process.stdin });
 const commands = input[Symbol.asyncIterator]();
-const { backend, bindings, foreignToken, verifyBinding, bridgeToken, signer, ownerPassword } = JSON.parse((await commands.next()).value);
+const { backend, ownerPds, bindings, foreignToken, verifyBinding, bridgeToken, signer, ownerPassword } = JSON.parse((await commands.next()).value);
 assert.match(backend, /^127\.0\.0\.1:[1-9][0-9]{0,4}$/);
 assert.equal(bindings.length, 2);
 assert.ok(foreignToken);
@@ -35,7 +36,7 @@ await new Promise((resolve, reject) => reservation.once("error", reject).listen(
 const address = `127.0.0.1:${reservation.address().port}`;
 await new Promise((resolve) => reservation.close(resolve));
 
-const origin = `http://${address}`;
+const origin = `${verifyBinding ? "https" : "http"}://${address}`;
 const mcp = origin + "/mcp";
 const other = origin + "/other";
 async function phase(name) {
@@ -46,20 +47,43 @@ async function phase(name) {
 const directory = await mkdtemp(join(tmpdir(), "exp711-mcp-auth-"));
 let child;
 try {
-  if (verifyBinding) await phase(`issuer ${origin}`);
+  if (verifyBinding) {
+    await writeFile(join(directory, "issuer-tls.cnf"), `[req]
+distinguished_name=dn
+x509_extensions=extensions
+prompt=no
+[dn]
+CN=127.0.0.1
+[extensions]
+subjectAltName=IP:127.0.0.1
+`, { mode: 0o600 });
+    execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+      "-config", "issuer-tls.cnf", "-keyout", "issuer-key.pem", "-out", "issuer-cert.pem"], { cwd: directory });
+    setDefaultCACertificates([...getCACertificates("default"), await readFile(join(directory, "issuer-cert.pem"), "utf8")]);
+    await phase(`issuer ${origin}`);
+  }
   const config = await packagePreview({
     directory, provider, listener: address, backend,
     bindings: verifyBinding ? signedBindings : workerBindings,
-    bridgeToken, signer,
+    bridgeToken, signer, ownerPds,
   });
-  child = spawn(workerd, ["serve", config], { stdio: ["ignore", "inherit", "inherit"] });
-  let response;
-  for (let attempt = 0; attempt < 40 && !response; attempt++) {
-    assert.equal(child.exitCode, null, "workerd exited before readiness");
-    response = await fetch(origin + "/.well-known/oauth-authorization-server").catch(() => undefined);
-    if (!response) await delay(50);
+  async function startWorker() {
+    child = spawn(workerd, ["serve", config], { stdio: ["ignore", "inherit", "inherit"] });
+    let response;
+    for (let attempt = 0; attempt < 40 && !response; attempt++) {
+      assert.equal(child.exitCode, null, "workerd exited before readiness");
+      response = await fetch(origin + "/.well-known/oauth-authorization-server").catch(() => undefined);
+      if (!response) await delay(50);
+    }
+    assert.equal(response?.status, 200);
+    return response;
   }
-  assert.equal(response?.status, 200);
+  async function stopWorker() {
+    const stopped = new Promise((resolve) => child.once("exit", resolve));
+    child.kill();
+    await stopped;
+  }
+  const response = await startWorker();
   const metadata = await response.json();
   assert.equal(metadata.issuer, origin);
   assert.ok(metadata.code_challenge_methods_supported.includes("S256"));
@@ -130,7 +154,23 @@ try {
       assert.equal((await submit("http://127.0.0.1:1", ownerPassword)).status, 403);
       const result = await submit(origin, password);
       assert.equal((await submit(origin, ownerPassword)).status, 400);
-      return result;
+      if (password !== ownerPassword) return result;
+      assert.equal(result.status, 200);
+      assert.equal(result.headers.get("Location"), null);
+      const review = await result.text();
+      const binding = owner === "owner-a-session" ? alice : bob;
+      assert.ok(review.includes(binding.authorDid));
+      assert.ok(review.includes(binding.conversationId));
+      assert.ok(!review.includes(ownerPassword));
+      const approval = review.match(/name="consent" value="([^"]+)"/)?.[1];
+      assert.ok(approval);
+      const confirm = () => fetch(target, {
+        method: "POST", headers: { Origin: origin, ...headers },
+        body: new URLSearchParams({ consent: approval }), redirect: "manual",
+      });
+      const response = await confirm();
+      assert.equal((await confirm()).status, 400);
+      return response;
     }
     if (loseRedirect) {
       if (verifyBinding) {
@@ -215,6 +255,11 @@ try {
     return body.result.structuredContent;
   }
 
+  if (verifyBinding) {
+    await stopWorker();
+    await startWorker();
+  }
+
   for (const issued of [a, b]) {
     const initialized = await rpc(issued.access_token, "initialize", {
       protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" },
@@ -270,6 +315,24 @@ try {
     assert.equal((await read(b, bob.conversationId)).status, 200);
     const surviving = await result(await send(b, bob.conversationId, "race", "Other owner still writes"));
     assert.equal(surviving.authorDid, bob.authorDid);
+    const beforeRestart = await result(await read(b, bob.conversationId));
+    await phase("restart-private-pds");
+    assert.deepEqual(await result(await read(b, bob.conversationId)), beforeRestart);
+    assert.deepEqual(await result(await send(b, bob.conversationId, "race", "Other owner still writes")), surviving);
+    assert.deepEqual(await result(await read(b, bob.conversationId)), beforeRestart);
+    assert.equal((await read(a, alice.conversationId)).status, 401);
+    const grants = await fetch(origin + "/fixture/revoke", { headers: ownerHeaders("owner-b-session") });
+    assert.equal(grants.status, 200);
+    const [grantId] = await grants.json();
+    const revoke = await fetch(origin + "/fixture/revoke", {
+      method: "POST", headers: ownerHeaders("owner-b-session"), body: JSON.stringify({ grantId }),
+    });
+    assert.equal(revoke.status, 204);
+    assert.equal((await send(b, bob.conversationId, "afterrevoke", "denied")).status, 401);
+    assert.equal((await read(b, bob.conversationId)).status, 401);
+    const revokedRefresh = await token({ grant_type: "refresh_token", refresh_token: b.refresh_token, resource: mcp });
+    assert.equal((await revokedRefresh.json()).error, "invalid_grant");
+    console.log("Passed the same Worker grant across Worker and PDS restarts, with history, retry and revocation");
     console.log("Passed fresh ident.link verification at MCP dispatch on already-issued tokens");
   }
 
@@ -291,6 +354,7 @@ try {
     assert.equal((await revoked.json()).error, "invalid_grant");
     assert.equal((await read(a, alice.conversationId)).status, 200);
   }
+  if (verifyBinding) console.log("Passed issuer restart with existing OAuth tokens and signed private Spaces chat");
   console.log("Passed OAuth-authorized Spaces writes/history, two-owner binding, audience isolation, and grant revocation");
 } finally {
   input.close();

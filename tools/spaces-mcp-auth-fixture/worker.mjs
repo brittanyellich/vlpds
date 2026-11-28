@@ -1,28 +1,36 @@
 import { OAuthAuthorizationServer, OAuthResourceServer } from "./provider.mjs";
 
-// Disposable single-isolate storage. Production revocation consistency is a separate decision.
-const rows = new Map();
-const env = {
-  OAUTH_KV: {
-    async get(key, options) {
-      const row = rows.get(key);
-      if (!row) return null;
-      return options?.type === "json" ? JSON.parse(row.value) : row.value;
-    },
-    async put(key, value, options) {
-      rows.set(key, { value, metadata: options?.metadata });
-    },
-    async delete(key) {
-      rows.delete(key);
-    },
-    async list({ prefix = "" } = {}) {
-      const keys = [...rows]
-        .filter(([key]) => key.startsWith(prefix))
-        .map(([name, row]) => ({ name, metadata: row.metadata }));
-      return { keys, list_complete: true };
-    },
-  },
-};
+import { DurableObject } from "cloudflare:workers";
+
+// The loopback package gives each preview its own disposable issuer database.
+export class PreviewIssuerStorage extends DurableObject {
+  async get(key, options) {
+    const row = await this.ctx.storage.get(key);
+    if (!row || row.expires <= Date.now()) return null;
+    return (typeof options === "string" ? options : options?.type) === "json"
+      ? JSON.parse(row.value) : row.value;
+  }
+
+  async put(key, value, options) {
+    const expires = options?.expirationTtl ? Date.now() + options.expirationTtl * 1000 : Infinity;
+    await this.ctx.storage.put(key, { value, metadata: options?.metadata, expires });
+  }
+
+  async delete(key) {
+    await this.ctx.storage.delete(key);
+  }
+
+  async list({ prefix = "", cursor, limit = 1000 } = {}) {
+    const rows = await this.ctx.storage.list({ prefix, startAfter: cursor });
+    const now = Date.now();
+    const keys = [...rows].filter(([, row]) => row.expires > now)
+      .map(([name, row]) => ({ name, metadata: row.metadata }));
+    const page = keys.slice(0, limit);
+    return keys.length > page.length
+      ? { keys: page, list_complete: false, cursor: page.at(-1).name }
+      : { keys: page, list_complete: true };
+  }
+}
 
 // Fixed, synthetic sessions stand in for completed owner authentication and consent.
 // They are fixture inputs delivered over loopback exclusively.
@@ -32,6 +40,7 @@ const owners = new Map([
 ]);
 const scope = "mcp:chat";
 const consent = new Map();
+const enrollments = new Map();
 const consentLifetime = 120_000;
 
 function escapeHtml(value) {
@@ -39,27 +48,34 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (character) => entities[character]);
 }
 
-function consentPage(authorizationUrl, auth) {
+function consentPage(authorizationUrl, auth, verified, enrollmentOrigin) {
   const now = Date.now();
   for (const [id, entry] of consent) if (entry.expires <= now) consent.delete(id);
   if (consent.size >= 32) return new Response(null, { status: 503 });
   const id = crypto.randomUUID();
-  consent.set(id, { authorizationUrl, expires: now + consentLifetime });
+  consent.set(id, { authorizationUrl, verified, expires: now + consentLifetime });
+  // Browsers apply form-action to redirects too. The provider has already
+  // validated the client callback against its registration.
+  const next = verified && new URL(enrollmentOrigin ?? auth.redirectUri);
+  const formAction = next && ["https:", "http:"].includes(next.protocol) ? " " + next.origin : "";
   return new Response(`<!doctype html><meta charset="utf-8">
     <title>Approve disposable Spaces chat</title>
     <h1>Approve disposable Spaces chat</h1>
-    <p>Sign in with a disposable PDS owner account to allow access to its approved private chat Space.</p>
+    ${verified ? `<p>Owner <code>${escapeHtml(verified.did)}</code></p>
+    <p>Agent <code>${escapeHtml(verified.binding.agent)}</code></p>
+    <p>Space <code>${escapeHtml(verified.binding.space)}</code></p>`
+    : "<p>Sign in with a disposable PDS owner account to review the requested access.</p>"}
     <p>Client <code>${escapeHtml(auth.clientId)}</code></p>
     <p>Resource <code>${escapeHtml(auth.resource)}</code></p>
     <form action="/authorize" method="post">
       <input type="hidden" name="consent" value="${id}">
-      <label>Owner handle <input name="handle" autocomplete="username" required></label>
+      ${verified ? '<button>Approve access</button>' : `<label>Owner handle <input name="handle" autocomplete="username" required></label>
       <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
-      <button>Sign in and approve</button>
+      <button>Sign in</button>`}
     </form>`, { headers: {
       "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
-      "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-      "Referrer-Policy": "no-referrer",
+      "Content-Security-Policy": `default-src 'none'; form-action 'self'${formAction}; frame-ancestors 'none'; base-uri 'none'`,
+      "Referrer-Policy": "origin",
     } });
 }
 
@@ -84,36 +100,79 @@ async function signDispatch(signer, issuer, resource, owner, grant, body) {
   return input + "." + base64url(new Uint8Array(signature));
 }
 
+function isHttpsOrigin(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.origin === value;
+  } catch {
+    return false;
+  }
+}
+
 export default {
-  async fetch(request, { ORIGIN: origin, SPACES, SPACES_URL, BINDINGS, BRIDGE_TOKEN, SIGNER }, ctx) {
+  async fetch(request, { ORIGIN: origin, SPACES, SPACES_URL, BINDINGS, BRIDGE_TOKEN, SIGNER, ISSUER_STORAGE, OWNER_PDS, OWNER_PDS_ORIGIN, PREVIEW_MODE, FIXTURE_TESTS, ENROLLMENT_RELAY }, ctx) {
     const url = new URL(request.url);
+    const isolated = PREVIEW_MODE === "isolated";
+    const fixture = FIXTURE_TESTS === "true" && url.hostname === "127.0.0.1";
+    if ((!isolated && !fixture) || (isolated && (
+      !BRIDGE_TOKEN || !SIGNER || !OWNER_PDS || !OWNER_PDS_ORIGIN || !SPACES || !SPACES_URL || !BINDINGS
+      || !isHttpsOrigin(origin)
+    ))) return new Response(null, { status: 503 });
     const browserApproval = BRIDGE_TOKEN && url.pathname === "/authorize" && request.method === "POST";
-    if (url.origin !== origin || (browserApproval
-      ? request.headers.get("Origin") !== origin || Boolean(url.search)
-      : request.headers.has("Origin"))) {
+    const enrollmentRelay = isolated && ENROLLMENT_RELAY === "true";
+    const callback = enrollmentRelay && url.pathname === "/spaces-callback";
+    const expectedOrigin = callback ? OWNER_PDS_ORIGIN : browserApproval ? origin : null;
+    if (url.origin !== origin || request.headers.get("Origin") !== expectedOrigin ||
+        ((browserApproval || callback) && url.search)) {
       return new Response(null, { status: 403 });
     }
     const mcp = origin + "/mcp";
     const other = origin + "/other";
     const issuer = new OAuthAuthorizationServer({
       issuer: origin,
-      resources: [mcp, other],
+      resources: fixture ? [mcp, other] : [mcp],
       clientRegistrationEndpoint: "/register",
       scopesSupported: [scope, "offline_access"],
     });
+    const env = { OAUTH_KV: ISSUER_STORAGE.getByName("preview-issuer") };
     const api = issuer.getOAuthApi(env);
-    const recordGrant = (operation, ownerSession, evidence) => SPACES.fetch(new URL("/fixture/grant", SPACES_URL), {
+    const targetsMcp = (auth) => auth.resource === mcp
+      || (Array.isArray(auth.resource) && auth.resource.length === 1 && auth.resource[0] === mcp);
+
+    const recordGrant = (operation, ownerSession, evidence) => SPACES.fetch(new URL("/internal/agent-grant-recovery", SPACES_URL), {
       method: "POST",
       headers: { Authorization: `Bearer ${BRIDGE_TOKEN}`, "Content-Type": "application/json",
-        "X-Fixture-Owner-Session": ownerSession },
+        "X-Vlpds-Owner-Session": ownerSession },
       body: JSON.stringify({ operation, ...evidence }),
     });
-    if (url.pathname === "/authorize" || url.pathname === "/fixture/revoke") {
-      let ownerSession = request.headers.get("X-Fixture-Owner-Session");
+    if (callback) {
+      if (request.method !== "POST") return new Response(null, { status: 405 });
+      if (!request.headers.get("Content-Type")?.startsWith("application/x-www-form-urlencoded")) {
+        return new Response(null, { status: 403 });
+      }
+      const form = await request.formData();
+      const state = form.get("state");
+      const code = form.get("code");
+      if (typeof state !== "string" || typeof code !== "string" || !code || code.length > 512 ||
+          form.get("issuer") !== OWNER_PDS_ORIGIN) return new Response(null, { status: 400 });
+      const pending = enrollments.get(state);
+      enrollments.delete(state);
+      if (!pending || pending.expires <= Date.now()) return new Response(null, { status: 400 });
+      const finished = await recordGrant("enrollment-finish", pending.verified.ownerSession, {
+        state, code, issuer: OWNER_PDS_ORIGIN,
+      });
+      if (finished.status !== 204) return new Response(null, { status: 403 });
+      const auth = await api.parseAuthRequest(new Request(pending.authorizationUrl));
+      return consentPage(pending.authorizationUrl, auth, { ...pending.verified, enrolled: true });
+    }
+    if (url.pathname === "/authorize" || (fixture && url.pathname === "/fixture/revoke")) {
+      let ownerSession = fixture ? request.headers.get("X-Fixture-Owner-Session") : null;
+      let approvedBinding;
       let authorizationRequest = request;
       if (BRIDGE_TOKEN && url.pathname === "/authorize") {
         if (request.method === "GET") {
           const auth = await api.parseAuthRequest(request);
+          if (!fixture && !targetsMcp(auth)) return new Response(null, { status: 400 });
           return consentPage(request.url, auth);
         }
         if (!browserApproval) return new Response(null, { status: 405 });
@@ -125,17 +184,52 @@ export default {
         const pending = consent.get(id);
         consent.delete(id);
         if (!pending || pending.expires <= Date.now()) return new Response(null, { status: 400 });
-        const login = await recordGrant("sign-in", "", { handle: form.get("handle"), password: form.get("password") });
-        if (!login.ok) return new Response(null, { status: 401 });
-        const { session } = await login.json();
-        ownerSession = `Bearer ${session}`;
         authorizationRequest = new Request(pending.authorizationUrl);
+        if (pending.verified) {
+          ownerSession = pending.verified.ownerSession;
+          approvedBinding = pending.verified;
+          if (enrollmentRelay && !approvedBinding.enrolled) {
+            const now = Date.now();
+            for (const [state, entry] of enrollments) if (entry.expires <= now) enrollments.delete(state);
+            if (enrollments.size >= 32) return new Response(null, { status: 503 });
+            const started = await recordGrant("enrollment-start", ownerSession);
+            if (!started.ok) return new Response(null, { status: 403 });
+            const { state, authorizationUrl } = await started.json();
+            const target = new URL(authorizationUrl);
+            if (typeof state !== "string" || !state || target.origin !== OWNER_PDS_ORIGIN ||
+                target.pathname !== "/oauth/authorize") return new Response(null, { status: 503 });
+            enrollments.set(state, { ...pending, expires: now + consentLifetime });
+            return new Response(null, { status: 303, headers: {
+              Location: target.href, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+            } });
+          }
+        } else {
+          const login = await OWNER_PDS.fetch(new URL("/xrpc/com.atproto.server.createSession", OWNER_PDS_ORIGIN), {
+            method: "POST",
+            redirect: "manual",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ identifier: form.get("handle"), password: form.get("password") }),
+          });
+          if (!login.ok) return new Response(null, { status: 401 });
+          const { accessJwt } = await login.json();
+          if (typeof accessJwt !== "string" || !accessJwt) return new Response(null, { status: 401 });
+          ownerSession = `Bearer ${accessJwt}`;
+          const identity = await recordGrant("owner", ownerSession);
+          if (!identity.ok) return new Response(null, { status: 401 });
+          const { did, binding } = await identity.json();
+          if (!binding?.agent || !binding?.space) return new Response(null, { status: 403 });
+          const auth = await api.parseAuthRequest(authorizationRequest);
+          return consentPage(pending.authorizationUrl, auth, { did, binding, ownerSession },
+            enrollmentRelay ? new URL(OWNER_PDS_ORIGIN).origin : undefined);
+        }
       }
       let owner;
       if (BRIDGE_TOKEN && ownerSession) {
         const identity = await recordGrant("owner", ownerSession);
         if (identity.ok) {
-          const { did } = await identity.json();
+          const { did, binding } = await identity.json();
+          if (approvedBinding && (approvedBinding.did !== did || approvedBinding.binding.space !== binding?.space
+              || approvedBinding.binding.agent !== binding?.agent)) return new Response(null, { status: 403 });
           // The issuer uses colon-delimited storage keys. Encode the DID
           // losslessly as its issuer subject and retain the DID for dispatch.
           const userId = base64url(encoder.encode(did));
@@ -169,12 +263,12 @@ export default {
       if (url.pathname === "/authorize" && (browserApproval || request.method === "GET")) {
         const auth = await api.parseAuthRequest(authorizationRequest);
         const granted = auth.scope.filter((requested) => requested === scope || requested === "offline_access");
-        const durable = BRIDGE_TOKEN && (auth.resource === mcp || (auth.resource?.length === 1 && auth.resource[0] === mcp));
+        const durable = BRIDGE_TOKEN && targetsMcp(auth);
         let evidence;
         if (durable) {
           const canonical = JSON.stringify({ ...auth, scope: [...new Set(auth.scope)].sort(), resource: mcp });
           const approval = hex(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(canonical))));
-          const begin = await recordGrant("begin", ownerSession, { approval, clientId: auth.clientId });
+          const begin = await recordGrant("begin", ownerSession, { approval, clientId: auth.clientId, binding: approvedBinding?.binding });
           if (!begin.ok) return new Response(null, { status: begin.status });
           const { correlation } = await begin.json();
           evidence = { approval, clientId: auth.clientId, correlation };
@@ -195,7 +289,7 @@ export default {
             userId === owner.userId && clientId === auth.clientId);
           if (!grant) return new Response(null, { status: 503 });
           const observed = { ...evidence, grantId: grant.id };
-          if (request.headers.get("X-Fixture-Lose-Redirect") === "yes") {
+          if (fixture && request.headers.get("X-Fixture-Lose-Redirect") === "yes") {
             // The issuer grant exists, but the browser never receives its code.
             return new Response(null, { status: 503 });
           }

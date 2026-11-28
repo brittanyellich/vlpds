@@ -1,5 +1,13 @@
 //! Stateless MCP tool handler for a preauthorized, scoped Spaces session.
 
+pub mod credentials;
+pub mod enrollment;
+
+pub mod oauth_client;
+
+pub mod rotation;
+pub mod runtime;
+
 use super::{agent_dispatch::Binding, agent_dispatch_auth::Admission, App};
 use crate::oauth::scopes::{SpaceAccess, SpacePermission, SpaceTarget};
 use axum::{

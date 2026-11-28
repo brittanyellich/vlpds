@@ -37,6 +37,7 @@ struct HttpsEnrollment {
 struct FixtureTls {
     ca_file: PathBuf,
     listener: SocketAddr,
+    plc_origin: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -75,6 +76,55 @@ impl Profile {
             );
         }
         Ok(profile)
+    }
+
+    pub fn check_hardened(&self, args: &crate::Args) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.https_enrollment.is_some() && self.https_client(&args.public_url)?.is_some(),
+            "Hardened EXP-711 requires isolated HTTPS enrollment"
+        );
+        anyhow::ensure!(
+            args.admin_listen.is_none() && args.admin_proxy_header.is_none(),
+            "Hardened EXP-711 does not expose an admin listener or trust admin proxy headers"
+        );
+        let files = [
+            ("--jwt-secret-file", &args.jwt_secret_file),
+            ("--admin-token-file", &args.admin_token_file),
+            ("--internal-token-file", &args.internal_token_file),
+            ("--plc-rotation-key-file", &args.plc_rotation_key_file),
+        ];
+        for (flag, path) in files {
+            anyhow::ensure!(
+                path.as_ref().is_some_and(|path| path.is_absolute()),
+                "Hardened EXP-711 requires an absolute preview-only {flag}"
+            );
+        }
+        let bridge = std::fs::read_to_string(&self.service_token_file)?;
+        let bridge = bridge.trim_end();
+        for secret in [&args.jwt_secret, &args.admin_token, &args.internal_token] {
+            anyhow::ensure!(secret.as_deref() != Some(bridge), "EXP-711 bridge token must be distinct");
+        }
+        let plc = reqwest::Url::parse(&args.plc_url)?;
+        anyhow::ensure!(
+            plc.scheme() == "https" || self.is_local_tls_fixture(&args.plc_url),
+            "Hardened EXP-711 requires HTTPS PLC outside a pinned local TLS fixture"
+        );
+        Ok(())
+    }
+
+    pub fn is_local_tls_fixture(&self, plc_url: &str) -> bool {
+        self.https_enrollment.as_ref().and_then(|https| https.fixture_tls.as_ref()).is_some_and(|tls| {
+            tls.listener.ip().is_loopback()
+                && tls.plc_origin.as_deref() == Some(plc_url)
+                && reqwest::Url::parse(plc_url).is_ok_and(|url| {
+                    url.scheme() == "http"
+                        && url.host_str() == Some("127.0.0.1")
+                        && url.port().is_some()
+                        && url.origin().ascii_serialization() == plc_url
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                })
+        })
     }
 
     pub fn store(&self) -> anyhow::Result<vlsync_store::store::S3Config> {

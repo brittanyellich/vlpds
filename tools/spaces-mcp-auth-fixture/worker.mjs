@@ -30,8 +30,9 @@ export class PreviewIssuerStorage extends DurableObject {
       const expired = [...rows].filter(([, row]) => row.expires <= now).map(([key]) => key);
       if (expired.length) await storage.delete(expired);
       const next = Math.min(...[...rows.values()].filter((row) => row.expires > now).map((row) => row.expires));
-      if (Number.isFinite(next)) await storage.setAlarm(next);
+      if (Number.isFinite(next)) await this.schedule(next);
     });
+    await this.flushRevocations();
   }
 
   async takeConsent(phase, id) {
@@ -57,7 +58,47 @@ export class PreviewIssuerStorage extends DurableObject {
   }
 
   async delete(key) {
-    await this.ctx.storage.delete(key);
+    const storage = this.ctx.storage;
+    if (!this.env.BRIDGE_TOKEN || !key.startsWith("grant:")) {
+      await storage.delete(key);
+      return;
+    }
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const row = await storage.get(key);
+      const facts = row && revocationEvidence(key, JSON.parse(row.value), this.env.ORIGIN, this.env.BINDINGS);
+      if (!facts) {
+        await storage.delete(key);
+        return;
+      }
+      await this.schedule(Date.now() + 1000);
+      await storage.transaction(async (tx) => {
+        await tx.put(revocationPrefix + key, facts);
+        await tx.delete(key);
+      });
+    });
+  }
+
+  async schedule(when) {
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || alarm > when) await this.ctx.storage.setAlarm(when);
+  }
+
+  async flushRevocations() {
+    const storage = this.ctx.storage;
+    const rows = await storage.list({ prefix: revocationPrefix, limit: 16 });
+    for (const [key, evidence] of rows) {
+      try {
+        const result = await this.env.SPACES.fetch(new URL("/internal/agent-grant-recovery", this.env.SPACES_URL), {
+          method: "POST", redirect: "manual", signal: AbortSignal.timeout(3000),
+          headers: { Authorization: `Bearer ${this.env.BRIDGE_TOKEN}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ operation: "issuer-revoked", ...evidence }),
+        });
+        if (result.status === 204) await storage.delete(key);
+      } catch {
+        // Keep authoritative issuer evidence for the next attempt.
+      }
+    }
+    if ((await storage.list({ prefix: revocationPrefix, limit: 1 })).size) await this.schedule(Date.now() + 10000);
   }
 
   async list({ prefix = "", cursor, limit = 1000 } = {}) {
@@ -151,6 +192,17 @@ async function consentPage(store, authorizationUrl, auth, verified, enrollmentOr
     } });
 }
 
+
+const revocationPrefix = "exp711:revocation:";
+
+function revocationEvidence(key, grant, origin, bindings) {
+  const { id, userId, clientId, metadata, resource } = grant;
+  if (resource !== origin + "/mcp" || key !== `grant:${userId}:${id}` || !metadata) return null;
+  const owner = metadata.ownerDid ?? JSON.parse(bindings)[userId]?.ownerDid;
+  if (typeof owner !== "string" || base64url(encoder.encode(owner)) !== userId ||
+      metadata.clientId !== clientId || !metadata.approval || !metadata.correlation) return null;
+  return { owner, approval: metadata.approval, clientId, correlation: metadata.correlation, grantId: id };
+}
 
 const encoder = new TextEncoder();
 const base64url = (bytes) => btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
@@ -378,7 +430,7 @@ export default {
           const begin = await recordGrant("begin", ownerSession, { approval, clientId: auth.clientId, binding: approvedBinding?.binding });
           if (!begin.ok) return new Response(null, { status: begin.status });
           const { correlation } = await begin.json();
-          evidence = { approval, clientId: auth.clientId, correlation };
+          evidence = { approval, clientId: auth.clientId, correlation, ownerDid: approvedBinding?.did };
         }
         const { redirectTo } = await api.completeAuthorization({
           request: auth,

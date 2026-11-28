@@ -1,0 +1,38 @@
+name: Project protected OFF config (read only)
+on:
+  workflow_dispatch:
+    inputs:
+      reviewed_head:
+        description: Exact reviewed main SHA approved for this config-only projection
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: exp710-off-config-projection
+  cancel-in-progress: false
+jobs:
+  project:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.12.1'
+      - name: Project shared config gates without provider access
+        env:
+          REVIEWED_HEAD: ${{ inputs.reviewed_head }}
+          DEPLOY_CONFIG: ${{ secrets.VLPDS_CLOUDFLARE_CONFIG_JSON }}
+        run: node deploy/cloudflare/scripts/off-config-projection.mjs
+      - name: Retain one bounded value-free receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: exp710-off-config-projection-${{ github.run_id }}
+          path: ${{ runner.temp }}/exp710-off-config-projection.json
+          if-no-files-found: error
+          retention-days: 1

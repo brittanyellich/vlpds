@@ -2,6 +2,8 @@ import hashlib
 import io
 import json
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 import zipfile
 import off_staging_evidence as e
@@ -20,6 +22,19 @@ def meta(raw, run, identifier):
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_shared_off_config_predicate_is_authenticated(self):
+        shared = 'deploy/cloudflare/scripts/off-config-gates.mjs'
+        self.assertIn(shared, e.CODE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in e.CODE:
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b'synthetic')
+            before = e.code_hash(root)
+            (root / shared).write_bytes(b'changed synthetic predicate')
+            self.assertNotEqual(e.code_hash(root), before)
+
     def fixture(self, operation='stage', partial=False):
         readback = {'result': 'verified', 'remoteVerified': True, 'manifestDigest': e.MANIFEST,
                     'configDigest': e.CONFIG, 'accountSha256': e.ACCOUNT_SHA256,

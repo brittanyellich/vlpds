@@ -52,6 +52,7 @@ export type Saved = {
   spaceListing?: { skipped: number; listingError?: string }
   spaceMoves?: SpaceMove[]
   oldDeactivated?: boolean
+  deactivationDeferred?: true
   /** Counted from the copied repo, kept once they match the import's record total. */
   counts?: RecordCounts
   /** Blobs the old server couldn't produce; reported, not retried forever. */

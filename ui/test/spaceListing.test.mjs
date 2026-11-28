@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { canDeactivateOld, copyPendingSpaces, listSpaceRefs } from '../src/pages/migrate/spaceListing.mjs'
+import { canDeactivateOld, copyPendingSpaces, isMigrationDone, listSpaceRefs, receiptsForRetry } from '../src/pages/migrate/spaceListing.mjs'
 
 const uri = 'at:space/did:plc:exquicw7jew5vxerpgvc3x6w/com.example.group/main'
 const legacy = uri.replace(/^at:space\/([^/]+)\//, 'at://$1/space/')
@@ -48,7 +48,7 @@ test('a copy failure leaves other spaces eligible and retry preserves verified p
   const copy = async (p) => {
     requests.push(p.uri)
     if (requests.length === 1) throw new Error('import failed')
-    return { uri: p.uri, state: 'moved' }
+    return { uri: p.uri, state: 'moved', filesVerified: true }
   }
   const persist = (moves) => { saved = moves }
   await copyPendingSpaces([{ uri }, { uri: other }], saved, copy, persist, String)
@@ -56,7 +56,7 @@ test('a copy failure leaves other spaces eligible and retry preserves verified p
   assert.match(saved[0].reason, /import failed/)
   await copyPendingSpaces([{ uri: legacy }, { uri: other }], saved, copy, persist, String)
   assert.deepEqual(requests, [uri, other, legacy])
-  assert.deepEqual(saved, [{ uri: legacy, state: 'moved' }, { uri: other, state: 'moved' }])
+  assert.deepEqual(saved, [{ uri: legacy, state: 'moved', filesVerified: true }, { uri: other, state: 'moved', filesVerified: true }])
 })
 
 test('automatic deactivation requires a complete Spaces check with no failed copies', () => {
@@ -67,4 +67,26 @@ test('automatic deactivation requires a complete Spaces check with no failed cop
     { spaces: 'done', spaceCheckComplete: true, spaceMoves: [{ uri, state: 'failed' }] },
   ]) assert.equal(canDeactivateOld(saved), false)
   for (const spaces of ['none', 'done']) assert.equal(canDeactivateOld({ spaces, spaceCheckComplete: true }), true)
+})
+
+test('retries unverified receipts without losing their provenance on failure', async () => {
+  const old = [{ uri, state: 'moved', records: 5, blobs: 0 }]
+  assert.equal(canDeactivateOld({ spaces: 'done', spaceCheckComplete: true, spaceMoves: old }), false)
+  let saved = receiptsForRetry(old)
+  assert.equal(saved[0].recheckReceipt, true)
+  await copyPendingSpaces([{ uri: legacy }], saved, async () => { throw new Error('list failed') }, (moves) => { saved = moves }, String)
+  assert.equal(saved[0].recheckReceipt, true)
+  assert.equal(saved[0].records, 5)
+  assert.equal(saved[0].state, 'failed')
+  assert.equal(canDeactivateOld({ spaces: 'done', spaceCheckComplete: true, spaceMoves: saved }), false)
+})
+
+test('old finishedAt values with unresolved Spaces remain resumable', () => {
+  const saved = { activated: true, finishedAt: 1 }
+  const skipped = { ...saved, spaces: 'skipped', spaceListing: { skipped: 1 } }
+  assert.equal(isMigrationDone(skipped), false)
+  assert.equal(isMigrationDone({ ...skipped, oldDeactivated: true }), false)
+  assert.equal(isMigrationDone({ ...saved, spaces: 'done', spaceCheckComplete: true, spaceMoves: [{ uri, state: 'moved' }] }), false)
+  assert.equal(isMigrationDone({ ...saved, oldDeactivated: true }), true)
+  assert.equal(isMigrationDone({ ...saved, spaces: 'none', spaceCheckComplete: true, deactivationDeferred: true }), true)
 })

@@ -53,9 +53,36 @@ export async function listSpaceRefs(readPage, maxEntries) {
   }
 }
 
+export const isVerifiedMove = (move) => move.filesVerified === true && (move.state === 'moved' || move.state === 'empty')
+
+const hasListingGaps = (listing) => !!(listing?.skipped || listing?.listingError)
+
 export function canDeactivateOld({ spaces, spaceCheckComplete, spaceListing, spaceMoves }) {
   return spaceCheckComplete === true && (spaces === 'none' || spaces === 'done') &&
-    !spaceListing?.skipped && !spaceListing?.listingError && !spaceMoves?.some((move) => move.state === 'failed')
+    !hasListingGaps(spaceListing) && !spaceMoves?.some((move) => !isVerifiedMove(move))
+}
+
+export function isMigrationDone(saved) {
+  if (!saved.activated) return false
+  if (saved.oldDeactivated) {
+    // Historical completed migrations are still done. Explicit unresolved
+    // outcomes must stay accessible even if an older build switched off the source.
+    return saved.spaces !== 'skipped' && !hasListingGaps(saved.spaceListing) &&
+      !saved.spaceMoves?.some((move) => move.state === 'failed' || (saved.spaceCheckComplete && !isVerifiedMove(move)))
+  }
+  return saved.deactivationDeferred === true && canDeactivateOld(saved)
+}
+
+export function receiptsForRetry(moves) {
+  return moves.map((move) => {
+    if (isVerifiedMove(move) || move.state === 'failed') return move
+    return {
+      ...move,
+      state: 'failed',
+      recheckReceipt: true,
+      reason: 'The earlier copy still needs its files checked.',
+    }
+  })
 }
 
 export async function copyPendingSpaces(plans, previous, copy, onMove, reasonOf) {
@@ -63,12 +90,12 @@ export async function copyPendingSpaces(plans, previous, copy, onMove, reasonOf)
   for (const plan of plans) {
     const key = spaceKey(plan.uri)
     const prior = moves.get(key)
-    if (prior && prior.state !== 'failed') continue
+    if (prior && isVerifiedMove(prior)) continue
     let move
     try {
       move = await copy(plan)
     } catch (error) {
-      move = { uri: plan.uri, state: 'failed', reason: reasonOf(error) }
+      move = { ...prior, uri: plan.uri, state: 'failed', reason: reasonOf(error) }
     }
     moves.set(key, move)
     onMove([...moves.values()])

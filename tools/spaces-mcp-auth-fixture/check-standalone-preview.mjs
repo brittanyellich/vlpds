@@ -389,10 +389,34 @@ try {
     token = await authorizeClient("Standalone client B", false);
     assert.notEqual(token.client_id, firstToken.client_id);
     browser.close();
+    // Bypass the resource-server token check with the test-only signed
+    // transport to prove the PDS independently received the tombstone.
+    const signerKey = await crypto.subtle.importKey("jwk", signer.jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+    const payload = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "spaces_chat_history", arguments: { conversationId } } });
+    async function signedHistory() {
+      const now = Math.floor(Date.now() / 1000);
+      const claims = {
+        iss: signer.iss, aud: signer.aud, lxm: signer.method, iat: now, exp: now + 25,
+        jti: randomBytes(16).toString("hex"), issuer, resource, owner: did, grant: firstToken.access_token.split(":")[1],
+        body_sha256: createHash("sha256").update(payload).digest("hex"),
+      };
+      const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+      const input = encode({ typ: "JWT", alg: "ES256" }) + "." + encode(claims);
+      const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, signerKey, Buffer.from(input));
+      return fetch(`http://${recovery}/xrpc/${signer.method}`, {
+        method: "POST", headers: { Authorization: `Bearer ${input}.${Buffer.from(signature).toString("base64url")}` },
+        body: payload,
+      });
+    }
+    assert.equal((await signedHistory()).status, 200);
     const revoke = await fetch(oauth.revocation_endpoint, { method: "POST", body: new URLSearchParams({
       client_id: firstToken.client_id, token: firstToken.refresh_token, token_type_hint: "refresh_token",
     }) });
     assert.equal(revoke.status, 200);
+    await stop(workerProcess);
+    workerProcess = startWorker();
+    await ready(workerProcess, metadataPath);
     const denied = await fetch(resource, { method: "POST", headers: {
       Authorization: `Bearer ${firstToken.access_token}`, "Content-Type": "application/json",
       Accept: "application/json, text/event-stream", "MCP-Protocol-Version": "2025-06-18",
@@ -400,10 +424,19 @@ try {
       params: { name: "spaces_chat_history", arguments: { conversationId } } }),
     });
     assert.equal(denied.status, 401);
+    let privateStatus;
+    for (let attempt = 0; attempt < 30 && privateStatus !== 401; attempt++) {
+      const response = await signedHistory();
+      privateStatus = response.status;
+      await response.body?.cancel();
+      if (privateStatus !== 401) await delay(200);
+    }
+    assert.equal(privateStatus, 401, "private PDS must deny the revoked issuer grant");
+
     assert.deepEqual(await call("spaces_chat_history", { conversationId }), {
       conversationId, messages: [{ ...sent, text: args.text }],
     });
-    console.log("Passed native preview sign-in, wrong issuer and DID rejection, and independent MCP grant revocation");
+    console.log("Passed native preview sign-in, wrong issuer and DID rejection, and independent MCP revocation reconciled to private PDS after Worker restart");
     console.log("Passed real Chrome consent, one-time scoped callback, signed standalone HTTPS send, PDS restart, retry and history");
   }
 } finally {

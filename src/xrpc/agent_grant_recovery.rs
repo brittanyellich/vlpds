@@ -196,6 +196,29 @@ impl<'a> Recovery<'a> {
         .await
     }
 
+    /// An authoritative client-grant deletion does not retire the Spaces
+    /// credential shared by the owner's other independent MCP grants.
+    async fn issuer_revoked_client(&self, operation: &str, observed: &Observation<'_>) -> XResult<()> {
+        self.change(operation, |intent| {
+            self.check_observation(intent, observed)?;
+            match &mut intent.state {
+                State::Bound { grant } if grant == observed.grant.id => {}
+                State::Cleanup { grant, issuer_done, upstream_done } if grant == observed.grant.id => {
+                    *issuer_done = true;
+                    if *upstream_done {
+                        intent.state = State::Closed { grant: Some(grant.clone()) };
+                    }
+                    return Ok(((), None));
+                }
+                State::Closed { grant: Some(grant) } if grant == observed.grant.id => return Ok(((), None)),
+                _ => return Err(refused()),
+            }
+            intent.state = State::Closed { grant: Some(observed.grant.id.into()) };
+            Ok(((), Some(GrantWrite::Revoke { row: observed.grant.row()?, binding: intent.request.binding.clone() })))
+        })
+        .await
+    }
+
     /// Persist the tombstone and cleanup task in the same owner transaction.
     /// An in-flight issue with no known ID retains its correlation for recovery.
     pub async fn cancel(&self, operation: &str) -> XResult<()> {

@@ -114,6 +114,11 @@ enum Operation {
     Approve(Evidence),
     Revoke(Evidence),
     IssuerCleaned(Evidence),
+    IssuerRevoked {
+        owner: String,
+        #[serde(flatten)]
+        evidence: Evidence,
+    },
 }
 
 fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a HeaderValue> {
@@ -143,6 +148,19 @@ async fn request(
     }
     use crate::xrpc::agent_chat::login;
     match &operation {
+        Operation::IssuerRevoked { owner, evidence } => {
+            if !vlatproto::syntax::valid_did(owner) {
+                return denied();
+            }
+            let recovery = Recovery::for_preview_owner(&app, owner.clone());
+            let grant = Grant { issuer: &mount.issuer, resource: &mount.resource, id: &evidence.grant_id, owner };
+            let observed = Observation { grant, client: &evidence.client_id, correlation: &evidence.correlation };
+            return if recovery.issuer_revoked_client(&evidence.approval, &observed).await.is_ok() {
+                ([(header::CACHE_CONTROL, "no-store")], StatusCode::NO_CONTENT).into_response()
+            } else {
+                denied()
+            };
+        }
         Operation::LoginStart { handle } => {
             let Some(oauth) = &mount.enrollment_oauth else { return denied() };
             let Some(owner) = login::owner_for_handle(&app, handle).await else { return denied() };
@@ -222,7 +240,10 @@ async fn enroll(app: &App, mount: &Mount, owner: &str, operation: Operation) -> 
 async fn execute(mount: &Mount, recovery: &Recovery<'_>, operation: Operation) -> Response {
     let denied = || StatusCode::FORBIDDEN.into_response();
     match operation {
-        Operation::LoginStart { .. } | Operation::LoginFinish { .. } | Operation::EnrollmentStatus => denied(),
+        Operation::LoginStart { .. }
+        | Operation::LoginFinish { .. }
+        | Operation::EnrollmentStatus
+        | Operation::IssuerRevoked { .. } => denied(),
         Operation::Owner => match (mount.binding)(recovery.owner()) {
             Some(binding) => Json(json!({"did": recovery.owner(), "binding": binding})).into_response(),
             None => denied(),

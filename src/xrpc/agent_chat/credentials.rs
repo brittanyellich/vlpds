@@ -8,8 +8,6 @@ use crate::oauth::{jose, store, util};
 use crate::secrets::Purpose;
 use crate::xrpc::{
     agent_dispatch::{verify_binding, Binding},
-    agent_provisioning::active_owner,
-    authn::Credentials,
     App, XResult, XrpcError,
 };
 use p256::ecdsa::SigningKey;
@@ -70,23 +68,27 @@ pub async fn open(
 /// Import only an existing, current OAuth grant approved by this owner for
 /// the exact configured Space and dedicated client. The caller supplies
 /// the binding and expected client from trusted preview configuration.
-pub async fn enroll(
+fn configured_client(app: &App, client: &str) -> bool {
+    app.config.preview_oauth_client.as_ref().is_none_or(|preview| client == preview.id())
+}
+
+pub(crate) async fn enroll(
     app: &App,
-    owner_session: &Credentials,
+    owner: &str,
     binding: &Binding,
     client: &str,
     key: &[u8],
     refresh: &str,
 ) -> XResult<bool> {
-    let owner = active_owner(app, owner_session).await?;
-    verify_binding(app, &owner, binding).await?;
+    verify_binding(app, owner, binding).await?;
     let expected = requested_scope(binding).ok_or_else(denied)?;
     let parsed = store::parse_refresh_token(refresh).filter(|token| token.did == owner).ok_or_else(denied)?;
-    let grant = store::get_session(app, &owner, &parsed.session_id).await.map_err(|_| denied())?.ok_or_else(denied)?;
+    let grant = store::get_session(app, owner, &parsed.session_id).await.map_err(|_| denied())?.ok_or_else(denied)?;
     let signing_key = SigningKey::from_slice(key).map_err(|_| denied())?;
     let jkt = jose::jwk_thumbprint(&jose::key_to_jwk(signing_key.verifying_key())).map_err(|_| denied())?;
     let refresh_key = util::derive_secret(&app.config.jwt_secret, "refresh-token");
-    if grant.client_id != client
+    if !configured_client(app, client)
+        || grant.client_id != client
         || grant.dpop_jkt != jkt
         || parsed.generation != grant.refresh_gen
         || !parsed.authentic(&refresh_key, &grant)
@@ -95,10 +97,42 @@ pub async fn enroll(
     {
         return Err(denied());
     }
-    let sealed = seal(app, &owner, binding, key, refresh).await?;
-    Rotation::new(app, &owner, binding)?
-        .install(Grant { issuer: app.config.public_url.clone(), client: grant.client_id, id: grant.id }, sealed)
-        .await
+    let sealed = seal(app, owner, binding, key, refresh).await?;
+    let rotation = Rotation::new(app, owner, binding)?;
+    let next = Grant { issuer: app.config.public_url.clone(), client: grant.client_id, id: grant.id };
+    if let Some(blocked) = rotation.blocked().await? {
+        return Ok(rotation.replace_after_consent(blocked, next, sealed).await?.is_some());
+    }
+    if let Some(ready) = rotation.ready_for_replacement().await? {
+        if live_grant(app, owner, ready.grant(), &expected).await? {
+            return Ok(false);
+        }
+        return Ok(rotation.replace_after_consent(ready, next, sealed).await?.is_some());
+    }
+    rotation.install(next, sealed).await
+}
+
+pub(crate) async fn is_enrolled(app: &App, owner: &str, binding: &Binding) -> XResult<bool> {
+    verify_binding(app, owner, binding).await?;
+    let Some(grant) = Rotation::new(app, owner, binding)?.ready_grant().await? else { return Ok(false) };
+    let expected = requested_scope(binding).ok_or_else(denied)?;
+    live_grant(app, owner, &grant, &expected).await
+}
+
+async fn live_grant(app: &App, owner: &str, grant: &Grant, expected: &str) -> XResult<bool> {
+    if grant.issuer != app.public_url || !configured_client(app, &grant.client) {
+        return Ok(false);
+    }
+    let Some(session) = store::get_session(app, owner, &grant.id).await.map_err(|_| denied())? else {
+        return Ok(false);
+    };
+    let client = crate::oauth::client::get_client_for_app(app, &grant.client).await.map_err(|_| denied())?;
+    let now = util::now_secs();
+    Ok(session.client_id == grant.client
+        && now - session.created_at <= client.session_lifetime()
+        && now - session.updated_at <= client.refresh_lifetime()
+        && scope_matches(&session.scope, expected)
+        && scope_matches(&session.token_scope, expected))
 }
 
 /// Runtime session opener. An ambiguous issuer response leaves the claim
@@ -117,7 +151,7 @@ pub async fn refresh(
     let claim = rotation.claim().await?.ok_or_else(denied)?;
     let (key, old_refresh) = open(app, owner, binding, &claim.envelope).await?;
     let signing_key = SigningKey::from_slice(key.as_slice()).map_err(|_| denied())?;
-    if claim.grant().issuer != app.public_url {
+    if claim.grant().issuer != app.public_url || !configured_client(app, &claim.grant().client) {
         return Err(denied());
     }
     let tokens = client.refresh(&signing_key, &claim.grant().client, &old_refresh).await.ok_or_else(denied)?;

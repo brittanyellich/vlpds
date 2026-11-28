@@ -568,6 +568,87 @@ pub fn first_party_metadata(public_url: &str) -> J {
     })
 }
 
+pub const PREVIEW_CLIENT_PATH: &str = "/exp711/client-metadata.json";
+pub const PREVIEW_LOGIN_CLIENT_PATH: &str = "/exp711/sign-in-client.json";
+pub const PREVIEW_CALLBACK: &str = "/exp711/spaces-callback";
+
+/// Explicit, server-owned OAuth registration for an isolated preview PDS.
+#[derive(Clone)]
+pub struct PreviewClient {
+    id: String,
+    redirect: String,
+    scopes: String,
+    origin: String,
+}
+
+impl PreviewClient {
+    pub fn new(origin: &str, redirect: &str, scopes: String) -> anyhow::Result<Self> {
+        let url = reqwest::Url::parse(origin)?;
+        anyhow::ensure!(
+            url.scheme() == "https"
+                && url.origin().ascii_serialization() == origin
+                && url.username().is_empty()
+                && url.password().is_none()
+                && redirect == format!("{origin}{PREVIEW_CALLBACK}"),
+            "Expected a canonical HTTPS preview issuer and its exact registered callback"
+        );
+        let client = Self {
+            id: format!("{origin}{PREVIEW_CLIENT_PATH}"),
+            redirect: redirect.into(),
+            scopes,
+            origin: origin.into(),
+        };
+        parse_client_id(&client.id, true).map_err(|_| anyhow::anyhow!("Invalid preview OAuth client ID"))?;
+        validate_metadata(&client.id, client.registration(), false, true)
+            .map_err(|_| anyhow::anyhow!("Invalid preview OAuth client metadata"))?;
+        Ok(client)
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn redirect(&self) -> &str {
+        &self.redirect
+    }
+    pub fn identity(&self) -> Self {
+        Self { id: format!("{}{PREVIEW_LOGIN_CLIENT_PATH}", self.origin), scopes: "atproto".into(), ..self.clone() }
+    }
+    pub fn metadata(&self) -> J {
+        json!({
+            "client_id": self.id,
+            "client_name": "Isolated Spaces preview",
+            "client_uri": self.origin,
+            "redirect_uris": [self.redirect],
+            "scope": "atproto",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "application_type": "web",
+            "token_endpoint_auth_method": "none",
+            "dpop_bound_access_tokens": true,
+        })
+    }
+    fn registration(&self) -> J {
+        // The authorization server enforces the configured Space scopes.
+        // The public client document must not disclose owner DIDs or Space keys.
+        let mut metadata = self.metadata();
+        metadata["scope"] = json!(self.scopes);
+        metadata
+    }
+}
+
+pub async fn get_client_for_app(app: &crate::xrpc::App, id: &str) -> Result<Arc<Client>, OAuthError> {
+    if let Some(preview) = &app.config.preview_oauth_client {
+        if id == preview.id {
+            return Ok(Arc::new(validate_metadata(id, preview.registration(), false, app.config.dev_mode)?));
+        }
+        let identity = preview.identity();
+        if id == identity.id {
+            return Ok(Arc::new(validate_metadata(id, identity.registration(), false, app.config.dev_mode)?));
+        }
+    }
+    get_client(id, app.config.dev_mode, &app.public_url).await
+}
+
 /// Starts the error `get_client` gives when a `jwks_uri` can't be fetched; the
 /// uri follows in quotes.
 pub const JWKS_FETCH_FAILED: &str = "Unable to obtain jwks from";

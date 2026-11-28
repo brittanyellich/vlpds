@@ -38,6 +38,12 @@ pub struct Blocked {
     claim: String,
 }
 
+impl Blocked {
+    pub(super) fn grant(&self) -> &Grant {
+        &self.grant
+    }
+}
+
 pub struct Rotation<'a> {
     app: &'a App,
     owner: &'a str,
@@ -64,6 +70,24 @@ impl<'a> Rotation<'a> {
         let binding = serde_json::to_vec(binding).map_err(XrpcError::from_err)?;
         let row = format!("agent-chat-rotation/v1/{}", hex::encode(Sha256::digest(binding)));
         Ok(Self { app, owner, row })
+    }
+
+    pub(super) async fn ready_grant(&self) -> XResult<Option<Grant>> {
+        let Some(current) = self.app.get_private(self.owner, &self.row).await? else {
+            return Ok(None);
+        };
+        match serde_json::from_slice(&current).map_err(XrpcError::from_err)? {
+            State::Ready { grant, .. } => Ok(Some(grant)),
+            State::Rotating { .. } => Ok(None),
+        }
+    }
+
+    pub(super) async fn ready_for_replacement(&self) -> XResult<Option<Blocked>> {
+        let Some(marker) = self.app.get_private(self.owner, &self.row).await? else { return Ok(None) };
+        let State::Ready { grant, .. } = serde_json::from_slice(&marker).map_err(XrpcError::from_err)? else {
+            return Ok(None);
+        };
+        Ok(Some(Blocked { marker, grant, claim: crate::space::token::new_jti() }))
     }
 
     pub async fn install(&self, grant: Grant, envelope: Vec<u8>) -> XResult<bool> {
@@ -105,8 +129,19 @@ impl<'a> Rotation<'a> {
     /// The caller verifies fresh owner consent and the replacement against the
     /// same binding. The compare-and-swap fences old refresh responses.
     pub async fn replace_blocked(&self, blocked: Blocked, grant: Grant, envelope: Vec<u8>) -> XResult<Option<String>> {
-        if grant.issuer != blocked.grant.issuer || grant.client != blocked.grant.client || grant.id == blocked.grant.id
-        {
+        if grant.client != blocked.grant.client {
+            return Ok(None);
+        }
+        self.replace_after_consent(blocked, grant, envelope).await
+    }
+
+    pub(super) async fn replace_after_consent(
+        &self,
+        blocked: Blocked,
+        grant: Grant,
+        envelope: Vec<u8>,
+    ) -> XResult<Option<String>> {
+        if grant.issuer != blocked.grant.issuer || grant.id == blocked.grant.id {
             return Ok(None);
         }
         let cleanup = self.retirement_row(&blocked.claim);

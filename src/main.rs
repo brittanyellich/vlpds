@@ -1539,9 +1539,17 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .as_ref()
         .map(|path| exp711_preview::Profile::load(path, &args.listen))
         .transpose()?;
-    let preview_recovery = preview.as_ref().map(exp711_preview::Profile::recovery).transpose()?;
+    let preview_oauth_client =
+        preview.as_ref().map(|profile| profile.https_client(&args.public_url)).transpose()?.flatten();
+    let preview_recovery = preview
+        .as_ref()
+        .map(|profile| profile.recovery(&args.public_url, preview_oauth_client.as_ref()))
+        .transpose()?;
     let preview_dispatch = preview.as_ref().map(|profile| profile.dispatch(&args.public_url)).transpose()?.flatten();
-    let preview_callback = preview.as_ref().map(|profile| profile.callback(&args.public_url)).transpose()?;
+    let preview_callback = preview
+        .as_ref()
+        .map(|profile| profile.callback(&args.public_url, preview_oauth_client.as_ref()))
+        .transpose()?;
     let preview_store = preview.as_ref().map(exp711_preview::Profile::store).transpose()?;
     let kek = match &preview {
         Some(profile) => vlpds::secrets::KekConfig {
@@ -1552,6 +1560,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     };
     let cfg = Config {
         public_url: args.public_url.clone(),
+        preview_oauth_client,
         agent_owner_consent,
         agent_dispatch: None,
         agent_discovery: None,

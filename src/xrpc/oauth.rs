@@ -391,7 +391,7 @@ async fn par_inner(app: &App, headers: &HeaderMap, body: &[u8]) -> Result<J, OAu
     let p = parse_params(headers, body)?;
     let proof = check_as_dpop(app, headers, "/oauth/par").await?;
     let creds = ClientCredentials::from_params(&p)?;
-    let client = client::get_client(&creds.client_id, app.config.dev_mode, &app.public_url).await?;
+    let client = client::get_client_for_app(app, &creds.client_id).await?;
     let (client_auth, assertion) = client.authenticate(&creds, &issuer(app))?;
     if let Some(r) = &assertion {
         claim(app, r, OAuthError::invalid_client("client assertion replayed")).await?;
@@ -876,7 +876,7 @@ async fn load_flow(
     req.device_id = Some(device.id.clone());
     req.expires_at = now + AUTHORIZATION_INACTIVITY_TIMEOUT;
     store::put_request(app, &id, Some(&req)).await?;
-    let client = client::get_client(&req.client_id, app.config.dev_mode, &app.public_url)
+    let client = client::get_client_for_app(app, &req.client_id)
         .await
         .map_err(|e| FlowError::Redirect(Box::new(req.params.clone()), "invalid_client", e.description))?;
     Ok(Flow { id, uri: uri.to_string(), req, client, device, new_cookie })
@@ -1974,7 +1974,7 @@ async fn token_inner(app: &Arc<App>, headers: &HeaderMap, body: &[u8], ip: Optio
     let p = parse_params(headers, body)?;
     let proof = check_as_dpop(app, headers, "/oauth/token").await?;
     let creds = ClientCredentials::from_params(&p)?;
-    let client = client::get_client(&creds.client_id, app.config.dev_mode, &app.public_url).await?;
+    let client = client::get_client_for_app(app, &creds.client_id).await?;
     let (client_auth, assertion) = client.authenticate(&creds, &issuer(app))?;
     if let Some(r) = &assertion {
         claim(app, r, OAuthError::invalid_client("client assertion replayed")).await?;
@@ -2223,7 +2223,7 @@ async fn revoke_inner(app: &App, headers: &HeaderMap, body: &[u8]) -> Result<(),
     let tok =
         p.get("token").filter(|t| !t.is_empty()).ok_or_else(|| OAuthError::invalid_request("Missing \"token\""))?;
     let creds = ClientCredentials::from_params(&p)?;
-    let client = client::get_client(&creds.client_id, app.config.dev_mode, &app.public_url).await?;
+    let client = client::get_client_for_app(app, &creds.client_id).await?;
     if let (_, Some(r)) = client.authenticate(&creds, &issuer(app))? {
         claim(app, &r, OAuthError::invalid_client("client assertion replayed")).await?;
     }
@@ -2311,6 +2311,30 @@ pub fn with_dpop_layer(r: axum::Router<Arc<App>>, app: &Arc<App>) -> axum::Route
         let is_dpop = req.headers().get(header::AUTHORIZATION).is_some_and(|v| v.as_bytes().starts_with(b"DPoP "));
         dpop_layer(is_dpop.then(|| app.clone()), req, next)
     }))
+}
+
+pub(crate) async fn preview_identity(
+    app: &App,
+    access: &str,
+    client: &str,
+    key: &p256::ecdsa::SigningKey,
+) -> Option<(String, String)> {
+    let jwt = super::authn::verify_access_token(&keys(app).server, access).ok()?;
+    let did = jwt.claim_str("sub")?;
+    let sid = jwt.claim_str("sid")?;
+    let jkt = jose::jwk_thumbprint(&jose::key_to_jwk(key.verifying_key())).ok()?;
+    let session = store::get_session(app, did, sid).await.ok()??;
+    (jwt.claim_str("iss") == Some(app.public_url.as_str())
+        && jwt.claim_str("aud") == Some(app.jwt.service_did.as_str())
+        && jwt.claim_i64("exp").is_some_and(|exp| exp > now_secs())
+        && jwt.claim_str("scope") == Some("atproto")
+        && jwt.claim_str("client_id") == Some(client)
+        && jwt.payload["cnf"]["jkt"].as_str() == Some(jkt.as_str())
+        && session.client_id == client
+        && session.dpop_jkt == jkt
+        && session.scope == "atproto"
+        && jwt.claim_str("jti") == Some(session.token_id.as_str()))
+    .then(|| (did.to_owned(), sid.to_owned()))
 }
 
 /// The DID of a validly signed access token, nothing else checked.

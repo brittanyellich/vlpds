@@ -16,6 +16,7 @@ pub use crate::appview_override::AppviewOverride;
 #[derive(Clone)]
 pub struct Config {
     pub public_url: String,
+    pub preview_oauth_client: Option<crate::oauth::client::PreviewClient>,
     /// Explicit dev-only loopback mount; None leaves contact routes absent.
     pub agent_contact_pilot: Option<crate::agent_contact_pilot::Mount>,
     /// Explicit native A2A opt-in; absent keeps all production agent routes off.
@@ -280,6 +281,7 @@ impl Default for Config {
             agent_contact_pilot: None,
             agent_a2a: None,
             agent_owner_consent: None,
+            preview_oauth_client: None,
             agent_dispatch: None,
             agent_discovery: None,
             handle_domain: "vlpds.test".into(),

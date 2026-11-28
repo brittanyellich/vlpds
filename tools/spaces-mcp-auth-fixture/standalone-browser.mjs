@@ -12,7 +12,7 @@ export async function startBrowser({ chrome, directory, pem, env, processes }) {
   const process = spawn(chrome, [
     "--headless", "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
     "--disable-component-update", "--disable-sync", "--no-proxy-server",
-    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+    "--host-resolver-rules=MAP preview-pds.test 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
     "--remote-debugging-port=0", `--user-data-dir=${profile}`,
     `--ignore-certificate-errors-spki-list=${pin}`, "about:blank",
   ], { env, stdio: "ignore" });
@@ -83,15 +83,22 @@ export async function startBrowser({ chrome, directory, pem, env, processes }) {
       return true;
     })()`);
   }
-  async function pdsConsent(pdsOrigin, handle, password) {
+  async function pdsConsent(pdsOrigin, handle, password, did) {
     const atPds = `location.origin === ${JSON.stringify(pdsOrigin)}`;
-    const arrived = await wait(`${atPds} && (
+    let arrived = await wait(`${atPds} && (
       document.querySelector('form[action="/oauth/authorize/select"]') ? "select" :
       document.querySelector('input[name="password"]') ? "sign-in" :
       document.querySelector('button[value="allow"]') ? "consent" : false)`, "PDS OAuth authorization");
     if (arrived === "select") {
-      // The same owner is already signed in after the setup grant.
-      await submit('form[action="/oauth/authorize/select"]:has(input[name="did"][value^="did:"]) button');
+      const accounts = 'form[action="/oauth/authorize/select"]';
+      const desired = did ? `${accounts}:has(input[name="did"][value="${did}"]) button`
+        : `${accounts}:has(input[name="did"][value^="did:"]) button`;
+      if (await evaluate(`Boolean(document.querySelector(${JSON.stringify(desired)}))`)) {
+        await submit(desired);
+      } else {
+        await submit(`${accounts}:has(input[name="did"][value=""]) button`);
+        arrived = "sign-in";
+      }
     }
     if (arrived === "sign-in") {
       await submit('form[action="/oauth/authorize/sign-in"] button[value="sign-in"]', { identifier: handle, password });
@@ -107,7 +114,7 @@ export async function startBrowser({ chrome, directory, pem, env, processes }) {
 
 const hash = (value) => createHash("sha256").update(value).digest("base64url");
 
-export async function authorizeSetup(browser, pdsOrigin, redirect, handle, password, scope) {
+export async function authorizeSetup(browser, pdsOrigin, redirect, handle, password, scope, fetchPds = fetch, rejectedClient) {
   const key = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
   const { kty, crv, x, y } = await crypto.subtle.exportKey("jwk", key.publicKey);
   const encode = (object) => Buffer.from(JSON.stringify(object)).toString("base64url");
@@ -121,7 +128,7 @@ export async function authorizeSetup(browser, pdsOrigin, redirect, handle, passw
         ...(nonce && { nonce }), ...(access && { ath: hash(access) }),
       });
       const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key.privateKey, Buffer.from(input));
-      const response = await fetch(url, { ...options, headers: {
+      const response = await fetchPds(url, { ...options, headers: {
         ...options.headers, DPoP: input + "." + Buffer.from(signature).toString("base64url"),
         ...(access && { Authorization: `DPoP ${access}` }),
       } });
@@ -132,12 +139,19 @@ export async function authorizeSetup(browser, pdsOrigin, redirect, handle, passw
   }
   const verifier = randomUUID() + randomUUID();
   const state = randomUUID();
-  const client = "http://localhost?" + new URLSearchParams({ scope, redirect_uri: redirect });
+  const client = rejectedClient ?? ("http://localhost?" + new URLSearchParams({ scope, redirect_uri: redirect }));
   const form = (path, body) => dpop(pdsOrigin + path, { method: "POST", body: new URLSearchParams(body) });
   const par = await form("/oauth/par", {
     client_id: client, response_type: "code", redirect_uri: redirect, scope, state,
     code_challenge: hash(verifier), code_challenge_method: "S256",
   });
+  if (rejectedClient) {
+    assert.equal(par.status, 400);
+    const rejected = await par.json();
+    assert.equal(rejected.error, "invalid_request");
+    assert.match(rejected.error_description, /^Invalid redirect_uri /);
+    return;
+  }
   assert.equal(par.status, 201, await par.clone().text());
   const { request_uri } = await par.json();
   await browser.navigate(pdsOrigin + "/oauth/authorize?" + new URLSearchParams({ client_id: client, request_uri }));

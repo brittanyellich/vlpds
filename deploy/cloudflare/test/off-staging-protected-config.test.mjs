@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {prepareOffStageConfig,prepareOffStage,offImage,OFF_STAGE as P} from '../scripts/off-staging-plan.mjs';
 import {createOffDiagnostics} from '../scripts/off-staging-transport.mjs';
 const account='a'.repeat(32);
@@ -12,4 +13,13 @@ test('protected config subdiagnostics distinguish synthetic refusals without ret
 test('account boundary remains bound and diagnostic observer preserves successful projection',()=>{
  const d=createOffDiagnostics();assert.throws(()=>prepareOffStage(env(config()),{onStage:d.mark}));d.capture();assert.equal(d.snapshot().failedStage,'protected-account');
  const clean=createOffDiagnostics(),input=env(config());assert.deepEqual(prepareOffStageConfig(input,{onStage:clean.mark}),prepareOffStageConfig(input));assert.deepEqual(clean.snapshot(),{version:1,failedStage:null});
+});
+
+test('OFF workflow uses the established protected JSON input contract with no legacy fallback',()=>{
+ const workflow=readFileSync(new URL('../../../.github/workflows/cloudflare-off-staging.yml',import.meta.url),'utf8');
+ const established=readFileSync(new URL('../../../.github/workflows/cloudflare-deploy.yml',import.meta.url),'utf8');
+ const binding='DEPLOY_CONFIG: ${{ secrets.VLPDS_CLOUDFLARE_CONFIG_JSON }}';
+ assert.ok(established.includes(binding));assert.equal(workflow.split(binding).length-1,1);assert.ok(!workflow.includes('secrets.DEPLOY_CONFIG'));
+ const syntheticSecret=JSON.stringify(config());const input={...env(config()),DEPLOY_CONFIG:syntheticSecret};assert.equal(prepareOffStageConfig(input).vars.AGENT_A2A_ENABLED,'false');
+ const d=createOffDiagnostics();assert.throws(()=>prepareOffStageConfig({...input,DEPLOY_CONFIG:''},{onStage:d.mark}));d.capture();assert.deepEqual(d.snapshot(),{version:1,failedStage:'protected-json'});
 });

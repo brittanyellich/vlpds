@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
+#[derive(Clone)]
 pub struct LoopbackOAuth {
     http: Client,
     endpoint: Url,
@@ -31,6 +32,39 @@ struct TokenResponse {
 impl LoopbackOAuth {
     pub fn new(origin: &str) -> anyhow::Result<Self> {
         Self::with_listener(origin, origin)
+    }
+
+    /// TLS is verified against system roots unless the isolated profile pins
+    /// a dedicated trust root. The authority is operator-configured.
+    pub fn https(
+        origin: &str,
+        ca: Option<reqwest::Certificate>,
+        local: Option<std::net::SocketAddr>,
+    ) -> anyhow::Result<Self> {
+        let url = Url::parse(origin)?;
+        anyhow::ensure!(
+            url.scheme() == "https"
+                && url.origin().ascii_serialization() == origin
+                && url.username().is_empty()
+                && url.password().is_none(),
+            "Expected canonical HTTPS PDS origin"
+        );
+        let mut http = Client::builder()
+            .no_proxy()
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(5));
+        if let Some(ca) = ca {
+            http = http.tls_certs_only([ca]);
+        }
+        if let Some(addr) = local {
+            anyhow::ensure!(
+                addr.ip().is_loopback() && url.port() == Some(addr.port()),
+                "Expected matching local HTTPS fixture listener"
+            );
+            http = http.resolve(url.host_str().ok_or_else(|| anyhow::anyhow!("Missing PDS host"))?, addr);
+        }
+        Ok(Self { endpoint: url.join("/oauth/token")?, http: http.build()? })
     }
 
     /// Connect an HTTP loopback issuer through its current private listener

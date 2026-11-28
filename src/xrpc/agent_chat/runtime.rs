@@ -31,6 +31,10 @@ impl ScopedSession for Session {
 impl Session {
     pub async fn open(app: &App, scope: SessionScope, listener: &str) -> Option<Self> {
         let oauth = LoopbackOAuth::with_listener(&app.public_url, listener).ok()?;
+        Self::open_with(app, scope, oauth).await
+    }
+
+    pub async fn open_with(app: &App, scope: SessionScope, oauth: LoopbackOAuth) -> Option<Self> {
         let (key, tokens) = credentials::refresh(app, &scope, &oauth).await.ok()?;
         Some(Self {
             scope,

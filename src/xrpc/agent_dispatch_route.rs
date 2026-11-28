@@ -96,16 +96,20 @@ impl Mount {
         Self::chat(signer, origin, &format!("{origin}/mcp"), open)
     }
 
-    pub fn preview_runtime(signer: &str, origin: &str, listener: String) -> anyhow::Result<Self> {
+    pub fn preview_runtime(
+        signer: &str,
+        origin: &str,
+        oauth: super::agent_chat::oauth_client::LoopbackOAuth,
+    ) -> anyhow::Result<Self> {
         let url = reqwest::Url::parse(origin)?;
         anyhow::ensure!(
             url.scheme() == "https" && url.origin().ascii_serialization() == origin,
             "MCP preview requires a canonical HTTPS origin"
         );
         Self::with_admission(signer, origin, &format!("{origin}/mcp"), move |app, admission, body| {
-            let listener = listener.clone();
+            let oauth = oauth.clone();
             async move {
-                let open = |scope| super::agent_chat::runtime::Session::open(&app, scope, &listener);
+                let open = |scope| super::agent_chat::runtime::Session::open_with(&app, scope, oauth.clone());
                 dispatch_scoped(&app, &open, admission, &body).await
             }
         })

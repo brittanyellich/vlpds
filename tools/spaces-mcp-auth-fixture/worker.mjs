@@ -4,6 +4,46 @@ import { DurableObject } from "cloudflare:workers";
 
 // The loopback package gives each preview its own disposable issuer database.
 export class PreviewIssuerStorage extends DurableObject {
+  async putConsent(phase, id, sealed) {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const now = Date.now();
+      const storage = this.ctx.storage;
+      const prefix = consentPrefix(phase);
+      const rows = await storage.list({ prefix, limit: 32 });
+      const expired = [...rows].filter(([, row]) => row.expires <= now).map(([key]) => key);
+      if (expired.length) await storage.delete(expired);
+      const key = prefix + id;
+      if (rows.size - expired.length >= 32 || (rows.has(key) && !expired.includes(key))) return false;
+      const expires = now + consentLifetime;
+      const alarm = await storage.getAlarm();
+      if (alarm === null || alarm > expires) await storage.setAlarm(expires);
+      await storage.put(key, { sealed, expires });
+      return true;
+    });
+  }
+
+  async alarm() {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const storage = this.ctx.storage;
+      const now = Date.now();
+      const rows = await storage.list({ prefix: browserPrefix });
+      const expired = [...rows].filter(([, row]) => row.expires <= now).map(([key]) => key);
+      if (expired.length) await storage.delete(expired);
+      const next = Math.min(...[...rows.values()].filter((row) => row.expires > now).map((row) => row.expires));
+      if (Number.isFinite(next)) await storage.setAlarm(next);
+    });
+  }
+
+  async takeConsent(phase, id) {
+    const key = consentPrefix(phase) + id;
+    return this.ctx.storage.transaction(async (tx) => {
+      const row = await tx.get(key);
+      if (!row) return null;
+      await tx.delete(key);
+      return row.expires > Date.now() ? row.sealed : null;
+    });
+  }
+
   async get(key, options) {
     const row = await this.ctx.storage.get(key);
     if (!row || row.expires <= Date.now()) return null;
@@ -39,21 +79,53 @@ const owners = new Map([
   ["owner-b-session", { userId: "owner-b", binding: "b-chat" }],
 ]);
 const scope = "mcp:chat";
-const consent = new Map();
-const enrollments = new Map();
 const consentLifetime = 120_000;
+const browserPrefix = "exp711:browser:";
+const consentPrefix = (phase) => `${browserPrefix}${phase}:`;
+const validConsentId = (id) => typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id);
+
+// The Worker seals the full owner session before passing it to shared storage.
+function browserState(storage, bridgeToken, origin) {
+  let key;
+  async function encryptionKey() {
+    if (!key) {
+      const input = await crypto.subtle.importKey("raw", encoder.encode(bridgeToken), "HKDF", false, ["deriveKey"]);
+      key = await crypto.subtle.deriveKey({
+        name: "HKDF", hash: "SHA-256", salt: encoder.encode(origin), info: encoder.encode("exp711 browser consent v1"),
+      }, input, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+    }
+    return key;
+  }
+  const params = (phase, id, iv) => ({ name: "AES-GCM", iv, additionalData: encoder.encode(consentPrefix(phase) + id) });
+  return {
+    async put(phase, id, pending) {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const cipher = await crypto.subtle.encrypt(params(phase, id, iv), await encryptionKey(),
+        encoder.encode(JSON.stringify(pending)));
+      return storage.putConsent(phase, id, { iv, cipher });
+    },
+    async take(phase, id) {
+      if (!validConsentId(id)) return null;
+      const sealed = await storage.takeConsent(phase, id);
+      if (!sealed) return null;
+      try {
+        const clear = await crypto.subtle.decrypt(params(phase, id, sealed.iv), await encryptionKey(), sealed.cipher);
+        return JSON.parse(new TextDecoder().decode(clear));
+      } catch {
+        return null;
+      }
+    },
+  };
+}
 
 function escapeHtml(value) {
   const entities = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
   return String(value).replace(/[&<>"']/g, (character) => entities[character]);
 }
 
-function consentPage(authorizationUrl, auth, verified, enrollmentOrigin) {
-  const now = Date.now();
-  for (const [id, entry] of consent) if (entry.expires <= now) consent.delete(id);
-  if (consent.size >= 32) return new Response(null, { status: 503 });
+async function consentPage(store, authorizationUrl, auth, verified, enrollmentOrigin) {
   const id = crypto.randomUUID();
-  consent.set(id, { authorizationUrl, verified, expires: now + consentLifetime });
+  if (!await store.put("consent", id, { authorizationUrl, verified })) return new Response(null, { status: 503 });
   // Browsers apply form-action to redirects too. The provider has already
   // validated the client callback against its registration.
   const next = verified && new URL(enrollmentOrigin ?? auth.redirectUri);
@@ -134,6 +206,7 @@ export default {
       clientRegistrationEndpoint: "/register",
       scopesSupported: [scope, "offline_access"],
     });
+    const store = browserState(ISSUER_STORAGE.getByName("preview-browser"), BRIDGE_TOKEN, origin);
     const env = { OAUTH_KV: ISSUER_STORAGE.getByName("preview-issuer") };
     const api = issuer.getOAuthApi(env);
     const targetsMcp = (auth) => auth.resource === mcp
@@ -155,15 +228,14 @@ export default {
       const code = form.get("code");
       if (typeof state !== "string" || typeof code !== "string" || !code || code.length > 512 ||
           form.get("issuer") !== OWNER_PDS_ORIGIN) return new Response(null, { status: 400 });
-      const pending = enrollments.get(state);
-      enrollments.delete(state);
-      if (!pending || pending.expires <= Date.now()) return new Response(null, { status: 400 });
+      const pending = await store.take("enrollment", state);
+      if (!pending) return new Response(null, { status: 400 });
       const finished = await recordGrant("enrollment-finish", pending.verified.ownerSession, {
         state, code, issuer: OWNER_PDS_ORIGIN,
       });
       if (finished.status !== 204) return new Response(null, { status: 403 });
       const auth = await api.parseAuthRequest(new Request(pending.authorizationUrl));
-      return consentPage(pending.authorizationUrl, auth, { ...pending.verified, enrolled: true });
+      return consentPage(store, pending.authorizationUrl, auth, { ...pending.verified, enrolled: true });
     }
     if (url.pathname === "/authorize" || (fixture && url.pathname === "/fixture/revoke")) {
       let ownerSession = fixture ? request.headers.get("X-Fixture-Owner-Session") : null;
@@ -173,7 +245,7 @@ export default {
         if (request.method === "GET") {
           const auth = await api.parseAuthRequest(request);
           if (!fixture && !targetsMcp(auth)) return new Response(null, { status: 400 });
-          return consentPage(request.url, auth);
+          return consentPage(store, request.url, auth);
         }
         if (!browserApproval) return new Response(null, { status: 405 });
         if (!request.headers.get("Content-Type")?.startsWith("application/x-www-form-urlencoded")) {
@@ -181,24 +253,20 @@ export default {
         }
         const form = await request.formData();
         const id = form.get("consent");
-        const pending = consent.get(id);
-        consent.delete(id);
-        if (!pending || pending.expires <= Date.now()) return new Response(null, { status: 400 });
+        const pending = await store.take("consent", id);
+        if (!pending) return new Response(null, { status: 400 });
         authorizationRequest = new Request(pending.authorizationUrl);
         if (pending.verified) {
           ownerSession = pending.verified.ownerSession;
           approvedBinding = pending.verified;
           if (enrollmentRelay && !approvedBinding.enrolled) {
-            const now = Date.now();
-            for (const [state, entry] of enrollments) if (entry.expires <= now) enrollments.delete(state);
-            if (enrollments.size >= 32) return new Response(null, { status: 503 });
             const started = await recordGrant("enrollment-start", ownerSession);
             if (!started.ok) return new Response(null, { status: 403 });
             const { state, authorizationUrl } = await started.json();
             const target = new URL(authorizationUrl);
-            if (typeof state !== "string" || !state || target.origin !== OWNER_PDS_ORIGIN ||
+            if (!validConsentId(state) || target.origin !== OWNER_PDS_ORIGIN ||
                 target.pathname !== "/oauth/authorize") return new Response(null, { status: 503 });
-            enrollments.set(state, { ...pending, expires: now + consentLifetime });
+            if (!await store.put("enrollment", state, pending)) return new Response(null, { status: 503 });
             return new Response(null, { status: 303, headers: {
               Location: target.href, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
             } });
@@ -219,7 +287,7 @@ export default {
           const { did, binding } = await identity.json();
           if (!binding?.agent || !binding?.space) return new Response(null, { status: 403 });
           const auth = await api.parseAuthRequest(authorizationRequest);
-          return consentPage(pending.authorizationUrl, auth, { did, binding, ownerSession },
+          return consentPage(store, pending.authorizationUrl, auth, { did, binding, ownerSession },
             enrollmentRelay ? new URL(OWNER_PDS_ORIGIN).origin : undefined);
         }
       }

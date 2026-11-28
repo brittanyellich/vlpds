@@ -2,7 +2,14 @@
 
 use serde::Deserialize;
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
-use vlpds::xrpc::{agent_dispatch::Binding, agent_grant_recovery::http::Mount};
+use vlpds::{
+    oauth::client::{PreviewClient, PREVIEW_CALLBACK, PREVIEW_CLIENT_PATH},
+    xrpc::{
+        agent_chat::{credentials, oauth_client::LoopbackOAuth},
+        agent_dispatch::Binding,
+        agent_grant_recovery::http::Mount,
+    },
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -13,8 +20,23 @@ pub struct Profile {
     issuer: String,
     dispatch_signer: Option<String>,
     enrollment_redirect: Option<String>,
+    https_enrollment: Option<HttpsEnrollment>,
     service_token_file: PathBuf,
     bindings: HashMap<String, Binding>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct HttpsEnrollment {
+    pds_issuer: String,
+    fixture_tls: Option<FixtureTls>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct FixtureTls {
+    ca_file: PathBuf,
+    listener: SocketAddr,
 }
 
 #[derive(Deserialize)]
@@ -94,20 +116,51 @@ impl Profile {
         })
     }
 
+    pub fn https_client(&self, origin: &str) -> anyhow::Result<Option<PreviewClient>> {
+        let Some(https) = &self.https_enrollment else { return Ok(None) };
+        anyhow::ensure!(
+            https.pds_issuer == origin && origin != self.issuer && self.dispatch_signer.is_some(),
+            "EXP-711 HTTPS issuer must match the isolated PDS public URL and differ from the MCP issuer"
+        );
+        let redirect = self
+            .enrollment_redirect
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Missing preview enrollment callback"))?;
+        let mut scopes = std::collections::BTreeSet::from(["atproto".to_owned()]);
+        for binding in self.bindings.values() {
+            let scope = credentials::requested_scope(binding)
+                .ok_or_else(|| anyhow::anyhow!("Invalid scoped preview binding"))?;
+            scopes.extend(scope.split_whitespace().map(str::to_owned));
+        }
+        PreviewClient::new(origin, redirect, scopes.into_iter().collect::<Vec<_>>().join(" ")).map(Some)
+    }
+
+    fn transport(&self, origin: &str) -> anyhow::Result<LoopbackOAuth> {
+        let Some(https) = &self.https_enrollment else { return LoopbackOAuth::new(origin) };
+        if let Some(tls) = &https.fixture_tls {
+            anyhow::ensure!(tls.ca_file.is_absolute(), "Expected absolute isolated TLS fixture CA path");
+            let ca = reqwest::Certificate::from_pem(&std::fs::read(&tls.ca_file)?)?;
+            return LoopbackOAuth::https(origin, Some(ca), Some(tls.listener));
+        }
+        LoopbackOAuth::https(origin, None, None)
+    }
+
     pub fn dispatch(&self, origin: &str) -> anyhow::Result<Option<vlpds::xrpc::agent_dispatch_route::Mount>> {
         self.dispatch_signer
             .as_deref()
             .map(|signer| {
-                vlpds::xrpc::agent_chat::oauth_client::LoopbackOAuth::new(origin)?;
-                vlpds::xrpc::agent_dispatch_route::Mount::preview_runtime(signer, &self.issuer, origin.into())
+                vlpds::xrpc::agent_dispatch_route::Mount::preview_runtime(signer, &self.issuer, self.transport(origin)?)
             })
             .transpose()
     }
 
-    pub fn recovery(&self) -> anyhow::Result<Mount> {
+    pub fn recovery(&self, origin: &str, client: Option<&PreviewClient>) -> anyhow::Result<Mount> {
         let token = std::fs::read_to_string(&self.service_token_file)?;
         let bindings = self.bindings.clone();
         let mount = Mount::new(&self.issuer, token.trim_end(), move |owner| bindings.get(owner).cloned())?;
+        if let Some(client) = client {
+            return Ok(mount.with_https_enrollment(client, self.transport(origin)?));
+        }
         match &self.enrollment_redirect {
             Some(redirect) => mount.with_enrollment(redirect.clone()),
             None => Ok(mount),
@@ -123,20 +176,24 @@ struct Callback {
 }
 
 impl Profile {
-    pub fn callback(&self, pds_origin: &str) -> anyhow::Result<axum::Router> {
+    pub fn callback(&self, pds_origin: &str, client: Option<&PreviewClient>) -> anyhow::Result<axum::Router> {
         use axum::{extract::Query, response::Html, routing::get};
         if self.dispatch_signer.is_none() {
             return Ok(axum::Router::new());
         }
-        const PATH: &str = "/exp711/spaces-callback";
+        let mut router = axum::Router::new();
+        if let Some(client) = client {
+            let metadata = client.metadata();
+            router = router.route(PREVIEW_CLIENT_PATH, get(move || async move { axum::Json(metadata) }));
+        }
         anyhow::ensure!(
-            self.enrollment_redirect.as_deref() == Some(format!("{pds_origin}{PATH}").as_str()),
-            "EXP-711 chat requires the private loopback PDS callback URI"
+            self.enrollment_redirect.as_deref() == Some(format!("{pds_origin}{PREVIEW_CALLBACK}").as_str()),
+            "EXP-711 chat requires the exact PDS callback URI"
         );
         let relay = reqwest::Url::parse(&format!("{}/spaces-callback", self.issuer))?;
         let issuer = pds_origin.to_owned();
-        Ok(axum::Router::new().route(
-            PATH,
+        Ok(router.route(
+            PREVIEW_CALLBACK,
             get(move |Query(input): Query<Callback>| async move {
                 if input.iss != issuer
                     || ![&input.code, &input.state].iter().all(|value| {

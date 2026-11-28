@@ -391,7 +391,7 @@ async fn par_inner(app: &App, headers: &HeaderMap, body: &[u8]) -> Result<J, OAu
     let p = parse_params(headers, body)?;
     let proof = check_as_dpop(app, headers, "/oauth/par").await?;
     let creds = ClientCredentials::from_params(&p)?;
-    let client = client::get_client(&creds.client_id, app.config.dev_mode, &app.public_url).await?;
+    let client = client::get_client_for_app(app, &creds.client_id).await?;
     let (client_auth, assertion) = client.authenticate(&creds, &issuer(app))?;
     if let Some(r) = &assertion {
         claim(app, r, OAuthError::invalid_client("client assertion replayed")).await?;
@@ -876,7 +876,7 @@ async fn load_flow(
     req.device_id = Some(device.id.clone());
     req.expires_at = now + AUTHORIZATION_INACTIVITY_TIMEOUT;
     store::put_request(app, &id, Some(&req)).await?;
-    let client = client::get_client(&req.client_id, app.config.dev_mode, &app.public_url)
+    let client = client::get_client_for_app(app, &req.client_id)
         .await
         .map_err(|e| FlowError::Redirect(Box::new(req.params.clone()), "invalid_client", e.description))?;
     Ok(Flow { id, uri: uri.to_string(), req, client, device, new_cookie })
@@ -1974,7 +1974,7 @@ async fn token_inner(app: &Arc<App>, headers: &HeaderMap, body: &[u8], ip: Optio
     let p = parse_params(headers, body)?;
     let proof = check_as_dpop(app, headers, "/oauth/token").await?;
     let creds = ClientCredentials::from_params(&p)?;
-    let client = client::get_client(&creds.client_id, app.config.dev_mode, &app.public_url).await?;
+    let client = client::get_client_for_app(app, &creds.client_id).await?;
     let (client_auth, assertion) = client.authenticate(&creds, &issuer(app))?;
     if let Some(r) = &assertion {
         claim(app, r, OAuthError::invalid_client("client assertion replayed")).await?;
@@ -2223,7 +2223,7 @@ async fn revoke_inner(app: &App, headers: &HeaderMap, body: &[u8]) -> Result<(),
     let tok =
         p.get("token").filter(|t| !t.is_empty()).ok_or_else(|| OAuthError::invalid_request("Missing \"token\""))?;
     let creds = ClientCredentials::from_params(&p)?;
-    let client = client::get_client(&creds.client_id, app.config.dev_mode, &app.public_url).await?;
+    let client = client::get_client_for_app(app, &creds.client_id).await?;
     if let (_, Some(r)) = client.authenticate(&creds, &issuer(app))? {
         claim(app, &r, OAuthError::invalid_client("client assertion replayed")).await?;
     }

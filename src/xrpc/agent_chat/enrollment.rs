@@ -89,7 +89,6 @@ pub async fn start(
 ) -> XResult<Authorization> {
     let owner = active_owner(app, session).await?;
     verify_binding(app, &owner, binding).await?;
-    check_redirect(redirect).map_err(|_| denied())?;
     if oauth.origin() != app.public_url {
         return Err(denied());
     }
@@ -101,10 +100,17 @@ pub async fn start(
         }
     }
     let scope = credentials::requested_scope(binding).ok_or_else(denied)?;
-    let client =
+    let client = if let Some(client) = &app.config.preview_oauth_client {
+        if redirect != client.redirect() {
+            return Err(denied());
+        }
+        client.id().to_owned()
+    } else {
+        check_redirect(redirect).map_err(|_| denied())?;
         reqwest::Url::parse_with_params("http://localhost", [("scope", scope.as_str()), ("redirect_uri", redirect)])
             .map_err(|_| denied())?
-            .to_string();
+            .to_string()
+    };
     let state = random_id("mcp-", 32);
     let verifier = Zeroizing::new(random_id("", 32));
     let challenge = b64u(Sha256::digest(verifier.as_bytes()));

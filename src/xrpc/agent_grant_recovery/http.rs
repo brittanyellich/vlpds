@@ -27,6 +27,7 @@ pub struct Mount {
     service_digest: [u8; 32],
     binding: Arc<BindingLookup>,
     enrollment_redirect: Option<String>,
+    enrollment_oauth: Option<crate::xrpc::agent_chat::oauth_client::LoopbackOAuth>,
 }
 
 impl Mount {
@@ -50,6 +51,7 @@ impl Mount {
             service_digest: Sha256::digest(service_token).into(),
             binding: Arc::new(binding),
             enrollment_redirect: None,
+            enrollment_oauth: None,
         })
     }
 
@@ -57,6 +59,16 @@ impl Mount {
         crate::xrpc::agent_chat::enrollment::check_redirect(&redirect)?;
         self.enrollment_redirect = Some(redirect);
         Ok(self)
+    }
+
+    pub fn with_https_enrollment(
+        mut self,
+        client: &crate::oauth::client::PreviewClient,
+        oauth: crate::xrpc::agent_chat::oauth_client::LoopbackOAuth,
+    ) -> Self {
+        self.enrollment_redirect = Some(client.redirect().into());
+        self.enrollment_oauth = Some(oauth);
+        self
     }
 
     pub fn private_router(&self, app: Arc<App>) -> Router {
@@ -146,7 +158,7 @@ async fn enroll(app: &App, mount: &Mount, session: &authn::Credentials, owner: &
     let (Some(redirect), Some(binding)) = (&mount.enrollment_redirect, (mount.binding)(owner)) else {
         return denied();
     };
-    let Ok(oauth) = LoopbackOAuth::new(&app.public_url) else {
+    let Ok(oauth) = mount.enrollment_oauth.clone().map_or_else(|| LoopbackOAuth::new(&app.public_url), Ok) else {
         return denied();
     };
     match operation {

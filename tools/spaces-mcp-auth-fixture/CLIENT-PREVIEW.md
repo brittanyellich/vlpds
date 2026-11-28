@@ -96,7 +96,21 @@ Reserve `https://mcp-preview.crate.social/mcp` for the isolated Worker. Give `ex
 
 The browser must be able to navigate to the PDS OAuth authorization and return through an HTTPS callback. Use a separate preview-only HTTPS PDS origin, such as `https://pds-mcp-preview.crate.social` once approved. Set the PDS public URL and `httpsEnrollment.pdsIssuer` to that exact origin. Set `enrollmentRedirect` to that origin plus `/exp711/spaces-callback`. The profile publishes the registered client document at `/exp711/client-metadata.json` with exactly that callback. Set the Worker's `OWNER_PDS_ORIGIN` to the PDS issuer. Use public TLS at the browser ingress and keep `/internal/agent-grant-recovery` and `/xrpc/vlpds.agent.dispatch` on the private service binding. Enable `ENROLLMENT_RELAY` after both connections are ready. The local smoke uses a disposable TLS reverse proxy and a pinned fixture CA instead of public ingress.
 
-Replace Moto and the mock PLC with dedicated preview storage and resolvable disposable identities. The current PDS profile still requires `--dev-mode` and an explicit loopback S3 endpoint. A hosted runtime needs a hardened preview profile with dedicated session, admin and internal credentials, and either an isolated conditional-write S3 sidecar or separately qualified TLS storage configuration. Use conditional-write storage, a separately injected wrapping key, and a scoped cleanup identity. The local runner proves retirement for grants on its own PDS. Hosted Worker grant cleanup still needs an authenticated issuer adapter. The browser smoke uses a synthetic reference client. Muse and Duet registration, callback URIs and reconnect behavior require separate acceptance.
+Start the isolated PDS without development mode. Keep the app listener and grant-recovery listener on separate loopback ports in the preview service. Provision distinct file-mounted session, admin, internal, PLC rotation, bridge, wrapping and S3 credentials. The normal PDS production secret checks run at startup. The profile requires the four CLI credential files and rejects a separate admin listener or admin proxy headers. It accepts a dedicated `exp711-*` bucket on a loopback S3-compatible sidecar with conditional-write support. The sidecar must use preview-only storage and never fall back to production storage.
+
+```sh
+vlpds --spaces --listen 127.0.0.1:2583 \
+  --public-url https://pds-mcp-preview.crate.social \
+  --service-did <preview-pds-did> --handle-domain <preview-handle-domain> \
+  --exp711-preview-profile /run/exp711/pds.json \
+  --jwt-secret-file /run/exp711/jwt-secret \
+  --admin-token-file /run/exp711/admin-token \
+  --internal-token-file /run/exp711/internal-token \
+  --plc-mode directory --plc-url <preview-https-plc-origin> \
+  --plc-rotation-key-file /run/exp711/plc-rotation-key
+```
+
+Terminate public TLS at the approved browser ingress for `pds-mcp-preview.crate.social`. Forward an explicit allowlist to `127.0.0.1:2583`. Include `/.well-known/oauth-authorization-server`, `/oauth/jwks`, `/oauth/par`, `/oauth/token`, `/oauth/revoke`, `/oauth/authorize` and its `sign-in`, `select`, and `consent` actions. Include the three registered `/exp711/` metadata and callback paths. The runtime uses `com.atproto.repo.describeRepo` and these `com.atproto.space` XRPCs through the same HTTPS authority: `getDelegationToken`, `authorizeSpaceSync`, `getRecord`, `listRecords`, and `createRecord`. Forward neither provisioning/signup nor admin, metrics, or recovery paths. The Worker's `OWNER_PDS` binding targets the preview app adapter, while `SPACES` targets the private recovery and signed-dispatch adapter on `127.0.0.1:2584`. Neither private adapter gets a public route. Preserve the configured HTTPS authority in transport and DPoP proofs. The isolated test uses a loopback TLS proxy with a pinned fixture CA, and the hosted profile omits `fixtureTls` and uses normal TLS trust. Hosted validation still needs the actual private binding, HTTPS PLC, and conditional-write store. Muse and Duet registration, callback URIs, and reconnect remain separate acceptance checks.
 
 The deployer needs write access to the target Cloudflare account's Workers scripts and Durable Object namespace configuration, plus permission to attach the custom domain in the `crate.social` zone. Private routing and the PDS store and key each require permissions in their backing services. These permissions have not been probed for this candidate.
 

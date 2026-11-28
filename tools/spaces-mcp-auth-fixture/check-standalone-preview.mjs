@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -82,17 +82,31 @@ try {
   const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const signer = local?.signer ?? { iss: "did:web:signer.invalid", aud: "did:web:pds.invalid",
     method: "vlpds.agent.dispatch", jwk: privateKey.export({ format: "jwk" }) };
-  await writeFile(join(directory, "tls.cnf"), "[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=127.0.0.1\n[ext]\nsubjectAltName=IP:127.0.0.1,DNS:preview-pds.test\n", { mode: 0o600 });
+  await writeFile(join(directory, "tls.cnf"), "[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=127.0.0.1\n[ext]\nsubjectAltName=IP:127.0.0.1,DNS:preview-pds.example.com\n", { mode: 0o600 });
   execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
     "-config", "tls.cnf", "-keyout", "issuer-key.pem", "-out", "issuer-cert.pem"], { cwd: directory, env, stdio: "ignore" });
   const pem = await readFile(join(directory, "issuer-cert.pem"), "utf8");
   setDefaultCACertificates([...getCACertificates("default"), pem]);
-  const pdsOrigin = local ? `https://preview-pds.test:${pdsTls.split(":")[1]}` : `http://${pds}`;
+  const pdsOrigin = local ? `https://preview-pds.example.com:${pdsTls.split(":")[1]}` : `http://${pds}`;
   const privatePds = `http://${pds}`;
   const fetchPds = (url, options) => fetch(url.replace(pdsOrigin, local ? `https://${pdsTls}` : pdsOrigin), options);
   if (local) {
     const key = await readFile(join(directory, "issuer-key.pem"));
+    const oauthRoutes = new Set([
+      "/.well-known/oauth-authorization-server", "/oauth/jwks", "/oauth/par", "/oauth/token", "/oauth/revoke",
+      "/oauth/authorize", "/oauth/authorize/sign-in", "/oauth/authorize/select", "/oauth/authorize/consent",
+      "/exp711/client-metadata.json",
+      "/exp711/sign-in-client.json", "/exp711/spaces-callback",
+      "/xrpc/com.atproto.repo.describeRepo", "/xrpc/com.atproto.space.getDelegationToken",
+      "/xrpc/com.atproto.space.authorizeSpaceSync", "/xrpc/com.atproto.space.getRecord",
+      "/xrpc/com.atproto.space.listRecords", "/xrpc/com.atproto.space.createRecord",
+    ]);
     pdsProxy = createHttpsServer({ cert: pem, key }, (request, response) => {
+      const { pathname } = new URL(request.url, pdsOrigin);
+      if (!oauthRoutes.has(pathname)) {
+        response.writeHead(404).end();
+        return;
+      }
       const upstream = httpRequest(privatePds + request.url, {
         method: request.method, agent: false, headers: { ...request.headers, "x-forwarded-proto": "https" },
       }, (result) => {
@@ -114,12 +128,22 @@ try {
     storage: { endpoint: storageOrigin, bucket, accessKeyFile, secretKeyFile },
   };
   await writeFile(profile, JSON.stringify(profileConfig), { mode: 0o600 });
-  const args = ["--dev-mode", "--spaces", "--listen", pds, "--public-url", pdsOrigin,
+  const args = [...(local ? [] : ["--dev-mode"]), "--spaces", "--listen", pds, "--public-url", pdsOrigin,
     "--exp711-preview-profile", profile, "--service-did", signer.aud, "--plc-mode", local ? "directory" : "unregistered", "--shards", "4", "--memory-budget-mb", "8192", "--handle-domain", "vlpds.test"];
   if (local) {
     const rotation = join(directory, "rotation-key");
     await writeFile(rotation, local.rotation, { mode: 0o600 });
     args.push("--plc-url", local.plc, "--plc-rotation-key-file", rotation);
+    for (const flag of ["jwt-secret", "admin-token", "internal-token"]) {
+      const path = join(directory, flag);
+      await writeFile(path, randomSecret(), { mode: 0o600 });
+      args.push(`--${flag}-file`, path);
+    }
+    const missingSecret = args.indexOf("--jwt-secret-file");
+    const rejected = spawnSync(pdsBinary, args.filter((_, index) => index !== missingSecret && index !== missingSecret + 1),
+      { env, encoding: "utf8", timeout: 5000 });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /requires an absolute preview-only --jwt-secret-file/);
     for (const authority of ["ident.link", "example.com", "mcpchat.example.com"]) {
       args.push("--lexicon-authority-override", `${authority}=${signer.iss}`);
     }
@@ -133,7 +157,7 @@ try {
 
   const first = await startPds();
   const password = randomSecret();
-  const signIn = (method) => fetchPds(pdsOrigin + "/xrpc/com.atproto.server." + method, {
+  const signIn = (method) => fetch(privatePds + "/xrpc/com.atproto.server." + method, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ handle: "preview.vlpds.test", identifier: "preview.vlpds.test", email: "preview@example.invalid", password }),
   });
@@ -153,7 +177,7 @@ try {
   let binding = { agent: "did:web:preview-agent.invalid", space: `at:space/${did}/com.example.mcpchat/preview` };
   if (local) {
     browser = await startBrowser({ chrome, directory, pem, env, processes });
-    const provision = await fetchPds(pdsOrigin + "/xrpc/vlpds.agent.provision", {
+    const provision = await fetch(privatePds + "/xrpc/vlpds.agent.provision", {
       method: "POST", headers: { Authorization: `Bearer ${accessJwt}`, "Content-Type": "application/json" },
       body: JSON.stringify({ operationId: "standalone", handle: "agent.vlpds.test",
         email: "agent@example.invalid", password: randomSecret() }),
@@ -168,7 +192,8 @@ try {
     const scope = "atproto repo:link.ident.endorsement?action=create " +
       `space:com.example.mcpchat?authority=${did}&skey=preview&manage=create&manage=update&collection=com.example.mcpchat.thread`;
     const setup = await authorizeSetup(browser, pdsOrigin, privatePds + "/exp711/spaces-callback",
-      "preview.vlpds.test", password, scope, fetchPds);
+      "preview.vlpds.test", password, scope,
+      (url, options) => url.includes("/xrpc/") ? fetch(url.replace(pdsOrigin, privatePds), options) : fetchPds(url, options));
     const endorsement = await setup("com.atproto.repo.createRecord", {
       repo: did, collection: "link.ident.endorsement", rkey: agent.did,
       record: { $type: "link.ident.endorsement", agent: agent.did }, validate: false,
@@ -244,11 +269,17 @@ try {
   });
   assert.equal(relay.status, 400);
   const dispatch = { method: "POST", body: "{}" };
-  assert.equal((await fetchPds(pdsOrigin + "/xrpc/vlpds.agent.dispatch", dispatch)).status, 501);
+  assert.equal((await fetchPds(pdsOrigin + "/xrpc/vlpds.agent.dispatch", dispatch)).status, local ? 404 : 501);
   assert.equal((await fetch(`http://${recovery}/xrpc/vlpds.agent.dispatch`, dispatch)).status, 401);
+  if (local) {
+    for (const path of ["/metrics", "/oauth/authorize/sign-up", "/xrpc/com.atproto.server.createAccount", "/xrpc/vlpds.agent.provision"]) {
+      assert.equal((await fetchPds(pdsOrigin + path)).status, 404);
+    }
+    console.log("Passed hardened startup with file-only secrets and limited TLS ingress");
+  }
   console.log("Passed standalone restart, HTTPS discovery, callback relay boundaries, and private dispatch isolation");
   if (local) {
-    const visible = await fetchPds(pdsOrigin + "/xrpc/vlpds.agent.listAgents", {
+    const visible = await fetch(privatePds + "/xrpc/vlpds.agent.listAgents", {
       headers: { Authorization: `Bearer ${credentials.accessJwt}` },
     });
     assert.equal(visible.status, 200);
@@ -273,7 +304,7 @@ try {
     });
     const alternatePassword = randomSecret();
     const alternateHandle = "alternate.vlpds.test";
-    const alternate = await fetchPds(pdsOrigin + "/xrpc/com.atproto.server.createAccount", {
+    const alternate = await fetch(privatePds + "/xrpc/com.atproto.server.createAccount", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ handle: alternateHandle, email: "alternate@example.invalid", password: alternatePassword }),
     });

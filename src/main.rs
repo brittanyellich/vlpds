@@ -29,7 +29,7 @@ struct Args {
     #[arg(long, env = "VLPDS_LISTEN", default_value = "0.0.0.0:2583")]
     listen: String,
     /// Boot an isolated EXP-711 PDS with a dedicated loopback S3 store and private recovery listener.
-    #[arg(long, requires_all = ["dev_mode", "spaces"], conflicts_with_all = ["memory", "kek", "kek_file", "peer_listen", "agent_a2a_config", "agent_contact_pilot"])]
+    #[arg(long, requires = "spaces", conflicts_with_all = ["memory", "kek", "kek_file", "peer_listen", "agent_a2a_config", "agent_contact_pilot"])]
     exp711_preview_profile: Option<std::path::PathBuf>,
     /// Accept queue length for --listen (and --metrics-listen). The kernel
     /// clamps it to net.core.somaxconn on Linux (kern.ipc.somaxconn on
@@ -1482,7 +1482,21 @@ async fn run(args: Args) -> anyhow::Result<()> {
     if args.wrap_plc_rotation_key {
         return wrap_plc_rotation_key(&args).await;
     }
-    vlpds::oauth::lexicon::apply_authority_overrides(&args.lexicon_authority_override, args.dev_mode)?;
+    let preview = args
+        .exp711_preview_profile
+        .as_ref()
+        .map(|path| exp711_preview::Profile::load(path, &args.listen))
+        .transpose()?;
+    if let Some(profile) = &preview {
+        if !args.dev_mode {
+            profile.check_hardened(&args)?;
+        }
+    }
+    let fixture_lexicons = preview.as_ref().is_some_and(|profile| profile.is_local_tls_fixture(&args.plc_url));
+    vlpds::oauth::lexicon::apply_authority_overrides(
+        &args.lexicon_authority_override,
+        args.dev_mode || fixture_lexicons,
+    )?;
     vlpds::partition::set_sst_compression(args.sst_compression.parse()?);
     vlpds::partition::set_compaction_polling(args.compaction_polling.parse()?);
     vlpds::partition::set_compaction_poll_interval(vlpds::retention::parse_duration(&args.compaction_poll)?);
@@ -1534,11 +1548,6 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .transpose()?;
     let agent_owner_consent =
         agent_a2a.as_ref().map(vlpds::agent_a2a::NativeA2a::owner_consent_transport).transpose()?.flatten();
-    let preview = args
-        .exp711_preview_profile
-        .as_ref()
-        .map(|path| exp711_preview::Profile::load(path, &args.listen))
-        .transpose()?;
     let preview_oauth_client =
         preview.as_ref().map(|profile| profile.https_client(&args.public_url)).transpose()?.flatten();
     let preview_recovery = preview

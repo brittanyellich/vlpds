@@ -12,7 +12,7 @@ export async function startBrowser({ chrome, directory, pem, env, processes }) {
   const process = spawn(chrome, [
     "--headless", "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
     "--disable-component-update", "--disable-sync", "--no-proxy-server",
-    "--host-resolver-rules=MAP preview-pds.test 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+    "--host-resolver-rules=MAP preview-pds.example.com 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
     "--remote-debugging-port=0", `--user-data-dir=${profile}`,
     `--ignore-certificate-errors-spki-list=${pin}`, "about:blank",
   ], { env, stdio: "ignore" });

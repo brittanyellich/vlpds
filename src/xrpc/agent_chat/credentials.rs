@@ -68,6 +68,10 @@ pub async fn open(
 /// Import only an existing, current OAuth grant approved by this owner for
 /// the exact configured Space and dedicated client. The caller supplies
 /// the binding and expected client from trusted preview configuration.
+fn configured_client(app: &App, client: &str) -> bool {
+    app.config.preview_oauth_client.as_ref().is_none_or(|preview| client == preview.id())
+}
+
 pub(crate) async fn enroll(
     app: &App,
     owner: &str,
@@ -83,7 +87,8 @@ pub(crate) async fn enroll(
     let signing_key = SigningKey::from_slice(key).map_err(|_| denied())?;
     let jkt = jose::jwk_thumbprint(&jose::key_to_jwk(signing_key.verifying_key())).map_err(|_| denied())?;
     let refresh_key = util::derive_secret(&app.config.jwt_secret, "refresh-token");
-    if grant.client_id != client
+    if !configured_client(app, client)
+        || grant.client_id != client
         || grant.dpop_jkt != jkt
         || parsed.generation != grant.refresh_gen
         || !parsed.authentic(&refresh_key, &grant)
@@ -96,13 +101,13 @@ pub(crate) async fn enroll(
     let rotation = Rotation::new(app, owner, binding)?;
     let next = Grant { issuer: app.config.public_url.clone(), client: grant.client_id, id: grant.id };
     if let Some(blocked) = rotation.blocked().await? {
-        return Ok(rotation.replace_blocked(blocked, next, sealed).await?.is_some());
+        return Ok(rotation.replace_after_consent(blocked, next, sealed).await?.is_some());
     }
     if let Some(ready) = rotation.ready_for_replacement().await? {
         if live_grant(app, owner, ready.grant(), &expected).await? {
             return Ok(false);
         }
-        return Ok(rotation.replace_blocked(ready, next, sealed).await?.is_some());
+        return Ok(rotation.replace_after_consent(ready, next, sealed).await?.is_some());
     }
     rotation.install(next, sealed).await
 }
@@ -115,7 +120,7 @@ pub(crate) async fn is_enrolled(app: &App, owner: &str, binding: &Binding) -> XR
 }
 
 async fn live_grant(app: &App, owner: &str, grant: &Grant, expected: &str) -> XResult<bool> {
-    if grant.issuer != app.public_url {
+    if grant.issuer != app.public_url || !configured_client(app, &grant.client) {
         return Ok(false);
     }
     let Some(session) = store::get_session(app, owner, &grant.id).await.map_err(|_| denied())? else {
@@ -146,7 +151,7 @@ pub async fn refresh(
     let claim = rotation.claim().await?.ok_or_else(denied)?;
     let (key, old_refresh) = open(app, owner, binding, &claim.envelope).await?;
     let signing_key = SigningKey::from_slice(key.as_slice()).map_err(|_| denied())?;
-    if claim.grant().issuer != app.public_url {
+    if claim.grant().issuer != app.public_url || !configured_client(app, &claim.grant().client) {
         return Err(denied());
     }
     let tokens = client.refresh(&signing_key, &claim.grant().client, &old_refresh).await.ok_or_else(denied)?;

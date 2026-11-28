@@ -129,8 +129,19 @@ impl<'a> Rotation<'a> {
     /// The caller verifies fresh owner consent and the replacement against the
     /// same binding. The compare-and-swap fences old refresh responses.
     pub async fn replace_blocked(&self, blocked: Blocked, grant: Grant, envelope: Vec<u8>) -> XResult<Option<String>> {
-        if grant.issuer != blocked.grant.issuer || grant.client != blocked.grant.client || grant.id == blocked.grant.id
-        {
+        if grant.client != blocked.grant.client {
+            return Ok(None);
+        }
+        self.replace_after_consent(blocked, grant, envelope).await
+    }
+
+    pub(super) async fn replace_after_consent(
+        &self,
+        blocked: Blocked,
+        grant: Grant,
+        envelope: Vec<u8>,
+    ) -> XResult<Option<String>> {
+        if grant.issuer != blocked.grant.issuer || grant.id == blocked.grant.id {
             return Ok(None);
         }
         let cleanup = self.retirement_row(&blocked.claim);

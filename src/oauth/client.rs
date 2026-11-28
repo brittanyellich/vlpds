@@ -619,6 +619,7 @@ impl PreviewClient {
             "client_name": "Isolated Spaces preview",
             "client_uri": self.origin,
             "redirect_uris": [self.redirect],
+            "scope": "atproto",
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "application_type": "web",

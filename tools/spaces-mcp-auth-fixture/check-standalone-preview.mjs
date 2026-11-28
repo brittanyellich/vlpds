@@ -229,6 +229,7 @@ try {
     assert.equal(metadata.status, 200);
     const registration = await metadata.json();
     assert.deepEqual(registration.redirect_uris, [profileConfig.enrollmentRedirect]);
+    assert.equal(registration.scope, "atproto");
     assert.ok(!JSON.stringify(registration).includes(did), "client metadata must not reveal the owner or Space");
     const wrongCallback = pdsOrigin + "/exp711/wrong-callback";
     assert.equal((await fetchPds(wrongCallback)).status, 404);

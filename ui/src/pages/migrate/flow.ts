@@ -46,8 +46,10 @@ export type Saved = {
   identityDone?: boolean
   activated?: boolean
   /** The Spaces step, between activating here and deactivating there:
-   * nothing to copy, copied (some may have failed), or declined. */
+   * nothing to copy, verified copied, or left at the old server. */
   spaces?: 'none' | 'done' | 'skipped'
+  spaceCheckComplete?: boolean
+  spaceListing?: { skipped: number; listingError?: string }
   spaceMoves?: SpaceMove[]
   oldDeactivated?: boolean
   /** Counted from the copied repo, kept once they match the import's record total. */

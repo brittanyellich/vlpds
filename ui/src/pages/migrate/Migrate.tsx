@@ -31,7 +31,8 @@ import {
   type StepId,
 } from './flow'
 import type { RecordCounts } from './count'
-import { copySpace, newScope, OLD_SCOPE, plan, reasonOf, servesSpaces, spaceLabel, type SpaceMove, type SpacePlan } from './spaces'
+import { copySpace, newScope, OLD_SCOPE, list, planSpace, reasonOf, servesSpaces, spaceLabel, type SpaceMove, type SpacePlan } from './spaces'
+import { canDeactivateOld, copyPendingSpaces, spaceKey } from './spaceListing.mjs'
 import { saveRecovery } from './spaceRecovery'
 import { beginSignIn, clientInfo, finishSignIn, forgetAll, isCallback, OAuthSession, sweepKeys } from '../../lib/oauth'
 
@@ -1716,7 +1717,7 @@ function FinishStep({
           }
           // space repos import only once the account is live here, and are
           // read there before that account goes offline
-          if (!savedRef.current.spaces) return
+          if (!canDeactivateOld(savedRef.current)) return
           if (!savedRef.current.oldDeactivated) {
             await oldPds.call('com.atproto.server.deactivateAccount', { body: {} })
             update({ oldDeactivated: true, finishedAt: Date.now() })
@@ -1732,16 +1733,17 @@ function FinishStep({
   )
   useEffect(() => {
     run()
-  }, [run, saved.spaces])
+  }, [run, saved.spaces, saved.spaceCheckComplete])
 
-  const spacesLine = saved.spaces === 'none' ? null : (
+  const canDeactivate = canDeactivateOld(saved)
+  const spacesLine = (
     <Checkline
-      state={saved.spaces === 'done' ? (saved.spaceMoves?.some((m) => m.state === 'failed') ? 'warn' : 'ok') : saved.spaces === 'skipped' ? 'warn' : 'wait'}
+      state={canDeactivate ? 'ok' : saved.spaces ? 'warn' : 'wait'}
       title="Copy your Spaces"
     >
       {saved.spaces === 'skipped'
-        ? `Not copied: they stay at ${hostOf(saved.oldPds)}.`
-        : saved.spaces === 'done'
+        ? `${saved.spaceMoves?.filter((m) => m.state === 'moved').length ?? 0} Spaces copied. Remaining data stays at ${hostOf(saved.oldPds)}.`
+        : canDeactivate
           ? spacesSummary(saved.spaceMoves ?? [])
           : saved.activated
             ? 'Private data you wrote in Spaces, copied from your old server.'
@@ -1750,17 +1752,32 @@ function FinishStep({
   )
 
   return (
-    <Card title="Switching over" sub={<>Turning your account on here, then off at {hostOf(saved.oldPds)}.</>}>
+    <Card title="Switching over" sub={<>Activating your account here and checking your Spaces before switching off the old account.</>}>
       <ul className="mig-checks">
         <Checkline state={saved.activated ? 'ok' : error ? 'bad' : 'wait'} title={`Activate your account on ${here}`}>
           {saved.activated ? 'Live: the network now reads your posts from here.' : undefined}
         </Checkline>
         {spacesLine}
-        <Checkline state={saved.oldDeactivated ? 'ok' : error && saved.activated && saved.spaces ? 'bad' : 'wait'} title={`Deactivate your old account on ${hostOf(saved.oldPds)}`}>
-          Deactivated, not deleted: it stays there, offline, as a fallback.
+        <Checkline state={saved.oldDeactivated ? 'ok' : error && saved.activated && canDeactivate ? 'bad' : 'wait'} title={`Deactivate your old account on ${hostOf(saved.oldPds)}`}>
+          {saved.oldDeactivated ? 'Kept offline as a fallback.' : 'The old account stays active until the Spaces check is complete.'}
         </Checkline>
       </ul>
       {saved.activated && !saved.spaces && <SpacesBox saved={saved} update={update} oauthError={oauthError} />}
+      {saved.activated && saved.spaces && !canDeactivate && !saved.oldDeactivated && (
+        <>
+          <SpaceListingNotice listing={saved.spaceListing} />
+          <div className="row between">
+            {saved.spaces === 'skipped' && (
+              <button type="button" className="btn quiet" onClick={() => update({ finishedAt: Date.now() })}>
+                Finish with the old account active
+              </button>
+            )}
+            <button type="button" className="btn primary" onClick={() => update({ spaces: undefined, spaceCheckComplete: false })}>
+              Check Spaces again
+            </button>
+          </div>
+        </>
+      )}
       {!!error && !running && (
         <>
           <Problem error={error} />
@@ -1770,8 +1787,8 @@ function FinishStep({
             </Notice>
           )}
           <div className="row end">
-            {saved.activated && saved.spaces && (
-              <button type="button" className="btn quiet" onClick={() => update({ oldDeactivated: true, finishedAt: Date.now() })}>
+            {saved.activated && canDeactivate && (
+              <button type="button" className="btn quiet" onClick={() => update({ finishedAt: Date.now() })}>
                 Skip, I'll do it later
               </button>
             )}
@@ -1785,11 +1802,19 @@ function FinishStep({
   )
 }
 
+function SpaceListingNotice({ listing }: { listing?: Saved['spaceListing'] }) {
+  if (!listing?.skipped && !listing?.listingError) return null
+  return (
+    <Notice kind="warn">
+      {listing.skipped > 0 && `Skipped ${listing.skipped} listing entries without usable Space URIs. `}
+      {listing.listingError && `The old server’s Spaces listing is incomplete. ${listing.listingError}`}
+    </Notice>
+  )
+}
+
 function spacesSummary(moves: SpaceMove[]): string {
   const moved = moves.filter((m) => m.state === 'moved').length
-  const failed = moves.filter((m) => m.state === 'failed').length
-  if (!moved && !failed) return 'Nothing to copy.'
-  return failed ? `${moved} of ${moved + failed} copied; ${failed} stayed behind.` : `All ${moved} copied.`
+  return moved ? `${moved} Spaces copied.` : 'No Space data to copy.'
 }
 
 // ---------------------------------------------------------------- spaces
@@ -1799,7 +1824,7 @@ type SpacesPhase =
   | { at: 'sign-in-old' }
   | { at: 'plan' }
   | { at: 'sign-in-new'; plans: SpacePlan[] }
-  | { at: 'copy'; plans: SpacePlan[] }
+  | { at: 'copy' }
   | { at: 'result' }
 
 /** Lists the space repos at the old server and imports each here, with an
@@ -1810,6 +1835,7 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
   const [phase, setPhase] = useState<SpacesPhase>({ at: 'probe' })
   const [error, setError] = useState<unknown>(oauthError)
   const [busy, setBusy] = useState(false)
+  const [listing, setListing] = useState(saved.spaceListing ?? { skipped: 0 })
   const [moves, setMoves] = useState<SpaceMove[]>(saved.spaceMoves ?? [])
   const [current, setCurrent] = useState<{ uri: string; blobs: number; total: number } | null>(null)
   const [pausedUntil, setPausedUntil] = useState(0)
@@ -1826,9 +1852,8 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
     () =>
       once(`spaces:${saved.did}`, async () => {
         try {
-          const [hereOn, thereOn] = await Promise.all([servesSpaces(''), servesSpaces(saved.oldPds)])
-          if (!hereOn || !thereOn) {
-            update({ spaces: 'none' })
+          if (!(await servesSpaces(saved.oldPds)) && !savedRef.current.spaceMoves?.length) {
+            update({ spaces: 'none', spaceCheckComplete: true, spaceListing: undefined })
             return
           }
           const { old, here: mine } = await sessions()
@@ -1838,10 +1863,34 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
             return setPhase({ at: 'sign-in-old' })
           }
           setPhase({ at: 'plan' })
-          const plans = await plan(old, setPausedUntil)
+          const listing = await list(old, setPausedUntil)
+          const diagnostics = { skipped: listing.skipped, listingError: listing.listingError }
+          setListing(diagnostics)
+          update({ spaceListing: diagnostics })
+          const previous = savedRef.current.spaceMoves ?? []
+          const completed = new Set(previous.filter((m) => m.state !== 'failed').map((m) => spaceKey(m.uri)))
+          const pending = listing.uris.filter((uri) => !completed.has(spaceKey(uri)))
+          const plans: SpacePlan[] = []
+          const bySpace = new Map(previous.map((m) => [spaceKey(m.uri), m]))
+          const persistMoves = (next: SpaceMove[]) => {
+            setMoves(next)
+            update({ spaceMoves: next })
+          }
+          for (const uri of pending) {
+            try {
+              plans.push(await planSpace(old, uri, setPausedUntil, listing.withRepo.has(uri)))
+            } catch (e) {
+              bySpace.set(spaceKey(uri), { uri, state: 'failed', reason: reasonOf(e) })
+              persistMoves([...bySpace.values()])
+            }
+          }
           if (!plans.length) {
-            await forgetAll(['old', 'new'])
-            update({ spaces: 'none', spaceMoves: [] })
+            if (!previous.length && !listing.uris.length && !listing.skipped && !listing.listingError) {
+              await forgetAll(['old', 'new'])
+              update({ spaces: 'none', spaceCheckComplete: true, spaceListing: undefined })
+              return
+            }
+            setPhase({ at: 'result' })
             return
           }
           const scope = newScope(plans)
@@ -1849,26 +1898,16 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
             if (mine) setError(narrowed)
             return setPhase({ at: 'sign-in-new', plans })
           }
-          setPhase({ at: 'copy', plans })
-          let done = (savedRef.current.spaceMoves ?? []).filter((m) => m.state !== 'failed')
-          for (const p of plans) {
-            if (done.some((m) => m.uri === p.uri)) continue
+          setPhase({ at: 'copy' })
+          await copyPendingSpaces(plans, [...bySpace.values()], async (p) => {
             setCurrent({ uri: p.uri, blobs: 0, total: p.blobs.length })
-            let m: SpaceMove
-            try {
-              m = await copySpace(old, mine, p, setPausedUntil, (n) => setCurrent({ uri: p.uri, blobs: n, total: p.blobs.length }))
-            } catch (e) {
-              m = { uri: p.uri, state: 'failed', reason: reasonOf(e) }
-            }
-            done = [...done.filter((x) => x.uri !== p.uri), m]
-            setMoves(done)
-            update({ spaceMoves: done })
-          }
+            return copySpace(old, mine, p, setPausedUntil, (n) => setCurrent({ uri: p.uri, blobs: n, total: p.blobs.length }))
+          }, persistMoves, reasonOf)
           setCurrent(null)
           setPhase({ at: 'result' })
         } catch (e) {
           setError(e)
-          setPhase((ph) => (ph.at === 'plan' || ph.at === 'copy' ? { at: 'result' } : ph))
+          setPhase({ at: 'result' })
         }
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1888,26 +1927,27 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
       setBusy(false)
     }
   }
-  const finish = async (state: 'done' | 'skipped') => {
+  const failed = moves.filter((m) => m.state === 'failed')
+  const moved = moves.filter((m) => m.state === 'moved')
+  const partial = !!(error || listing.listingError || listing.skipped || failed.length)
+  const summary = partial
+    ? `${moved.length} Spaces verified copied.`
+    : moved.length && moved.length === moves.length ? `All ${moved.length} Spaces copied.` : spacesSummary(moves)
+  const finish = async () => {
+    if (partial) return
     setBusy(true)
     await forgetAll(['old', 'new'])
-    update({ spaces: state, spaceMoves: state === 'done' ? moves : saved.spaceMoves })
+    update({ spaces: moves.length ? 'done' : 'none', spaceCheckComplete: true })
   }
   const retryFailed = () => {
-    const kept = moves.filter((m) => m.state !== 'failed')
-    setMoves(kept)
-    update({ spaceMoves: kept })
     setError(undefined)
     step()
   }
-
   const skip = (
-    <button type="button" className="btn quiet" name="skip-spaces" disabled={busy} onClick={() => finish('skipped')}>
-      Skip: leave them at {oldHost}
+    <button type="button" className="btn quiet" name="skip-spaces" disabled={busy} onClick={() => update({ spaces: 'skipped', spaceCheckComplete: false })}>
+      Leave remaining Spaces at {oldHost}
     </button>
   )
-  const failed = moves.filter((m) => m.state === 'failed')
-  const moved = moves.filter((m) => m.state === 'moved')
   const paused = pausedUntil > Date.now()
 
   return (
@@ -1961,7 +2001,6 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
                 <Spinner /> Copying {spaceName(current.uri, adv)}
                 {current.total > 0 && ` (${current.blobs} of ${current.total} ${adv ? 'blobs' : 'files'})`}…{paused && ' Paused: the server asked us to slow down.'}
               </p>
-              <Bar value={moves.length} total={phase.plans.length} label="Spaces copied" />
             </>
           )}
           {moves.length > 0 && (
@@ -1983,31 +2022,20 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
           )}
           {phase.at === 'result' && (
             <>
-              {error ? (
-                <Notice kind="warn">The Spaces listing failed. Nothing has been confirmed copied; retry after checking the old server's response.</Notice>
-              ) : failed.length > 0 ? (
-                <Notice kind="warn">
-                  {failed.length === 1 ? '1 space' : `${failed.length} spaces`} didn't copy. Retry, or go on without {failed.length === 1 ? 'it' : 'them'}: {failed.length === 1 ? 'it stays' : 'they stay'} at {oldHost}, which goes offline next.
-                </Notice>
-              ) : (
-                <Notice kind="ok">
-                  {moved.length ? `All ${moved.length === 1 ? 'of your Spaces' : `${moved.length} Spaces`} copied.` : 'Nothing to copy.'}
-                </Notice>
-              )}
+              <Notice kind={partial ? 'warn' : 'ok'}>
+                {summary}
+                {failed.length > 0 && ` ${failed.length} Spaces could not be copied.`}
+                {partial && ` The old account stays active at ${oldHost}.`}
+              </Notice>
+              <SpaceListingNotice listing={listing} />
               <div className="row between">
-                {failed.length > 0 ? (
-                  <button type="button" className="btn quiet" name="spaces-continue" disabled={busy} onClick={() => finish('done')}>
-                    Continue without them
-                  </button>
-                ) : (
-                  <span />
-                )}
-                {failed.length > 0 || error ? (
+                {partial && skip}
+                {partial ? (
                   <button type="button" className="btn primary" name="spaces-retry" disabled={busy} onClick={retryFailed}>
                     Retry
                   </button>
                 ) : (
-                  <button type="button" className="btn primary" name="spaces-continue" disabled={busy} onClick={() => finish('done')}>
+                  <button type="button" className="btn primary" name="spaces-continue" disabled={busy} onClick={finish}>
                     Continue
                   </button>
                 )}
@@ -2092,6 +2120,7 @@ function DoneStep({ saved, newPds, onReset }: { saved: Saved; newPds: Pds; onRes
           </div>
         </div>
       )}
+      <SpaceListingNotice listing={saved.spaceListing} />
       <ol className="mig-next">
         <li>
           <strong>Sign out of the Bluesky app, then sign back in.</strong>
@@ -2105,13 +2134,12 @@ function DoneStep({ saved, newPds, onReset }: { saved: Saved; newPds: Pds; onRes
         {!!saved.spaceMoves?.some((m) => m.state === 'failed') && (
           <li>
             <strong>Some of your Spaces stayed behind.</strong>
-            {saved.spaceMoves.filter((m) => m.state === 'failed').length} didn't copy. They are still in your old account at {hostOf(saved.oldPds)}, which
-            is now deactivated, not deleted.
+            {saved.spaceMoves.filter((m) => m.state === 'failed').length} didn't copy. Check the old account at {hostOf(saved.oldPds)}.
           </li>
         )}
         <li>
           <strong>Keep your old account for now.</strong>
-          It is deactivated at {hostOf(saved.oldPds)}, not deleted. Once you're happy here, you can delete it there.
+          {saved.oldDeactivated ? `It is deactivated at ${hostOf(saved.oldPds)}. Once you're happy here, you can delete it there.` : `It is still active at ${hostOf(saved.oldPds)}.`}
         </li>
         <li>
           <strong>Set up two-factor sign-in again.</strong>

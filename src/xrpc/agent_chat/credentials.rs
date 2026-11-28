@@ -93,24 +93,41 @@ pub(crate) async fn enroll(
         return Err(denied());
     }
     let sealed = seal(app, owner, binding, key, refresh).await?;
-    Rotation::new(app, owner, binding)?
-        .install(Grant { issuer: app.config.public_url.clone(), client: grant.client_id, id: grant.id }, sealed)
-        .await
+    let rotation = Rotation::new(app, owner, binding)?;
+    let next = Grant { issuer: app.config.public_url.clone(), client: grant.client_id, id: grant.id };
+    if let Some(blocked) = rotation.blocked().await? {
+        return Ok(rotation.replace_blocked(blocked, next, sealed).await?.is_some());
+    }
+    if let Some(ready) = rotation.ready_for_replacement().await? {
+        if live_grant(app, owner, ready.grant(), &expected).await? {
+            return Ok(false);
+        }
+        return Ok(rotation.replace_blocked(ready, next, sealed).await?.is_some());
+    }
+    rotation.install(next, sealed).await
 }
 
 pub(crate) async fn is_enrolled(app: &App, owner: &str, binding: &Binding) -> XResult<bool> {
     verify_binding(app, owner, binding).await?;
     let Some(grant) = Rotation::new(app, owner, binding)?.ready_grant().await? else { return Ok(false) };
+    let expected = requested_scope(binding).ok_or_else(denied)?;
+    live_grant(app, owner, &grant, &expected).await
+}
+
+async fn live_grant(app: &App, owner: &str, grant: &Grant, expected: &str) -> XResult<bool> {
     if grant.issuer != app.public_url {
         return Ok(false);
     }
-    let expected = requested_scope(binding).ok_or_else(denied)?;
-    let session = store::get_session(app, owner, &grant.id).await.map_err(|_| denied())?;
-    Ok(session.is_some_and(|session| {
-        session.client_id == grant.client
-            && scope_matches(&session.scope, &expected)
-            && scope_matches(&session.token_scope, &expected)
-    }))
+    let Some(session) = store::get_session(app, owner, &grant.id).await.map_err(|_| denied())? else {
+        return Ok(false);
+    };
+    let client = crate::oauth::client::get_client_for_app(app, &grant.client).await.map_err(|_| denied())?;
+    let now = util::now_secs();
+    Ok(session.client_id == grant.client
+        && now - session.created_at <= client.session_lifetime()
+        && now - session.updated_at <= client.refresh_lifetime()
+        && scope_matches(&session.scope, expected)
+        && scope_matches(&session.token_scope, expected))
 }
 
 /// Runtime session opener. An ambiguous issuer response leaves the claim

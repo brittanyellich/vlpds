@@ -38,6 +38,12 @@ pub struct Blocked {
     claim: String,
 }
 
+impl Blocked {
+    pub(super) fn grant(&self) -> &Grant {
+        &self.grant
+    }
+}
+
 pub struct Rotation<'a> {
     app: &'a App,
     owner: &'a str,
@@ -74,6 +80,14 @@ impl<'a> Rotation<'a> {
             State::Ready { grant, .. } => Ok(Some(grant)),
             State::Rotating { .. } => Ok(None),
         }
+    }
+
+    pub(super) async fn ready_for_replacement(&self) -> XResult<Option<Blocked>> {
+        let Some(marker) = self.app.get_private(self.owner, &self.row).await? else { return Ok(None) };
+        let State::Ready { grant, .. } = serde_json::from_slice(&marker).map_err(XrpcError::from_err)? else {
+            return Ok(None);
+        };
+        Ok(Some(Blocked { marker, grant, claim: crate::space::token::new_jti() }))
     }
 
     pub async fn install(&self, grant: Grant, envelope: Vec<u8>) -> XResult<bool> {

@@ -439,7 +439,7 @@ mod tests {
     /// member its query carried.
     #[tokio::test]
     async fn send_errors_leave_the_url_out() {
-        let space = "at://did:plc:secretauthority0000000000/space/com.example.group/skey";
+        let space = "at:space/did:plc:secretauthority0000000000/com.example.group/skey";
         let e = reqwest::Client::new()
             .get("http://127.0.0.1:1/xrpc/com.atproto.space.getLatestCommit")
             .query(&[("space", space), ("repo", "did:plc:secretmember")])

@@ -208,7 +208,7 @@ pub(crate) async fn reopen_owner_session(
     let caller =
         SpaceClient::for_account(server, &owner.did, &owner.handle, &owner.jwt, &scope.oauth_scope(THREAD, MESSAGE))
             .await;
-    let other = format!("at://{}/space/{SPACE_TYPE}/outofscope", owner.did);
+    let other = format!("at:space/{}/{SPACE_TYPE}/outofscope", owner.did);
     let denial = caller.delegation_token(&other).await;
     assert_eq!(denial.status, 403);
     http::Session::new(caller, &owner.did, &scope.binding().agent, &scope.binding().space, scope.conversation())

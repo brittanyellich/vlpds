@@ -21,7 +21,7 @@ fn request(owner: &Account, agent: &Account, digest: u8) -> Request {
         request_digest: [digest; 32],
         binding: Binding {
             agent: agent.did.clone(),
-            space: format!("at://{}/space/com.example.mcpchat/recovery", owner.did),
+            space: format!("at:space/{}/com.example.mcpchat/recovery", owner.did),
         },
     }
 }

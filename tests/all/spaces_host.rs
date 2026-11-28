@@ -213,7 +213,7 @@ async fn space_lifecycle_and_config() {
     let other = SpaceClient::new(&s, "shl2", MANAGER).await;
     let r = create(&owner, "main", ms(json!({}))).await;
     let space = r.ok()["space"].as_str().unwrap().to_string();
-    assert_eq!(space, format!("at://{}/space/{TYPE}/main", owner.did));
+    assert_eq!(space, format!("at:space/{}/{TYPE}/main", owner.did));
     create(&owner, "main", ms(json!({}))).await.err(400, "SpaceAlreadyExists");
     // an auto-generated skey is a TID
     let auto = owner
@@ -237,7 +237,17 @@ async fn space_lifecycle_and_config() {
     // an unknown policy is refused, not stored
     create(&owner, "x1", json!({"$type": "com.example.otherPolicy"})).await.err(400, "UnsupportedPolicy");
     create(&owner, "x2", managing("not-a-did")).await.err(400, "InvalidRequest");
-    get_space(&owner, &format!("at://{}/space/{TYPE}/x1", owner.did)).await.err(400, "SpaceNotFound");
+    get_space(&owner, &format!("at:space/{}/{TYPE}/x1", owner.did)).await.err(400, "SpaceNotFound");
+    // the form before the Nov 24 alpha is refused in params, as the reference refuses it
+    let old = format!("at://{}/space/{TYPE}/main", owner.did);
+    get_space(&owner, &old).await.err(400, "InvalidRequest");
+    owner
+        .post(
+            "com.atproto.space.createRecord",
+            json!({"space": old, "repo": owner.did, "collection": "com.example.post", "record": rec("x")}),
+        )
+        .await
+        .err(400, "InvalidRequest");
 
     // stored normalized: defaults filled in, unknown fields dropped
     let got = get_space(&owner, &space).await.ok();
@@ -263,7 +273,7 @@ async fn space_lifecycle_and_config() {
     );
     update(json!({"space": space})).await.err(400, "InvalidRequest");
     update(json!({"space": space, "policy": {"$type": "nope.nope.nope"}})).await.err(400, "UnsupportedPolicy");
-    update(json!({"space": format!("at://{}/space/{TYPE}/none", owner.did), "policy": ms(json!({}))}))
+    update(json!({"space": format!("at:space/{}/{TYPE}/none", owner.did), "policy": ms(json!({}))}))
         .await
         .err(400, "SpaceNotFound");
     let r = other.post("com.atproto.space.updateSpace", json!({"space": space, "policy": ms(json!({}))})).await;
@@ -273,7 +283,7 @@ async fn space_lifecycle_and_config() {
     let r = reader
         .post(
             "com.atproto.space.updateSpace",
-            json!({"space": format!("at://{}/space/{TYPE}/main", reader.did), "policy": ms(json!({}))}),
+            json!({"space": format!("at:space/{}/{TYPE}/main", reader.did), "policy": ms(json!({}))}),
         )
         .await;
     assert_eq!(r.status, 403, "{r:?}");
@@ -319,7 +329,7 @@ async fn member_list() {
         )
         .await;
     r.err(400, "InvalidRequest");
-    let none = format!("at://{}/space/{TYPE}/none", owner.did);
+    let none = format!("at:space/{}/{TYPE}/none", owner.did);
     put_member(&owner, &none, &member.did, true, true).await.err(400, "SpaceNotFound");
     members(&owner, &none, &[]).await.err(400, "SpaceNotFound");
 
@@ -377,10 +387,10 @@ async fn credential_gates() {
         create(&owner, "public", ms(json!({"publicRead": true}))).await.ok()["space"].as_str().unwrap().to_string();
     stranger.try_credential_at(&s.url, &public, None).await.ok();
     // a space this host doesn't govern, or that was never created
-    let elsewhere = format!("at://{}/space/{TYPE}/x", dead_did().await);
+    let elsewhere = format!("at:space/{}/{TYPE}/x", dead_did().await);
     let r = stranger.try_credential_at(&s.url, &elsewhere, None).await;
     r.err(400, "SpaceNotFound");
-    let uncreated = format!("at://{}/space/{TYPE}/never", owner.did);
+    let uncreated = format!("at:space/{}/{TYPE}/never", owner.did);
     stranger.try_credential_at(&s.url, &uncreated, None).await.err(400, "SpaceNotFound");
 }
 
@@ -564,7 +574,7 @@ async fn delete_space_tombstones_and_recreates_fresh() {
     // deleting again is fine
     owner.post("com.atproto.space.deleteSpace", json!({"space": space})).await.ok();
     owner
-        .post("com.atproto.space.deleteSpace", json!({"space": format!("at://{}/space/{TYPE}/never", owner.did)}))
+        .post("com.atproto.space.deleteSpace", json!({"space": format!("at:space/{}/{TYPE}/never", owner.did)}))
         .await
         .err(400, "SpaceNotFound");
 
@@ -590,7 +600,7 @@ async fn delete_space_tombstones_and_recreates_fresh() {
 async fn owner_writes_need_the_space() {
     let s = spawn().await;
     let owner = SpaceClient::new(&s, "shw1", OWNER).await;
-    let space = format!("at://{}/space/{TYPE}/early", owner.did);
+    let space = format!("at:space/{}/{TYPE}/early", owner.did);
     owner.create_record(&space, COLL, Some("1"), rec("early")).await.err(400, "SpaceNotFound");
     create(&owner, "early", ms(json!({}))).await.ok();
     owner.create_record(&space, COLL, Some("1"), rec("on time")).await.ok();
@@ -735,7 +745,7 @@ async fn notify_write_from_another_vlpds() {
     notify(&b, &a, &stranger.did, &aud, body(&stranger.did, &now)).await.err_status(403);
     notify(&b, &a, &reader.did, &aud, body(&reader.did, &now)).await.err_status(403);
     // a space B doesn't govern
-    let foreign = format!("at://{}/space/{TYPE}/x", member.did);
+    let foreign = format!("at:space/{}/{TYPE}/x", member.did);
     let r = notify(
         &b,
         &a,
@@ -877,7 +887,7 @@ async fn get_repo_star() {
     let r = owner
         .get(
             "com.atproto.space.getRepo",
-            &[("space", &format!("at://{}/space/{TYPE}/none", owner.did)), ("repo", &owner.did)],
+            &[("space", &format!("at:space/{}/{TYPE}/none", owner.did)), ("repo", &owner.did)],
         )
         .await;
     r.err(400, "RepoNotFound");
@@ -1052,4 +1062,49 @@ async fn spaces_and_registrations_are_capped_per_authority() {
     create(&owner, "d", ms(json!({}))).await.ok();
     owner.post("com.atproto.space.deleteSpace", json!({"space": spaces[0]})).await.ok();
     create(&owner, "e", ms(json!({}))).await.err(429, "RateLimitExceeded");
+}
+
+/// Pre-Nov24 persisted identity: build the old head bytes explicitly, rather
+/// than round-tripping them through the upgraded row encoder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nov24_legacy_storage_is_read_through_new_uri_without_changing_cid() {
+    use sha2::Digest;
+    let s = spawn().await;
+    let owner = SpaceClient::new(&s, "nov24legacy", OWNER).await;
+    let space = owner.create_space(TYPE, "legacy").await;
+    let old = format!("at://{}/space/{TYPE}/legacy", owner.did);
+    let new = format!("at:space/{}/{TYPE}/legacy", owner.did);
+    let value = json!({"$type": COLL, "text": "unchanged", "parent": old});
+    let written = owner.create_record(&space, COLL, Some("before"), value.clone()).await.ok();
+    let sid: [u8; 16] = sha2::Sha256::digest(old.as_bytes())[..16].try_into().unwrap();
+    let p = s.app.partition(&owner.did).ok().unwrap();
+    let key = vlpds::state::space_head_key(&owner.did, &sid);
+    let saved = p.db.get(key.clone()).await.unwrap().expect("legacy hash addresses the head");
+    // Freeze the old binary representation even when the current codec emits
+    // a new URI. All fields after the length-prefixed URI stay byte-identical.
+    let len = u16::from_be_bytes(saved[..2].try_into().unwrap()) as usize;
+    let mut legacy = Vec::new();
+    legacy.extend_from_slice(&(old.len() as u16).to_be_bytes());
+    legacy.extend_from_slice(old.as_bytes());
+    legacy.extend_from_slice(&saved[2 + len..]);
+    p.db.put(key, bytes::Bytes::from(legacy)).await.unwrap();
+    // Model the first read after reopening: do not let the write's cached
+    // head conceal an incompatible persisted-row decoder.
+    let heads = &s.app.spaces.as_ref().unwrap().heads;
+    heads.drop_space(&owner.did, &sid);
+    let loads = heads.loads.load(std::sync::atomic::Ordering::Relaxed);
+    let record_key = vlpds::state::space_record_key(&owner.did, &sid, &format!("{COLL}/before"));
+    let before = p.db.get(record_key.clone()).await.unwrap().unwrap();
+    let got = owner
+        .get(
+            "com.atproto.space.getRecord",
+            &[("space", &new), ("repo", &owner.did), ("collection", COLL), ("rkey", "before")],
+        )
+        .await
+        .ok();
+    assert!(heads.loads.load(std::sync::atomic::Ordering::Relaxed) > loads, "read the legacy head from storage");
+    assert_eq!(got["cid"], written["cid"]);
+    assert_eq!(got["value"], value);
+    assert_eq!(got["uri"], format!("{new}/{}/{COLL}/before", owner.did));
+    assert_eq!(p.db.get(record_key).await.unwrap().unwrap(), before);
 }

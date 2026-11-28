@@ -315,7 +315,7 @@ impl Bridge {
 
     pub(super) async fn approve(s: &TestServer, owner: &Account, agent: &Account, id: &str) -> Binding {
         let binding =
-            Binding { agent: agent.did.clone(), space: format!("at://{}/space/com.example.mcpchat/test", owner.did) };
+            Binding { agent: agent.did.clone(), space: format!("at:space/{}/com.example.mcpchat/test", owner.did) };
         let credentials = owner_credentials(s, owner).await;
         approve(&s.app, &credentials, grant(owner, id), binding.clone())
             .await

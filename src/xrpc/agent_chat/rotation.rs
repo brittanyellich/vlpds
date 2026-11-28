@@ -66,6 +66,16 @@ impl<'a> Rotation<'a> {
         Ok(Self { app, owner, row })
     }
 
+    pub(super) async fn ready_grant(&self) -> XResult<Option<Grant>> {
+        let Some(current) = self.app.get_private(self.owner, &self.row).await? else {
+            return Ok(None);
+        };
+        match serde_json::from_slice(&current).map_err(XrpcError::from_err)? {
+            State::Ready { grant, .. } => Ok(Some(grant)),
+            State::Rotating { .. } => Ok(None),
+        }
+    }
+
     pub async fn install(&self, grant: Grant, envelope: Vec<u8>) -> XResult<bool> {
         self.replace(None, State::Ready { grant, envelope }).await
     }

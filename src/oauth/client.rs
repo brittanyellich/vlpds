@@ -569,6 +569,7 @@ pub fn first_party_metadata(public_url: &str) -> J {
 }
 
 pub const PREVIEW_CLIENT_PATH: &str = "/exp711/client-metadata.json";
+pub const PREVIEW_LOGIN_CLIENT_PATH: &str = "/exp711/sign-in-client.json";
 pub const PREVIEW_CALLBACK: &str = "/exp711/spaces-callback";
 
 /// Explicit, server-owned OAuth registration for an isolated preview PDS.
@@ -609,6 +610,9 @@ impl PreviewClient {
     pub fn redirect(&self) -> &str {
         &self.redirect
     }
+    pub fn identity(&self) -> Self {
+        Self { id: format!("{}{PREVIEW_LOGIN_CLIENT_PATH}", self.origin), scopes: "atproto".into(), ..self.clone() }
+    }
     pub fn metadata(&self) -> J {
         json!({
             "client_id": self.id,
@@ -635,6 +639,10 @@ pub async fn get_client_for_app(app: &crate::xrpc::App, id: &str) -> Result<Arc<
     if let Some(preview) = &app.config.preview_oauth_client {
         if id == preview.id {
             return Ok(Arc::new(validate_metadata(id, preview.registration(), false, app.config.dev_mode)?));
+        }
+        let identity = preview.identity();
+        if id == identity.id {
+            return Ok(Arc::new(validate_metadata(id, identity.registration(), false, app.config.dev_mode)?));
         }
     }
     get_client(id, app.config.dev_mode, &app.public_url).await

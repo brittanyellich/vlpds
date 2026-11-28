@@ -12,6 +12,7 @@
       "OWNER_PDS": "<private preview owner sign-in service binding>",
       "OWNER_PDS_ORIGIN": "https://pds-mcp-preview.crate.social",
       "ENROLLMENT_RELAY": "false",
+      "ATPROTO_SIGN_IN": "false",
       "ISSUER_STORAGE": "<dedicated PreviewIssuerStorage Durable Object namespace>",
       "BINDINGS": "<JSON keyed by base64url UTF-8 owner DID, values with ownerDid>",
       "BRIDGE_TOKEN": "<separately provisioned service secret>",

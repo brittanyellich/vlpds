@@ -2,6 +2,7 @@
 
 pub mod credentials;
 pub mod enrollment;
+pub(crate) mod login;
 
 pub mod oauth_client;
 

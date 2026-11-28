@@ -189,7 +189,7 @@ try {
   const config = await packagePreview({
     directory, provider, listener: worker, backend: recovery, ownerPds: pds, ownerPdsOrigin: pdsOrigin,
     bindings: local ? JSON.stringify({ [Buffer.from(did).toString("base64url")]: { ownerDid: did } }) : "{}",
-    bridgeToken: serviceToken, fixtureTests: false, enrollmentRelay: true, signer,
+    bridgeToken: serviceToken, fixtureTests: false, enrollmentRelay: true, atprotoSignIn: Boolean(local), signer,
   });
   function startWorker() {
     const child = spawn(workerd, ["serve", config], { env, stdio: ["ignore", "ignore", "inherit"] });
@@ -266,54 +266,92 @@ try {
     await new Promise((resolve, reject) =>
       clientCallback.once("error", reject).listen(Number(clientListener.split(":")[1]), "127.0.0.1", resolve));
     const redirect = `https://${clientListener}/client-callback`;
-    const register = await fetch(oauth.registration_endpoint, {
+    const recoveryRequest = (operation, fields) => fetch(`http://${recovery}${grantPath}`, {
+      method: "POST", headers: { Authorization: `Bearer ${serviceToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ operation, ...fields }),
+    });
+    const alternatePassword = randomSecret();
+    const alternateHandle = "alternate.vlpds.test";
+    const alternate = await fetchPds(pdsOrigin + "/xrpc/com.atproto.server.createAccount", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ client_name: "Standalone fixture", redirect_uris: [redirect],
-        token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"],
-        response_types: ["code"] }),
+      body: JSON.stringify({ handle: alternateHandle, email: "alternate@example.invalid", password: alternatePassword }),
     });
-    assert.equal(register.status, 201);
-    const { client_id } = await register.json();
-    const verifier = randomBytes(32).toString("base64url");
-    const state = randomSecret();
+    assert.equal(alternate.status, 200);
+    const { did: alternateDid } = await alternate.json();
+    const mismatch = await recoveryRequest("login-start", { handle: "preview.vlpds.test" });
+    assert.equal(mismatch.status, 200);
+    const pendingLogin = await mismatch.json();
+    const otherSignIn = new URL(pendingLogin.authorizationUrl);
+    otherSignIn.searchParams.set("screen", "sign-in");
+    await browser.navigate(otherSignIn.href);
+    await browser.pdsConsent(pdsOrigin, alternateHandle, alternatePassword, alternateDid);
+    await browser.wait('document.title === "Return to Spaces preview"', "alternate account callback");
+    const alternateCode = await browser.evaluate('document.querySelector("input[name=code]").value');
+    for (const returnedIssuer of [issuer, pdsOrigin]) {
+      assert.equal((await recoveryRequest("login-finish", {
+        issuer: returnedIssuer, state: pendingLogin.state, context: pendingLogin.context, code: alternateCode,
+      })).status, 403);
+    }
+
     const resource = issuer + "/mcp";
-    const start = oauth.authorization_endpoint + "?" + new URLSearchParams({
-      client_id, response_type: "code", redirect_uri: redirect, scope: "mcp:chat offline_access", resource, state,
-      code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256",
-    });
-    await browser.navigate(start);
-    await browser.submit('form[action="/authorize"] button', { handle: "preview.vlpds.test", password });
-    await browser.wait(`document.body.textContent.includes(${JSON.stringify(binding.space)})`, "Worker binding review");
-    await browser.submit('form[action="/authorize"] button');
-    await browser.pdsConsent(pdsOrigin, "preview.vlpds.test", password);
-    await browser.wait('document.title === "Return to Spaces preview"', "PDS callback relay page");
-    // The callback must survive loss of the Worker isolate that initiated it.
-    await stop(workerProcess);
-    workerProcess = startWorker();
-    await ready(workerProcess, metadataPath);
-    const relayBody = await browser.evaluate('Object.fromEntries(new FormData(document.querySelector("form")))');
-    await browser.submit('form[action$="/spaces-callback"] button');
-    await browser.wait(`location.pathname === "/spaces-callback" && document.body.textContent.includes(${JSON.stringify(binding.space)})`,
-      "successful scoped enrollment");
-    const replay = await fetch(issuer + "/spaces-callback", {
-      method: "POST", headers: { Origin: pdsOrigin }, body: new URLSearchParams(relayBody),
-    });
-    assert.equal(replay.status, 400);
-    await browser.submit('form[action="/authorize"] button');
-    const callback = new URL(await browser.wait(
-      `location.href.startsWith(${JSON.stringify(redirect + "?")}) && location.href`, "MCP client callback",
-    ));
-    assert.equal(callbackRequests, 1);
-    assert.equal(callback.searchParams.get("state"), state);
-    assert.equal(callback.searchParams.get("iss"), issuer);
-    browser.close();
-    const exchange = await fetch(oauth.token_endpoint, {
-      method: "POST", body: new URLSearchParams({ client_id, grant_type: "authorization_code", code: callback.searchParams.get("code"),
-        redirect_uri: redirect, code_verifier: verifier, resource }),
-    });
-    if (!exchange.ok) assert.fail("MCP token exchange failed: " + await exchange.text());
-    const token = await exchange.json();
-    assert.equal(token.resource, resource);
+    async function authorizeClient(name, enroll) {
+      const register = await fetch(oauth.registration_endpoint, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_name: name, redirect_uris: [redirect],
+          token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"],
+          response_types: ["code"] }),
+      });
+      assert.equal(register.status, 201);
+      const { client_id } = await register.json();
+      const verifier = randomBytes(32).toString("base64url");
+      const state = randomSecret();
+      const start = oauth.authorization_endpoint + "?" + new URLSearchParams({
+        client_id, response_type: "code", redirect_uri: redirect, scope: "mcp:chat offline_access", resource, state,
+        code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256",
+      });
+      const before = callbackRequests;
+      await browser.navigate(start);
+      await browser.wait(`Boolean(document.querySelector('form[action="/authorize"] input[name="handle"]'))`,
+        "Worker owner handle form");
+      assert.equal(await browser.evaluate('Boolean(document.querySelector("input[name=password]"))'), false);
+      await browser.submit('form[action="/authorize"] button', { handle: "preview.vlpds.test" });
+      await browser.pdsConsent(pdsOrigin, "preview.vlpds.test", password, did);
+      await browser.wait('document.title === "Return to Spaces preview"', "identity-only callback");
+      await browser.submit('form[action$="/spaces-callback"] button');
+      await browser.wait(`document.body.textContent.includes(${JSON.stringify(binding.space)})`, "Worker binding review");
+      await browser.submit('form[action="/authorize"] button');
+      if (enroll) {
+        await browser.pdsConsent(pdsOrigin, "preview.vlpds.test", password, did);
+        await browser.wait('document.title === "Return to Spaces preview"', "PDS callback relay page");
+        await stop(workerProcess);
+        workerProcess = startWorker();
+        await ready(workerProcess, metadataPath);
+        const relayBody = await browser.evaluate('Object.fromEntries(new FormData(document.querySelector("form")))');
+        await browser.submit('form[action$="/spaces-callback"] button');
+        await browser.wait(`location.pathname === "/spaces-callback" && document.body.textContent.includes(${JSON.stringify(binding.space)})`,
+          "successful scoped enrollment");
+        const replay = await fetch(issuer + "/spaces-callback", {
+          method: "POST", headers: { Origin: pdsOrigin }, body: new URLSearchParams(relayBody),
+        });
+        assert.equal(replay.status, 400);
+        await browser.submit('form[action="/authorize"] button');
+      }
+      const callback = new URL(await browser.wait(
+        `location.href.startsWith(${JSON.stringify(redirect + "?")}) && location.href`, "MCP client callback",
+      ));
+      assert.equal(callbackRequests, before + 1);
+      assert.equal(callback.searchParams.get("state"), state);
+      assert.equal(callback.searchParams.get("iss"), issuer);
+      const exchange = await fetch(oauth.token_endpoint, {
+        method: "POST", body: new URLSearchParams({ client_id, grant_type: "authorization_code", code: callback.searchParams.get("code"),
+          redirect_uri: redirect, code_verifier: verifier, resource }),
+      });
+      if (!exchange.ok) assert.fail("MCP token exchange failed: " + await exchange.text());
+      const token = await exchange.json();
+      assert.equal(token.resource, resource);
+      return { ...token, client_id };
+    }
+    let token = await authorizeClient("Standalone client A", true);
     async function rpc(method, params) {
       const reply = await fetch(resource, {
         method: "POST", headers: {
@@ -346,6 +384,25 @@ try {
     assert.deepEqual(await call("spaces_chat_history", { conversationId }), {
       conversationId, messages: [{ ...sent, text: args.text }],
     });
+    const firstToken = token;
+    token = await authorizeClient("Standalone client B", false);
+    assert.notEqual(token.client_id, firstToken.client_id);
+    browser.close();
+    const revoke = await fetch(oauth.revocation_endpoint, { method: "POST", body: new URLSearchParams({
+      client_id: firstToken.client_id, token: firstToken.refresh_token, token_type_hint: "refresh_token",
+    }) });
+    assert.equal(revoke.status, 200);
+    const denied = await fetch(resource, { method: "POST", headers: {
+      Authorization: `Bearer ${firstToken.access_token}`, "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream", "MCP-Protocol-Version": "2025-06-18",
+    }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "spaces_chat_history", arguments: { conversationId } } }),
+    });
+    assert.equal(denied.status, 401);
+    assert.deepEqual(await call("spaces_chat_history", { conversationId }), {
+      conversationId, messages: [{ ...sent, text: args.text }],
+    });
+    console.log("Passed native preview sign-in, wrong issuer and DID rejection, and independent MCP grant revocation");
     console.log("Passed real Chrome consent, one-time scoped callback, signed standalone HTTPS send, PDS restart, retry and history");
   }
 } finally {

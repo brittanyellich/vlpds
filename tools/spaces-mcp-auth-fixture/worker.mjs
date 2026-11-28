@@ -123,12 +123,12 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (character) => entities[character]);
 }
 
-async function consentPage(store, authorizationUrl, auth, verified, enrollmentOrigin) {
+async function consentPage(store, authorizationUrl, auth, verified, enrollmentOrigin, nativeSignIn = false) {
   const id = crypto.randomUUID();
   if (!await store.put("consent", id, { authorizationUrl, verified })) return new Response(null, { status: 503 });
   // Browsers apply form-action to redirects too. The provider has already
   // validated the client callback against its registration.
-  const next = verified && new URL(enrollmentOrigin ?? auth.redirectUri);
+  const next = enrollmentOrigin ? new URL(enrollmentOrigin) : verified && new URL(auth.redirectUri);
   const formAction = next && ["https:", "http:"].includes(next.protocol) ? " " + next.origin : "";
   return new Response(`<!doctype html><meta charset="utf-8">
     <title>Approve disposable Spaces chat</title>
@@ -142,7 +142,7 @@ async function consentPage(store, authorizationUrl, auth, verified, enrollmentOr
     <form action="/authorize" method="post">
       <input type="hidden" name="consent" value="${id}">
       ${verified ? '<button>Approve access</button>' : `<label>Owner handle <input name="handle" autocomplete="username" required></label>
-      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      ${nativeSignIn ? "" : '<label>Password <input name="password" type="password" autocomplete="current-password" required></label>'}
       <button>Sign in</button>`}
     </form>`, { headers: {
       "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
@@ -182,7 +182,7 @@ function isHttpsOrigin(value) {
 }
 
 export default {
-  async fetch(request, { ORIGIN: origin, SPACES, SPACES_URL, BINDINGS, BRIDGE_TOKEN, SIGNER, ISSUER_STORAGE, OWNER_PDS, OWNER_PDS_ORIGIN, PREVIEW_MODE, FIXTURE_TESTS, ENROLLMENT_RELAY }, ctx) {
+  async fetch(request, { ORIGIN: origin, SPACES, SPACES_URL, BINDINGS, BRIDGE_TOKEN, SIGNER, ISSUER_STORAGE, OWNER_PDS, OWNER_PDS_ORIGIN, PREVIEW_MODE, FIXTURE_TESTS, ENROLLMENT_RELAY, ATPROTO_SIGN_IN }, ctx) {
     const url = new URL(request.url);
     const isolated = PREVIEW_MODE === "isolated";
     const fixture = FIXTURE_TESTS === "true" && url.hostname === "127.0.0.1";
@@ -192,6 +192,7 @@ export default {
     ))) return new Response(null, { status: 503 });
     const browserApproval = BRIDGE_TOKEN && url.pathname === "/authorize" && request.method === "POST";
     const enrollmentRelay = isolated && ENROLLMENT_RELAY === "true";
+    const nativeSignIn = enrollmentRelay && ATPROTO_SIGN_IN === "true";
     const callback = enrollmentRelay && url.pathname === "/spaces-callback";
     const expectedOrigin = callback ? OWNER_PDS_ORIGIN : browserApproval ? origin : null;
     if (url.origin !== origin || request.headers.get("Origin") !== expectedOrigin ||
@@ -215,9 +216,32 @@ export default {
     const recordGrant = (operation, ownerSession, evidence) => SPACES.fetch(new URL("/internal/agent-grant-recovery", SPACES_URL), {
       method: "POST",
       headers: { Authorization: `Bearer ${BRIDGE_TOKEN}`, "Content-Type": "application/json",
-        "X-Vlpds-Owner-Session": ownerSession },
+        ...(ownerSession && { "X-Vlpds-Owner-Session": ownerSession }) },
       body: JSON.stringify({ operation, ...evidence }),
     });
+    function authorizationTarget(url) {
+      const target = new URL(url);
+      if (target.origin !== OWNER_PDS_ORIGIN || target.pathname !== "/oauth/authorize") return null;
+      return target.href;
+    }
+    const authorizeRedirect = (target) => new Response(null, { status: 303, headers: {
+      Location: target, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+    } });
+    async function ownerReview(authorizationUrl, ownerSession) {
+      const identity = await recordGrant("owner", ownerSession);
+      if (!identity.ok) return new Response(null, { status: 401 });
+      const { did, binding } = await identity.json();
+      if (!binding?.agent || !binding?.space) return new Response(null, { status: 403 });
+      const auth = await api.parseAuthRequest(new Request(authorizationUrl));
+      let enrolled = false;
+      if (nativeSignIn) {
+        const status = await recordGrant("enrollment-status", ownerSession);
+        if (!status.ok) return new Response(null, { status: 403 });
+        enrolled = (await status.json()).enrolled === true;
+      }
+      return consentPage(store, authorizationUrl, auth, { did, binding, ownerSession, enrolled },
+        enrollmentRelay && !enrolled ? new URL(OWNER_PDS_ORIGIN).origin : undefined);
+    }
     if (callback) {
       if (request.method !== "POST") return new Response(null, { status: 405 });
       if (!request.headers.get("Content-Type")?.startsWith("application/x-www-form-urlencoded")) {
@@ -228,6 +252,17 @@ export default {
       const code = form.get("code");
       if (typeof state !== "string" || typeof code !== "string" || !code || code.length > 512 ||
           form.get("issuer") !== OWNER_PDS_ORIGIN) return new Response(null, { status: 400 });
+      if (nativeSignIn && state.startsWith("login-")) {
+        const pending = await store.take("login", state);
+        if (!pending) return new Response(null, { status: 400 });
+        const finished = await recordGrant("login-finish", null, {
+          state, code, issuer: OWNER_PDS_ORIGIN, context: pending.context,
+        });
+        if (!finished.ok) return new Response(null, { status: 403 });
+        const { session } = await finished.json();
+        if (typeof session !== "string" || !session) return new Response(null, { status: 403 });
+        return ownerReview(pending.authorizationUrl, `Preview ${session}`);
+      }
       const pending = await store.take("enrollment", state);
       if (!pending) return new Response(null, { status: 400 });
       const finished = await recordGrant("enrollment-finish", pending.verified.ownerSession, {
@@ -245,7 +280,7 @@ export default {
         if (request.method === "GET") {
           const auth = await api.parseAuthRequest(request);
           if (!fixture && !targetsMcp(auth)) return new Response(null, { status: 400 });
-          return consentPage(store, request.url, auth);
+          return consentPage(store, request.url, auth, undefined, nativeSignIn ? new URL(OWNER_PDS_ORIGIN).origin : undefined, nativeSignIn);
         }
         if (!browserApproval) return new Response(null, { status: 405 });
         if (!request.headers.get("Content-Type")?.startsWith("application/x-www-form-urlencoded")) {
@@ -263,15 +298,25 @@ export default {
             const started = await recordGrant("enrollment-start", ownerSession);
             if (!started.ok) return new Response(null, { status: 403 });
             const { state, authorizationUrl } = await started.json();
-            const target = new URL(authorizationUrl);
-            if (!validConsentId(state) || target.origin !== OWNER_PDS_ORIGIN ||
-                target.pathname !== "/oauth/authorize") return new Response(null, { status: 503 });
+            const target = authorizationTarget(authorizationUrl);
+            if (!validConsentId(state) || !target) return new Response(null, { status: 503 });
             if (!await store.put("enrollment", state, pending)) return new Response(null, { status: 503 });
-            return new Response(null, { status: 303, headers: {
-              Location: target.href, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
-            } });
+            return authorizeRedirect(target);
           }
         } else {
+          if (nativeSignIn) {
+            const handle = form.get("handle");
+            if (typeof handle !== "string" || !handle || handle.length > 253) return new Response(null, { status: 400 });
+            const started = await recordGrant("login-start", null, { handle });
+            if (!started.ok) return new Response(null, { status: 403 });
+            const { state, context, authorizationUrl } = await started.json();
+            const target = authorizationTarget(authorizationUrl);
+            if (!validConsentId(state) || !state.startsWith("login-") || typeof context !== "string" || !context || !target) return new Response(null, { status: 503 });
+            if (!await store.put("login", state, { authorizationUrl: pending.authorizationUrl, context })) {
+              return new Response(null, { status: 503 });
+            }
+            return authorizeRedirect(target);
+          }
           const login = await OWNER_PDS.fetch(new URL("/xrpc/com.atproto.server.createSession", OWNER_PDS_ORIGIN), {
             method: "POST",
             redirect: "manual",
@@ -282,13 +327,7 @@ export default {
           const { accessJwt } = await login.json();
           if (typeof accessJwt !== "string" || !accessJwt) return new Response(null, { status: 401 });
           ownerSession = `Bearer ${accessJwt}`;
-          const identity = await recordGrant("owner", ownerSession);
-          if (!identity.ok) return new Response(null, { status: 401 });
-          const { did, binding } = await identity.json();
-          if (!binding?.agent || !binding?.space) return new Response(null, { status: 403 });
-          const auth = await api.parseAuthRequest(authorizationRequest);
-          return consentPage(store, pending.authorizationUrl, auth, { did, binding, ownerSession },
-            enrollmentRelay ? new URL(OWNER_PDS_ORIGIN).origin : undefined);
+          return ownerReview(pending.authorizationUrl, ownerSession);
         }
       }
       let owner;

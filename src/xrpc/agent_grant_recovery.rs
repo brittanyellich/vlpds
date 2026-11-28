@@ -98,6 +98,10 @@ impl<'a> Recovery<'a> {
         Ok(Self { app, owner: active_owner(app, credentials).await? })
     }
 
+    fn for_preview_owner(app: &'a App, owner: String) -> Self {
+        Self { app, owner }
+    }
+
     pub fn owner(&self) -> &str {
         &self.owner
     }

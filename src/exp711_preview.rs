@@ -3,7 +3,7 @@
 use serde::Deserialize;
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 use vlpds::{
-    oauth::client::{PreviewClient, PREVIEW_CALLBACK, PREVIEW_CLIENT_PATH},
+    oauth::client::{PreviewClient, PREVIEW_CALLBACK, PREVIEW_CLIENT_PATH, PREVIEW_LOGIN_CLIENT_PATH},
     xrpc::{
         agent_chat::{credentials, oauth_client::LoopbackOAuth},
         agent_dispatch::Binding,
@@ -184,7 +184,10 @@ impl Profile {
         let mut router = axum::Router::new();
         if let Some(client) = client {
             let metadata = client.metadata();
-            router = router.route(PREVIEW_CLIENT_PATH, get(move || async move { axum::Json(metadata) }));
+            let identity = client.identity().metadata();
+            router = router
+                .route(PREVIEW_CLIENT_PATH, get(move || async move { axum::Json(metadata) }))
+                .route(PREVIEW_LOGIN_CLIENT_PATH, get(move || async move { axum::Json(identity) }));
         }
         anyhow::ensure!(
             self.enrollment_redirect.as_deref() == Some(format!("{pds_origin}{PREVIEW_CALLBACK}").as_str()),

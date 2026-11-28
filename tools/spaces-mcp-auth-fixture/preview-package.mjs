@@ -9,7 +9,7 @@ function requireLoopback(address, label) {
   }
 }
 
-export function previewConfig({ listener, backend, bindings, bridgeToken, signer, ownerPds, ownerPdsOrigin, fixtureTests = true, enrollmentRelay = false, storage = "./issuer-state" }) {
+export function previewConfig({ listener, backend, bindings, bridgeToken, signer, ownerPds, ownerPdsOrigin, fixtureTests = true, enrollmentRelay = false, atprotoSignIn = false, storage = "./issuer-state" }) {
   requireLoopback(listener, "Listener");
   requireLoopback(backend, "Spaces backend");
   if (listener === backend) throw new Error("Listener and Spaces backend must be distinct");
@@ -31,6 +31,7 @@ const config :Workerd.Config = (
     durableObjectNamespaces = [(className = "PreviewIssuerStorage", uniqueKey = "exp711-preview-issuer")],
     durableObjectStorage = (localDisk = "issuer-disk"),
     bindings = [(name = "PREVIEW_MODE", text = ${literal(signer ? "isolated" : "fixture")}),
+                (name = "ATPROTO_SIGN_IN", text = ${literal(String(atprotoSignIn))}),
                 (name = "ENROLLMENT_RELAY", text = ${literal(String(enrollmentRelay))}),
                 (name = "FIXTURE_TESTS", text = ${literal(String(fixtureTests))}),
                 (name = "ISSUER_STORAGE", durableObjectNamespace = "PreviewIssuerStorage"),

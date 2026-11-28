@@ -8,8 +8,6 @@ use crate::oauth::{jose, store, util};
 use crate::secrets::Purpose;
 use crate::xrpc::{
     agent_dispatch::{verify_binding, Binding},
-    agent_provisioning::active_owner,
-    authn::Credentials,
     App, XResult, XrpcError,
 };
 use p256::ecdsa::SigningKey;
@@ -70,19 +68,18 @@ pub async fn open(
 /// Import only an existing, current OAuth grant approved by this owner for
 /// the exact configured Space and dedicated client. The caller supplies
 /// the binding and expected client from trusted preview configuration.
-pub async fn enroll(
+pub(crate) async fn enroll(
     app: &App,
-    owner_session: &Credentials,
+    owner: &str,
     binding: &Binding,
     client: &str,
     key: &[u8],
     refresh: &str,
 ) -> XResult<bool> {
-    let owner = active_owner(app, owner_session).await?;
-    verify_binding(app, &owner, binding).await?;
+    verify_binding(app, owner, binding).await?;
     let expected = requested_scope(binding).ok_or_else(denied)?;
     let parsed = store::parse_refresh_token(refresh).filter(|token| token.did == owner).ok_or_else(denied)?;
-    let grant = store::get_session(app, &owner, &parsed.session_id).await.map_err(|_| denied())?.ok_or_else(denied)?;
+    let grant = store::get_session(app, owner, &parsed.session_id).await.map_err(|_| denied())?.ok_or_else(denied)?;
     let signing_key = SigningKey::from_slice(key).map_err(|_| denied())?;
     let jkt = jose::jwk_thumbprint(&jose::key_to_jwk(signing_key.verifying_key())).map_err(|_| denied())?;
     let refresh_key = util::derive_secret(&app.config.jwt_secret, "refresh-token");
@@ -95,10 +92,25 @@ pub async fn enroll(
     {
         return Err(denied());
     }
-    let sealed = seal(app, &owner, binding, key, refresh).await?;
-    Rotation::new(app, &owner, binding)?
+    let sealed = seal(app, owner, binding, key, refresh).await?;
+    Rotation::new(app, owner, binding)?
         .install(Grant { issuer: app.config.public_url.clone(), client: grant.client_id, id: grant.id }, sealed)
         .await
+}
+
+pub(crate) async fn is_enrolled(app: &App, owner: &str, binding: &Binding) -> XResult<bool> {
+    verify_binding(app, owner, binding).await?;
+    let Some(grant) = Rotation::new(app, owner, binding)?.ready_grant().await? else { return Ok(false) };
+    if grant.issuer != app.public_url {
+        return Ok(false);
+    }
+    let expected = requested_scope(binding).ok_or_else(denied)?;
+    let session = store::get_session(app, owner, &grant.id).await.map_err(|_| denied())?;
+    Ok(session.is_some_and(|session| {
+        session.client_id == grant.client
+            && scope_matches(&session.scope, &expected)
+            && scope_matches(&session.token_scope, &expected)
+    }))
 }
 
 /// Runtime session opener. An ambiguous issuer response leaves the claim

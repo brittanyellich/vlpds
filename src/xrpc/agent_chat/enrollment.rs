@@ -5,8 +5,6 @@ use crate::oauth::util::{b64u, b64u_decode, now_secs, random_id};
 use crate::secrets::Purpose;
 use crate::xrpc::{
     agent_dispatch::{verify_binding, Binding},
-    agent_provisioning::active_owner,
-    authn::Credentials,
     cas::{Cond, Op},
     App, XResult, XrpcError,
 };
@@ -80,22 +78,21 @@ pub fn check_redirect(redirect: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn start(
+pub(crate) async fn start(
     app: &App,
     oauth: &LoopbackOAuth,
-    session: &Credentials,
+    owner: &str,
     binding: &Binding,
     redirect: &str,
 ) -> XResult<Authorization> {
-    let owner = active_owner(app, session).await?;
-    verify_binding(app, &owner, binding).await?;
+    verify_binding(app, owner, binding).await?;
     if oauth.origin() != app.public_url {
         return Err(denied());
     }
     let row = state_row(binding)?;
-    let previous = app.get_private(&owner, &row).await?;
+    let previous = app.get_private(owner, &row).await?;
     if let Some(ref raw) = previous {
-        if decode(app, &owner, &row, raw).await?.expires > now_secs() {
+        if decode(app, owner, &row, raw).await?.expires > now_secs() {
             return Err(denied());
         }
     }
@@ -146,7 +143,7 @@ pub async fn start(
         .await
         .map_err(|_| denied())?;
     if !app
-        .private_cas(&owner, vec![Cond::eq(&row, previous)], vec![Op::put(&row, Some(Bytes::from(encrypted)))])
+        .private_cas(owner, vec![Cond::eq(&row, previous)], vec![Op::put(&row, Some(Bytes::from(encrypted)))])
         .await?
         .applied
     {
@@ -161,37 +158,36 @@ pub async fn start(
     Ok(Authorization { client_id: client, request_uri, authorization_url, state })
 }
 
-pub async fn finish(
+pub(crate) async fn finish(
     app: &App,
     oauth: &LoopbackOAuth,
-    session: &Credentials,
+    owner: &str,
     binding: &Binding,
     state: &str,
     issuer: &str,
     code: &str,
 ) -> XResult<bool> {
-    let owner = active_owner(app, session).await?;
     if issuer != app.public_url || oauth.origin() != issuer {
         return Err(denied());
     }
     let row = state_row(binding)?;
-    let raw = app.get_private(&owner, &row).await?.ok_or_else(denied)?;
-    let pending = decode(app, &owner, &row, &raw).await?;
+    let raw = app.get_private(owner, &row).await?.ok_or_else(denied)?;
+    let pending = decode(app, owner, &row, &raw).await?;
     if &pending.binding != binding || !crate::auth::ct_eq(pending.state.as_bytes(), state.as_bytes()) {
         return Err(denied());
     }
     // Consume first, including expired state. No second exchange is permitted.
-    if !app.private_cas(&owner, vec![Cond::eq(&row, Some(raw))], vec![Op::put(row.clone(), None)]).await?.applied
+    if !app.private_cas(owner, vec![Cond::eq(&row, Some(raw))], vec![Op::put(row.clone(), None)]).await?.applied
         || pending.expires <= now_secs()
     {
         return Err(denied());
     }
-    verify_binding(app, &owner, binding).await?;
+    verify_binding(app, owner, binding).await?;
     let key = Zeroizing::new(b64u_decode(&pending.private_key).ok_or_else(denied)?);
     let signing_key = SigningKey::from_slice(&key).map_err(|_| denied())?;
     let tokens = oauth
         .exchange(&signing_key, &pending.client, &pending.redirect, code, &pending.verifier)
         .await
         .ok_or_else(denied)?;
-    credentials::enroll(app, session, binding, &pending.client, &key, &tokens.refresh).await
+    credentials::enroll(app, owner, binding, &pending.client, &key, &tokens.refresh).await
 }

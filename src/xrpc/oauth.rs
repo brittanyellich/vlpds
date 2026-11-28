@@ -2313,6 +2313,30 @@ pub fn with_dpop_layer(r: axum::Router<Arc<App>>, app: &Arc<App>) -> axum::Route
     }))
 }
 
+pub(crate) async fn preview_identity(
+    app: &App,
+    access: &str,
+    client: &str,
+    key: &p256::ecdsa::SigningKey,
+) -> Option<(String, String)> {
+    let jwt = super::authn::verify_access_token(&keys(app).server, access).ok()?;
+    let did = jwt.claim_str("sub")?;
+    let sid = jwt.claim_str("sid")?;
+    let jkt = jose::jwk_thumbprint(&jose::key_to_jwk(key.verifying_key())).ok()?;
+    let session = store::get_session(app, did, sid).await.ok()??;
+    (jwt.claim_str("iss") == Some(app.public_url.as_str())
+        && jwt.claim_str("aud") == Some(app.jwt.service_did.as_str())
+        && jwt.claim_i64("exp").is_some_and(|exp| exp > now_secs())
+        && jwt.claim_str("scope") == Some("atproto")
+        && jwt.claim_str("client_id") == Some(client)
+        && jwt.payload["cnf"]["jkt"].as_str() == Some(jkt.as_str())
+        && session.client_id == client
+        && session.dpop_jkt == jkt
+        && session.scope == "atproto"
+        && jwt.claim_str("jti") == Some(session.token_id.as_str()))
+    .then(|| (did.to_owned(), sid.to_owned()))
+}
+
 /// The DID of a validly signed access token, nothing else checked.
 pub fn access_token_sub(app: &App, token: &str) -> Option<String> {
     let jwt = super::authn::verify_access_token(&keys(app).server, token).ok()?;

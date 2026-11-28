@@ -83,15 +83,22 @@ export async function startBrowser({ chrome, directory, pem, env, processes }) {
       return true;
     })()`);
   }
-  async function pdsConsent(pdsOrigin, handle, password) {
+  async function pdsConsent(pdsOrigin, handle, password, did) {
     const atPds = `location.origin === ${JSON.stringify(pdsOrigin)}`;
-    const arrived = await wait(`${atPds} && (
+    let arrived = await wait(`${atPds} && (
       document.querySelector('form[action="/oauth/authorize/select"]') ? "select" :
       document.querySelector('input[name="password"]') ? "sign-in" :
       document.querySelector('button[value="allow"]') ? "consent" : false)`, "PDS OAuth authorization");
     if (arrived === "select") {
-      // The same owner is already signed in after the setup grant.
-      await submit('form[action="/oauth/authorize/select"]:has(input[name="did"][value^="did:"]) button');
+      const accounts = 'form[action="/oauth/authorize/select"]';
+      const desired = did ? `${accounts}:has(input[name="did"][value="${did}"]) button`
+        : `${accounts}:has(input[name="did"][value^="did:"]) button`;
+      if (await evaluate(`Boolean(document.querySelector(${JSON.stringify(desired)}))`)) {
+        await submit(desired);
+      } else {
+        await submit(`${accounts}:has(input[name="did"][value=""]) button`);
+        arrived = "sign-in";
+      }
     }
     if (arrived === "sign-in") {
       await submit('form[action="/oauth/authorize/sign-in"] button[value="sign-in"]', { identifier: handle, password });

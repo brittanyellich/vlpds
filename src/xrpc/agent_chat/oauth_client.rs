@@ -84,7 +84,7 @@ impl LoopbackOAuth {
         Ok(Self { endpoint: url.join("/oauth/token")?, http: http.build()? })
     }
 
-    pub(super) fn origin(&self) -> String {
+    pub(crate) fn origin(&self) -> String {
         self.endpoint.origin().ascii_serialization()
     }
 

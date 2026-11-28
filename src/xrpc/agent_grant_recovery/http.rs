@@ -89,7 +89,17 @@ struct Evidence {
 #[serde(tag = "operation", rename_all = "kebab-case")]
 enum Operation {
     Owner,
+    LoginStart {
+        handle: String,
+    },
+    LoginFinish {
+        issuer: String,
+        state: String,
+        code: String,
+        context: String,
+    },
     EnrollmentStart,
+    EnrollmentStatus,
     EnrollmentFinish {
         state: String,
         issuer: String,
@@ -131,20 +141,46 @@ async fn request(
     {
         return denied();
     }
+    use crate::xrpc::agent_chat::login;
+    match &operation {
+        Operation::LoginStart { handle } => {
+            let Some(oauth) = &mount.enrollment_oauth else { return denied() };
+            let Some(owner) = login::owner_for_handle(&app, handle).await else { return denied() };
+            if (mount.binding)(&owner).is_none() {
+                return denied();
+            }
+            return match login::start(&app, oauth, &owner).await {
+                Some(started) => ([(header::CACHE_CONTROL, "no-store")], Json(started)).into_response(),
+                None => denied(),
+            };
+        }
+        Operation::LoginFinish { issuer, state, code, context } => {
+            let Some(oauth) = &mount.enrollment_oauth else { return denied() };
+            return match login::finish(&app, oauth, issuer, state, code, context).await {
+                Some(session) => {
+                    ([(header::CACHE_CONTROL, "no-store")], Json(json!({"session": session}))).into_response()
+                }
+                None => denied(),
+            };
+        }
+        _ => {}
+    }
     let Some(session) = single_header(&headers, OWNER_SESSION_HEADER) else {
         return denied();
     };
-    let (parts, _) =
-        axum::http::Request::builder().header(header::AUTHORIZATION, session).body(()).unwrap().into_parts();
-    let Ok(credentials) = authn::authenticate(&app, &parts).await else {
-        return denied();
-    };
-    let Ok(recovery) = Recovery::for_session(&app, &credentials).await else {
-        return denied();
+    let recovery = if session.as_bytes().starts_with(b"Preview ") {
+        let Some(owner) = login::verify(&app, session.to_str().unwrap_or("")).await else { return denied() };
+        Recovery::for_preview_owner(&app, owner)
+    } else {
+        let (parts, _) =
+            axum::http::Request::builder().header(header::AUTHORIZATION, session).body(()).unwrap().into_parts();
+        let Ok(credentials) = authn::authenticate(&app, &parts).await else { return denied() };
+        let Ok(recovery) = Recovery::for_session(&app, &credentials).await else { return denied() };
+        recovery
     };
     let mut response = match operation {
-        Operation::EnrollmentStart | Operation::EnrollmentFinish { .. } => {
-            enroll(&app, &mount, &credentials, recovery.owner(), operation).await
+        Operation::EnrollmentStatus | Operation::EnrollmentStart | Operation::EnrollmentFinish { .. } => {
+            enroll(&app, &mount, recovery.owner(), operation).await
         }
         _ => execute(&mount, &recovery, operation).await,
     };
@@ -152,7 +188,7 @@ async fn request(
     response
 }
 
-async fn enroll(app: &App, mount: &Mount, session: &authn::Credentials, owner: &str, operation: Operation) -> Response {
+async fn enroll(app: &App, mount: &Mount, owner: &str, operation: Operation) -> Response {
     use crate::xrpc::agent_chat::{enrollment, oauth_client::LoopbackOAuth};
     let denied = || StatusCode::FORBIDDEN.into_response();
     let (Some(redirect), Some(binding)) = (&mount.enrollment_redirect, (mount.binding)(owner)) else {
@@ -162,12 +198,18 @@ async fn enroll(app: &App, mount: &Mount, session: &authn::Credentials, owner: &
         return denied();
     };
     match operation {
-        Operation::EnrollmentStart => match enrollment::start(app, &oauth, session, &binding, redirect).await {
+        Operation::EnrollmentStatus => {
+            match crate::xrpc::agent_chat::credentials::is_enrolled(app, owner, &binding).await {
+                Ok(enrolled) => Json(json!({"enrolled": enrolled})).into_response(),
+                Err(_) => denied(),
+            }
+        }
+        Operation::EnrollmentStart => match enrollment::start(app, &oauth, owner, &binding, redirect).await {
             Ok(started) => Json(started).into_response(),
             Err(_) => denied(),
         },
         Operation::EnrollmentFinish { state, issuer, code } => {
-            match enrollment::finish(app, &oauth, session, &binding, &state, &issuer, &code).await {
+            match enrollment::finish(app, &oauth, owner, &binding, &state, &issuer, &code).await {
                 Ok(true) => StatusCode::NO_CONTENT.into_response(),
                 Ok(false) => StatusCode::CONFLICT.into_response(),
                 Err(_) => denied(),
@@ -180,6 +222,7 @@ async fn enroll(app: &App, mount: &Mount, session: &authn::Credentials, owner: &
 async fn execute(mount: &Mount, recovery: &Recovery<'_>, operation: Operation) -> Response {
     let denied = || StatusCode::FORBIDDEN.into_response();
     match operation {
+        Operation::LoginStart { .. } | Operation::LoginFinish { .. } | Operation::EnrollmentStatus => denied(),
         Operation::Owner => match (mount.binding)(recovery.owner()) {
             Some(binding) => Json(json!({"did": recovery.owner(), "binding": binding})).into_response(),
             None => denied(),

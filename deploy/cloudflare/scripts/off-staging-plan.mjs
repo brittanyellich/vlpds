@@ -35,8 +35,12 @@ export function prepareOffStageConfig(env,{onStage=()=>{}}={}){
  onStage('protected-json');const original=JSON.parse(env.DEPLOY_CONFIG);
  onStage('protected-variable-policy');
  if(original.keep_vars===true)throw fail();
- onStage('protected-agent-off');const agent=Object.entries(original.vars??{}).filter(([k])=>k.startsWith('AGENT_A2A_'));
- if(agent.length!==2||!agent.some(([k,v])=>k==='AGENT_A2A_ENABLED'&&v==='false')||!agent.some(([k,v])=>k==='AGENT_A2A_RUNTIME'&&v==='native-profile-v1'))throw fail();
+ onStage('protected-agent-off-keys');const agent=Object.entries(original.vars??{}).filter(([k])=>k.startsWith('AGENT_A2A_'));
+ if(agent.length!==2)throw fail();
+ onStage('protected-agent-off-enabled');
+ if(!agent.some(([k,v])=>k==='AGENT_A2A_ENABLED'&&v==='false'))throw fail();
+ onStage('protected-agent-off-runtime');
+ if(!agent.some(([k,v])=>k==='AGENT_A2A_RUNTIME'&&v==='native-profile-v1'))throw fail();
  onStage('protected-deployment-contract');return prepareDeployment({...env,OPERATION:'rollback',RUNTIME:'pds-runtime',ROLLBACK_IMAGE:offImage(env.CLOUDFLARE_ACCOUNT_ID,OFF_STAGE.candidate)});
 }
 export function rollbackDeployment(){

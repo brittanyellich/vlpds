@@ -30,6 +30,8 @@ export type SpaceMove = {
   records?: number
   blobs?: number
   reason?: string
+  filesVerified?: true
+  recheckReceipt?: true
 }
 
 /** Past these, a listing that keeps paging is broken (or hostile), not big:
@@ -38,7 +40,7 @@ const MAX_SPACES = 10_000
 const MAX_BLOBS = 100_000
 
 /** `governed`: the account is the space's authority, so the space itself moves too. */
-export type SpacePlan = { uri: string; blobs: string[]; governed: boolean; expectsRepo: boolean }
+export type SpacePlan = { uri: string; blobs: string[]; governed: boolean; expectsRepo: boolean; missingBlobList: boolean }
 
 /** Whether `base` serves Spaces at all: an unauthenticated listSpaces is
  * refused for want of auth there, and as an unknown method elsewhere. */
@@ -71,6 +73,7 @@ export function list(old: OAuthSession, onPause: (until: number) => void): Promi
 export async function planSpace(old: OAuthSession, uri: string, onPause: (until: number) => void, expectsRepo: boolean): Promise<SpacePlan> {
   const blobs = new Set<string>()
   const seen = new Set<string>()
+  let missingBlobList = false
   try {
     for (let cursor: string | undefined; ; ) {
       const page = await retry(() => old.call('com.atproto.space.listBlobs', { params: { space: uri, repo: old.did, limit: 1000, cursor } }), onPause)
@@ -83,8 +86,10 @@ export async function planSpace(old: OAuthSession, uri: string, onPause: (until:
     }
   } catch (e) {
     if (!repoNotFound(e) || blobs.size || seen.size) throw e
+    if (expectsRepo) throw new Error('The source listed a Space repo but its file list is unavailable.')
+    missingBlobList = true
   }
-  return { uri, blobs: [...blobs], expectsRepo, governed: spaceLabel(uri).authority === old.did }
+  return { uri, blobs: [...blobs], expectsRepo, missingBlobList, governed: spaceLabel(uri).authority === old.did }
 }
 
 /** Account recovery requires a complete listing before clearing its recovery hint. */
@@ -118,9 +123,9 @@ export function reasonOf(e: unknown): string {
 }
 
 /** For a space the account runs, its meta first (exportSpaceMeta there,
- * importSpaceMeta here); then the old server's getRepo, importRepo here, and
+ * importSpaceMeta here); then importRepo here, and
  * any blobs its records name. Both imports replace what's here, so a retry
- * is safe. */
+ * is safe. The source repo and file listing are checked before importing. */
 export async function copySpace(
   old: OAuthSession,
   here: OAuthSession,
@@ -128,25 +133,78 @@ export async function copySpace(
   onPause: (until: number) => void,
   onBlob: (done: number) => void,
 ): Promise<SpaceMove> {
+  const source = await checkSourceRepo(old, p, onPause)
+
   if (p.governed) {
     const meta = await retry(() => old.call<Response>('com.atproto.space.exportSpaceMeta', { params: { space: p.uri }, raw: true }).then((r) => r.blob()), onPause)
     await verifyArchive(meta, p.uri)
     await retry(() => here.call('com.atproto.space.importSpaceMeta', { body: meta, type: 'application/vnd.dasl.star' }), onPause)
   }
-  let star: Blob
+  if (!source) return emptyMove(p)
+  const records = starPairs(new Uint8Array(await source.archive.arrayBuffer()))
+  // The destination validates and commits the archive before acknowledging the import.
+  await retry(() => here.call('com.atproto.space.importRepo', { body: source.archive, type: 'application/vnd.dasl.star' }), onPause)
+  const blobs = await copySpaceBlobs(old, here, p, onPause, onBlob)
+  return { uri: p.uri, state: 'moved', records, blobs, filesVerified: true }
+}
+
+const emptyMove = (p: SpacePlan): SpaceMove => p.governed
+  ? { uri: p.uri, state: 'moved', records: 0, blobs: 0, filesVerified: true }
+  : { uri: p.uri, state: 'empty', filesVerified: true }
+
+async function readSpaceRepo(session: OAuthSession, uri: string, onPause: (until: number) => void) {
+  let archive: Blob
   try {
-    star = await retry(
-      () => old.call<Response>('com.atproto.space.getRepo', { params: { space: p.uri, repo: old.did }, raw: true }).then((r) => r.blob()),
+    archive = await retry(
+      () => session.call<Response>('com.atproto.space.getRepo', { params: { space: uri, repo: session.did }, raw: true }).then((r) => r.blob()),
       onPause,
     )
   } catch (e) {
-    if (repoNotFound(e) && !p.expectsRepo && !p.blobs.length) return p.governed ? { uri: p.uri, state: 'moved', records: 0, blobs: 0 } : { uri: p.uri, state: 'empty' }
+    if (repoNotFound(e)) return undefined
     throw e
   }
-  await verifyArchive(star, p.uri, old.did)
-  const records = starPairs(new Uint8Array(await star.arrayBuffer()))
-  // The destination validates and commits the archive before acknowledging the import.
-  await retry(() => here.call('com.atproto.space.importRepo', { body: star, type: 'application/vnd.dasl.star' }), onPause)
+  const meta = await verifyArchive(archive, uri, session.did)
+  if (!(meta.data instanceof Uint8Array) || !meta.data.length)
+    throw new Error('The Space repo archive has no record digest.')
+  return { archive, data: meta.data as Uint8Array }
+}
+
+async function checkSourceRepo(old: OAuthSession, p: SpacePlan, onPause: (until: number) => void) {
+  const source = await readSpaceRepo(old, p.uri, onPause)
+  if (!source && (p.expectsRepo || p.blobs.length))
+    throw new Error('The source Space repo is unavailable.')
+  if (source && p.missingBlobList)
+    throw new Error('The source Space repo exists but its file list is unavailable.')
+  return source
+}
+
+/** Validate an earlier receipt without replacing destination records or policies. */
+export async function recheckSpace(
+  old: OAuthSession,
+  here: OAuthSession,
+  p: SpacePlan,
+  onPause: (until: number) => void,
+  onBlob: (done: number) => void,
+): Promise<SpaceMove> {
+  const source = await checkSourceRepo(old, p, onPause)
+  const destination = await readSpaceRepo(here, spaceKey(p.uri)!, onPause)
+  if (!source && !destination) return emptyMove(p)
+  if (!source || !destination || source.data.length !== destination.data.length ||
+      !source.data.every((byte, i) => byte === destination.data[i]))
+    throw new Error('The source and destination Space repos differ. The destination was left as-is.')
+
+  // Upload is content-addressed and confirms each source CID without replacing the repo.
+  const blobs = await copySpaceBlobs(old, here, p, onPause, onBlob)
+  return { uri: p.uri, state: 'moved', records: starPairs(new Uint8Array(await source.archive.arrayBuffer())), blobs, filesVerified: true }
+}
+
+async function copySpaceBlobs(
+  old: OAuthSession,
+  here: OAuthSession,
+  p: SpacePlan,
+  onPause: (until: number) => void,
+  onBlob: (done: number) => void,
+) {
   let n = 0
   for (const cid of p.blobs) {
     await retry(async () => {
@@ -158,14 +216,14 @@ export async function copySpace(
     }, onPause)
     onBlob(++n)
   }
-  return { uri: p.uri, state: 'moved', records, blobs: n }
+  return n
 }
 
 /** Check the archive's identity before letting the destination replace data. */
 async function verifyArchive(blob: Blob, uri: string, did?: string) {
   const header = new Uint8Array(await blob.slice(0, 12).arrayBuffer())
   if (header[0] !== 0x2a || header[1] !== 0x6c || header[2] !== 1 || header[3] !== 0)
-    throw new Error('The old server returned an invalid Space archive.')
+    throw new Error('The server returned an invalid Space archive.')
   let length = 0
   for (let i = 4; i < header.length; i++) {
     length += (header[i] & 0x7f) * 2 ** (7 * (i - 4))
@@ -174,9 +232,9 @@ async function verifyArchive(blob: Blob, uri: string, did?: string) {
     const meta = decode(new Uint8Array(await blob.slice(i + 1, i + 1 + length).arrayBuffer()))
     if (spaceKey(meta?.space) !== spaceKey(uri) || (did && meta?.repo !== did))
       throw new Error('The Space archive belongs to a different Space or account.')
-    return
+    return meta
   }
-  throw new Error('The old server returned invalid Space archive metadata.')
+  throw new Error('The server returned invalid Space archive metadata.')
 }
 
 /** The records in a getRepo archive (STAR: magic, metadata, then a 0x01

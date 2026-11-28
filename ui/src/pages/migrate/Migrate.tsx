@@ -31,8 +31,8 @@ import {
   type StepId,
 } from './flow'
 import type { RecordCounts } from './count'
-import { copySpace, newScope, OLD_SCOPE, list, planSpace, reasonOf, servesSpaces, spaceLabel, type SpaceMove, type SpacePlan } from './spaces'
-import { canDeactivateOld, copyPendingSpaces, spaceKey } from './spaceListing.mjs'
+import { copySpace, newScope, OLD_SCOPE, list, planSpace, recheckSpace, reasonOf, servesSpaces, spaceLabel, type SpaceMove, type SpacePlan } from './spaces'
+import { canDeactivateOld, copyPendingSpaces, isMigrationDone, isVerifiedMove, receiptsForRetry, spaceKey } from './spaceListing.mjs'
 import { saveRecovery } from './spaceRecovery'
 import { beginSignIn, clientInfo, finishSignIn, forgetAll, isCallback, OAuthSession, sweepKeys } from '../../lib/oauth'
 
@@ -267,15 +267,14 @@ function SimpleStanding({ saved: s }: { saved: Saved }) {
 
 function currentStep(s: Saved | null): StepId {
   if (!s) return 'find'
-  if (s.finishedAt) return 'done'
+  if (isMigrationDone(s)) return 'done'
   if (!s.checkedAt) return 'check'
   if (!s.newHandle) return 'handle'
   if (!s.created) return 'create'
   if (!(s.repoDone && s.blobsDone && s.prefsDone)) return 'copy'
   if (!s.backup && !s.identityDone) return 'backup'
   if (!s.identityDone) return 'identity'
-  if (!(s.activated && s.oldDeactivated)) return 'finish'
-  return 'done'
+  return 'finish'
 }
 
 // ---------------------------------------------------------------- layout bits
@@ -1742,7 +1741,7 @@ function FinishStep({
       title="Copy your Spaces"
     >
       {saved.spaces === 'skipped'
-        ? `${saved.spaceMoves?.filter((m) => m.state === 'moved').length ?? 0} Spaces copied. Remaining data stays at ${hostOf(saved.oldPds)}.`
+        ? `${saved.spaceMoves?.filter((m) => isVerifiedMove(m) && m.state === 'moved').length ?? 0} Spaces copied. Remaining data stays at ${hostOf(saved.oldPds)}.`
         : canDeactivate
           ? spacesSummary(saved.spaceMoves ?? [])
           : saved.activated
@@ -1759,20 +1758,15 @@ function FinishStep({
         </Checkline>
         {spacesLine}
         <Checkline state={saved.oldDeactivated ? 'ok' : error && saved.activated && canDeactivate ? 'bad' : 'wait'} title={`Deactivate your old account on ${hostOf(saved.oldPds)}`}>
-          {saved.oldDeactivated ? 'Kept offline as a fallback.' : 'The old account stays active until the Spaces check is complete.'}
+          {saved.oldDeactivated ? 'The old account is offline. Its server must allow access to resume the copy.' : 'The old account stays active until the Spaces check is complete.'}
         </Checkline>
       </ul>
       {saved.activated && !saved.spaces && <SpacesBox saved={saved} update={update} oauthError={oauthError} />}
-      {saved.activated && saved.spaces && !canDeactivate && !saved.oldDeactivated && (
+      {saved.activated && saved.spaces && !canDeactivate && (
         <>
           <SpaceListingNotice listing={saved.spaceListing} />
           <div className="row between">
-            {saved.spaces === 'skipped' && (
-              <button type="button" className="btn quiet" onClick={() => update({ finishedAt: Date.now() })}>
-                Finish with the old account active
-              </button>
-            )}
-            <button type="button" className="btn primary" onClick={() => update({ spaces: undefined, spaceCheckComplete: false })}>
+            <button type="button" className="btn primary" onClick={() => update({ spaces: undefined, spaceCheckComplete: false, finishedAt: undefined })}>
               Check Spaces again
             </button>
           </div>
@@ -1788,7 +1782,7 @@ function FinishStep({
           )}
           <div className="row end">
             {saved.activated && canDeactivate && (
-              <button type="button" className="btn quiet" onClick={() => update({ finishedAt: Date.now() })}>
+              <button type="button" className="btn quiet" onClick={() => update({ deactivationDeferred: true, finishedAt: Date.now() })}>
                 Skip, I'll do it later
               </button>
             )}
@@ -1867,8 +1861,8 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
           const diagnostics = { skipped: listing.skipped, listingError: listing.listingError }
           setListing(diagnostics)
           update({ spaceListing: diagnostics })
-          const previous = savedRef.current.spaceMoves ?? []
-          const completed = new Set(previous.filter((m) => m.state !== 'failed').map((m) => spaceKey(m.uri)))
+          const previous = receiptsForRetry(savedRef.current.spaceMoves ?? [])
+          const completed = new Set(previous.filter(isVerifiedMove).map((m) => spaceKey(m.uri)))
           const pending = listing.uris.filter((uri) => !completed.has(spaceKey(uri)))
           const plans: SpacePlan[] = []
           const bySpace = new Map(previous.map((m) => [spaceKey(m.uri), m]))
@@ -1876,11 +1870,14 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
             setMoves(next)
             update({ spaceMoves: next })
           }
+          if (previous.some((move) => move.recheckReceipt)) persistMoves(previous)
           for (const uri of pending) {
             try {
-              plans.push(await planSpace(old, uri, setPausedUntil, listing.withRepo.has(uri)))
+              const receipt = bySpace.get(spaceKey(uri))
+              const expectsRepo = listing.withRepo.has(uri) || !!(receipt?.records || receipt?.blobs)
+              plans.push(await planSpace(old, uri, setPausedUntil, expectsRepo))
             } catch (e) {
-              bySpace.set(spaceKey(uri), { uri, state: 'failed', reason: reasonOf(e) })
+              bySpace.set(spaceKey(uri), { ...bySpace.get(spaceKey(uri)), uri, state: 'failed', reason: reasonOf(e) })
               persistMoves([...bySpace.values()])
             }
           }
@@ -1901,7 +1898,8 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
           setPhase({ at: 'copy' })
           await copyPendingSpaces(plans, [...bySpace.values()], async (p) => {
             setCurrent({ uri: p.uri, blobs: 0, total: p.blobs.length })
-            return copySpace(old, mine, p, setPausedUntil, (n) => setCurrent({ uri: p.uri, blobs: n, total: p.blobs.length }))
+            const copy = bySpace.get(spaceKey(p.uri))?.recheckReceipt ? recheckSpace : copySpace
+            return copy(old, mine, p, setPausedUntil, (n) => setCurrent({ uri: p.uri, blobs: n, total: p.blobs.length }))
           }, persistMoves, reasonOf)
           setCurrent(null)
           setPhase({ at: 'result' })
@@ -1944,7 +1942,7 @@ function SpacesBox({ saved, update, oauthError }: { saved: Saved; update: (p: Pa
     step()
   }
   const skip = (
-    <button type="button" className="btn quiet" name="skip-spaces" disabled={busy} onClick={() => update({ spaces: 'skipped', spaceCheckComplete: false })}>
+    <button type="button" className="btn quiet" name="skip-spaces" disabled={busy} onClick={() => update({ spaces: 'skipped', spaceCheckComplete: false, finishedAt: undefined })}>
       Leave remaining Spaces at {oldHost}
     </button>
   )

@@ -6,11 +6,12 @@
 // here. A space the account runs moves first (exportSpaceMeta there,
 // importSpaceMeta here), since its owner's repo can't be imported before it.
 
-import { OAuthSession } from '../../lib/oauth'
+import type { OAuthSession } from '../../lib/oauth'
 import { XrpcError } from '../../lib/xrpc'
 import { retry } from '../../lib/backoff'
-import { spaceUriParts } from '../../lib/spaces'
-import { spaceRefs } from './spaceListing.mjs'
+import { decode } from 'cborg'
+import { spaceUriParts } from '../../lib/spaceUri'
+import { listSpaceRefs, nextCursor, spaceKey, type SpaceListing } from './spaceListing.mjs'
 
 export const OLD_SCOPE = 'atproto space:*?authority=*&action=read_self'
 export const NEW_SCOPE = 'atproto space:*?authority=*&collection=*'
@@ -37,7 +38,7 @@ const MAX_SPACES = 10_000
 const MAX_BLOBS = 100_000
 
 /** `governed`: the account is the space's authority, so the space itself moves too. */
-export type SpacePlan = { uri: string; blobs: string[]; empty: boolean; governed: boolean }
+export type SpacePlan = { uri: string; blobs: string[]; governed: boolean; expectsRepo: boolean }
 
 /** Whether `base` serves Spaces at all: an unauthenticated listSpaces is
  * refused for want of auth there, and as an unknown method elsewhere. */
@@ -50,46 +51,50 @@ export async function servesSpaces(base: string): Promise<boolean> {
   }
   if (r.status === 401) return true
   const body = await r.json().catch(() => ({}))
-  return r.status === 400 && /^Auth/.test(body.error ?? '')
+  if (r.status === 400 && /^Auth/.test(body.error ?? '')) return true
+  if ((r.status === 404 || r.status === 501 || r.status === 400) &&
+      ['XRPCNotSupported', 'MethodNotImplemented', 'UnknownMethod', 'MethodNotFound'].includes(body.error)) return false
+  // An ambiguous probe is followed up with the authenticated listing.
+  return true
 }
 
-const notFound = (e: unknown) => e instanceof XrpcError && (e.error === 'RepoNotFound' || e.error === 'SpaceNotFound')
+const repoNotFound = (e: unknown) => e instanceof XrpcError && e.error === 'RepoNotFound'
 
-/** Every space the account holds a repo in (or governs) there, and each repo's blobs. */
-export async function plan(old: OAuthSession, onPause: (until: number) => void): Promise<SpacePlan[]> {
-  const uris: string[] = []
+/** Keep usable references from every page, including pages before a listing error. */
+export function list(old: OAuthSession, onPause: (until: number) => void): Promise<SpaceListing> {
+  return listSpaceRefs(
+    (cursor) => retry(() => old.call('com.atproto.space.listSpaces', { params: { limit: 100, cursor } }), onPause),
+    MAX_SPACES,
+  )
+}
+
+export async function planSpace(old: OAuthSession, uri: string, onPause: (until: number) => void, expectsRepo: boolean): Promise<SpacePlan> {
+  const blobs = new Set<string>()
   const seen = new Set<string>()
-  for (let cursor: string | undefined; ; ) {
-    const page = await retry(() => old.call('com.atproto.space.listSpaces', { params: { limit: 100, cursor } }), onPause)
-    const refs = spaceRefs(page)
-    uris.push(...refs)
-    if (uris.length > MAX_SPACES) throw new Error(`${new URL(old.pds).host} lists more than ${MAX_SPACES} spaces.`)
-    cursor = page.cursor
-    if (!cursor || !refs.length || seen.has(cursor)) break
-    seen.add(cursor)
-  }
-  const out: SpacePlan[] = []
-  for (const uri of uris) {
-    const blobs: string[] = []
-    let empty = false
-    try {
-      const seen = new Set<string>()
-      for (let cursor: string | undefined; ; ) {
-        const page = await retry(() => old.call('com.atproto.space.listBlobs', { params: { space: uri, repo: old.did, limit: 1000, cursor } }), onPause)
-        blobs.push(...(page.cids as string[]))
-        if (blobs.length > MAX_BLOBS) throw new Error(`${new URL(old.pds).host} lists more than ${MAX_BLOBS} files in one space.`)
-        cursor = page.cursor
-        if (!cursor || !page.cids.length || seen.has(cursor)) break
-        seen.add(cursor)
-      }
-    } catch (e) {
-      // a space it governs but never wrote in: no repo to bring
-      if (!notFound(e)) throw e
-      empty = true
+  try {
+    for (let cursor: string | undefined; ; ) {
+      const page = await retry(() => old.call('com.atproto.space.listBlobs', { params: { space: uri, repo: old.did, limit: 1000, cursor } }), onPause)
+      if (!Array.isArray(page?.cids) || page.cids.some((cid: unknown) => typeof cid !== 'string' || !cid))
+        throw new Error('The old server returned an invalid file list.')
+      for (const cid of page.cids) blobs.add(cid)
+      if (blobs.size > MAX_BLOBS || seen.size >= MAX_BLOBS) throw new Error(`The file listing exceeded ${MAX_BLOBS} files or pages.`)
+      cursor = nextCursor(page.cursor, seen)
+      if (cursor === undefined) break
     }
-    out.push({ uri, blobs, empty, governed: spaceLabel(uri).authority === old.did })
+  } catch (e) {
+    if (!repoNotFound(e) || blobs.size || seen.size) throw e
   }
-  return out
+  return { uri, blobs: [...blobs], expectsRepo, governed: spaceLabel(uri).authority === old.did }
+}
+
+/** Account recovery requires a complete listing before clearing its recovery hint. */
+export async function plan(old: OAuthSession, onPause: (until: number) => void): Promise<SpacePlan[]> {
+  const listing = await list(old, onPause)
+  if (listing.listingError) throw new Error(listing.listingError)
+  if (listing.skipped) throw new Error(`The previous server listed ${listing.skipped} Spaces without usable URIs.`)
+  const plans: SpacePlan[] = []
+  for (const uri of listing.uris) plans.push(await planSpace(old, uri, onPause, listing.withRepo.has(uri)))
+  return plans
 }
 
 /** Plain words for the reasons an import is refused. */
@@ -125,9 +130,9 @@ export async function copySpace(
 ): Promise<SpaceMove> {
   if (p.governed) {
     const meta = await retry(() => old.call<Response>('com.atproto.space.exportSpaceMeta', { params: { space: p.uri }, raw: true }).then((r) => r.blob()), onPause)
+    await verifyArchive(meta, p.uri)
     await retry(() => here.call('com.atproto.space.importSpaceMeta', { body: meta, type: 'application/vnd.dasl.star' }), onPause)
   }
-  if (p.empty) return p.governed ? { uri: p.uri, state: 'moved', records: 0, blobs: 0 } : { uri: p.uri, state: 'empty' }
   let star: Blob
   try {
     star = await retry(
@@ -135,11 +140,13 @@ export async function copySpace(
       onPause,
     )
   } catch (e) {
-    if (notFound(e)) return p.governed ? { uri: p.uri, state: 'moved', records: 0, blobs: 0 } : { uri: p.uri, state: 'empty' }
+    if (repoNotFound(e) && !p.expectsRepo && !p.blobs.length) return p.governed ? { uri: p.uri, state: 'moved', records: 0, blobs: 0 } : { uri: p.uri, state: 'empty' }
     throw e
   }
-  await retry(() => here.call('com.atproto.space.importRepo', { body: star, type: 'application/vnd.dasl.star' }), onPause)
+  await verifyArchive(star, p.uri, old.did)
   const records = starPairs(new Uint8Array(await star.arrayBuffer()))
+  // The destination validates and commits the archive before acknowledging the import.
+  await retry(() => here.call('com.atproto.space.importRepo', { body: star, type: 'application/vnd.dasl.star' }), onPause)
   let n = 0
   for (const cid of p.blobs) {
     await retry(async () => {
@@ -152,6 +159,24 @@ export async function copySpace(
     onBlob(++n)
   }
   return { uri: p.uri, state: 'moved', records, blobs: n }
+}
+
+/** Check the archive's identity before letting the destination replace data. */
+async function verifyArchive(blob: Blob, uri: string, did?: string) {
+  const header = new Uint8Array(await blob.slice(0, 12).arrayBuffer())
+  if (header[0] !== 0x2a || header[1] !== 0x6c || header[2] !== 1 || header[3] !== 0)
+    throw new Error('The old server returned an invalid Space archive.')
+  let length = 0
+  for (let i = 4; i < header.length; i++) {
+    length += (header[i] & 0x7f) * 2 ** (7 * (i - 4))
+    if (header[i] & 0x80) continue
+    if (length > 64 * 1024 || i + 1 + length > blob.size) break
+    const meta = decode(new Uint8Array(await blob.slice(i + 1, i + 1 + length).arrayBuffer()))
+    if (spaceKey(meta?.space) !== spaceKey(uri) || (did && meta?.repo !== did))
+      throw new Error('The Space archive belongs to a different Space or account.')
+    return
+  }
+  throw new Error('The old server returned invalid Space archive metadata.')
 }
 
 /** The records in a getRepo archive (STAR: magic, metadata, then a 0x01

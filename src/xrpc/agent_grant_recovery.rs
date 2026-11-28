@@ -1,6 +1,8 @@
 //! Owner-partition state for a trusted OAuth integration. No provider calls
 //! or authorization codes are stored here.
 
+pub mod http;
+
 pub mod runner;
 
 use super::agent_dispatch::{self, Binding, Grant, Row};

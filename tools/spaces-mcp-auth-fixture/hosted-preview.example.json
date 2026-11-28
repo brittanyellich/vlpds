@@ -1,0 +1,29 @@
+{
+  "worker": {
+    "name": "exp711-mcp-preview",
+    "entry": "worker.mjs",
+    "compatibilityDate": "2026-11-17",
+    "customDomain": "mcp-preview.crate.social",
+    "bindings": {
+      "PREVIEW_MODE": "isolated",
+      "ORIGIN": "https://mcp-preview.crate.social",
+      "SPACES": "<private preview PDS service binding>",
+      "SPACES_URL": "https://preview-pds.internal/mcp",
+      "OWNER_PDS": "<private preview owner sign-in service binding>",
+      "OWNER_PDS_ORIGIN": "https://preview-pds.internal",
+      "ISSUER_STORAGE": "<dedicated PreviewIssuerStorage Durable Object namespace>",
+      "BINDINGS": "<JSON keyed by base64url UTF-8 owner DID, values with ownerDid>",
+      "BRIDGE_TOKEN": "<separately provisioned service secret>",
+      "SIGNER": "<secret JSON containing iss, aud, method and private P-256 jwk>"
+    }
+  },
+  "pds": {
+    "issuer": "https://mcp-preview.crate.social",
+    "resource": "https://mcp-preview.crate.social/mcp",
+    "dispatchMethod": "vlpds.agent.dispatch",
+    "recoveryPath": "/internal/agent-grant-recovery",
+    "store": "<preview-only PDS and Spaces store>",
+    "wrappingKey": "<preview-only managed wrapping key>",
+    "bindingLookup": "<verified owner DID to exact agent DID and Space URI>"
+  }
+}

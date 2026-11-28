@@ -1,5 +1,5 @@
 use super::*;
-use crate::spaces_mcp_chat::{http::Session, owner_session, reopen_owner_session};
+use crate::spaces_mcp_chat::{auth::MountedCredentials, http::Session, owner_session};
 use axum::{response::IntoResponse, Json};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
 use sha2::{Digest, Sha256};
@@ -82,6 +82,7 @@ impl Bridge {
     pub(super) async fn check_scoped_restart(
         &mut self,
         plc: &MockPlc,
+        previous: TestServer,
         rotation: Arc<Keypair>,
         store: Arc<object_store::memory::InMemory>,
         alice: &Account,
@@ -93,6 +94,12 @@ impl Bridge {
         };
         use vlpds::xrpc::agent_chat::{HISTORY, SEND};
 
+        let binding = self.chats.get().unwrap()[1].binding();
+        let sealed = Arc::new(MountedCredentials::issue(&previous, bob, binding, "mountedbob").await);
+        assert!(vlpds::server::shutdown_gracefully(&previous.app, std::time::Duration::from_secs(5)).await);
+        let issuer_url = previous.app.public_url.clone();
+        drop(previous);
+
         let calls = Arc::new(AtomicUsize::new(0));
         let opened = Arc::new(Notify::new());
         let resume = Arc::new(Notify::new());
@@ -103,13 +110,14 @@ impl Bridge {
             move |scope: vlpds::xrpc::agent_chat::SessionScope| {
                 let (server, calls, bob, opened, resume) =
                     (server.clone(), calls.clone(), bob_access.clone(), opened.clone(), resume.clone());
+                let sealed = sealed.clone();
                 async move {
                     let call = calls.fetch_add(1, Ordering::Relaxed);
                     let server = server.get()?.upgrade()?;
                     if scope.owner() != bob.did {
                         return None;
                     }
-                    let session = reopen_owner_session(&server, &bob, scope).await;
+                    let session = sealed.open(&server, &bob, scope).await?;
                     if call == 4 {
                         opened.notify_one();
                         resume.notified().await;
@@ -118,8 +126,19 @@ impl Bridge {
                 }
             }
         };
-        let mount = Mount::chat(&self.signer, ISSUER, RESOURCE, open).unwrap();
-        let restarted = Arc::new(node(plc, rotation, store, "scoped-chat-restarted", Some(mount)).await);
+        for invalid_origin in [
+            "http://issuer.example.invalid",
+            "https://issuer.example.invalid/",
+            "https://issuer.example.invalid/mcp",
+            "https://issuer.example.invalid?preview=1",
+            "https://user@issuer.example.invalid",
+        ] {
+            assert!(Mount::preview_chat(&self.signer, invalid_origin, open.clone()).is_err());
+        }
+        let mount = Mount::preview_chat(&self.signer, ISSUER, open).unwrap();
+        let restarted = Arc::new(
+            node_with_public_url(plc, rotation, store, "scoped-chat-restarted", Some(mount), Some(issuer_url)).await,
+        );
         assert!(server.set(Arc::downgrade(&restarted)).is_ok());
         self.connect(&restarted).await;
 
@@ -136,8 +155,11 @@ impl Bridge {
         let bob_args = json!({"conversationId": "mountedbob"});
         let history = Self::chat_result(self.chat_call(bob, "chat-bob", HISTORY, bob_args.clone()).await).await;
         let messages = history["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["cid"], receipt["cid"]);
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().any(|message| message["cid"] == receipt["cid"]));
+        assert!(messages
+            .iter()
+            .any(|message| { message["messageId"] == "beforerestart" && message["authorDid"] == bob.did }));
 
         let raced = json!({"conversationId": "mountedbob", "messageId": "raced", "text": "Revoked during opening"});
         let (response, ()) = tokio::join!(self.chat_call(bob, "chat-bob", SEND, raced), async {
@@ -212,6 +234,11 @@ impl Bridge {
             Self::chat_result(self.chat_call(bob, "chat-bob", HISTORY, json!({"conversationId": "mountedbob"})).await)
                 .await;
         assert_eq!(bob_history["messages"], json!([]));
+        let before_restart = json!({
+            "conversationId": "mountedbob", "messageId": "beforerestart", "text": "Before PDS restart",
+        });
+        let receipt = Self::chat_result(self.chat_call(bob, "chat-bob", SEND, before_restart).await).await;
+        assert_eq!(receipt["authorDid"], bob.did);
     }
 
     pub(super) async fn connect(&mut self, s: &TestServer) {

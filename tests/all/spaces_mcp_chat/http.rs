@@ -2,7 +2,7 @@ use super::{Chat, SpaceClient, J};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{routing::post, Json, Router};
+use axum::{routing::post, Router};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
 use serde_json::json;
 use std::future::Future;
@@ -10,10 +10,11 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+use tower::ServiceExt;
 use vlpds::plc::mock::MockPlc;
 use vlpds::xrpc::agent_dispatch::{self, Binding, Grant};
 use vlpds::xrpc::agent_dispatch_auth::{admit, Authority, MAX_BODY_BYTES, METHOD};
-use vlpds::xrpc::agent_grant_recovery::{CleanupTarget, Observation, Recovery, Request};
+use vlpds::xrpc::agent_grant_recovery::http::{Mount as RecoveryMount, PATH as RECOVERY_PATH};
 
 use vlpds::xrpc::agent_chat::{self, VERSION, VERSION_HEADER};
 
@@ -95,6 +96,10 @@ pub(super) struct FixtureSigner {
 }
 
 impl FixtureSigner {
+    pub(super) fn config(&self) -> J {
+        json!({"iss": self.did, "aud": self.audience, "method": METHOD, "jwk": self.jwk})
+    }
+
     pub(super) async fn register(plc: &MockPlc, audience: String) -> Self {
         use p256::elliptic_curve::Generate;
         let key = p256::ecdsa::SigningKey::generate();
@@ -135,12 +140,16 @@ impl FixtureSigner {
     }
 }
 
+type RestartInputs<'a> = (&'a MockPlc, &'a Arc<vlatproto::crypto::Keypair>, &'a Arc<object_store::memory::InMemory>);
+
 struct Endpoint {
     authority: String,
     sessions: Vec<Session>,
     signer: Option<FixtureSigner>,
     bridge_token: String,
     issuer: OnceLock<String>,
+    recovery: OnceLock<RecoveryMount>,
+    restarted: OnceLock<Arc<crate::common::TestServer>>,
     grants: parking_lot::Mutex<[Option<String>; 2]>,
 }
 
@@ -170,12 +179,14 @@ impl Server {
             signer,
             bridge_token: format!("{:032x}{:032x}", rand::random::<u128>(), rand::random::<u128>()),
             issuer: OnceLock::new(),
+            recovery: OnceLock::new(),
+            restarted: OnceLock::new(),
             grants: parking_lot::Mutex::new([None, None]),
         });
         let app = Router::new()
             .route("/mcp", post(request).get(request))
             .route(&format!("/xrpc/{METHOD}"), post(request))
-            .route("/fixture/grant", post(grant_consent))
+            .route(RECOVERY_PATH, post(grant_consent))
             .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
             .with_state(endpoint.clone());
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -183,7 +194,12 @@ impl Server {
     }
 
     /// Optional local Worker integration using only two disposable owner sessions.
-    pub(super) async fn check_oauth_bridge<F, Fut>(&self, foreign_token: &str, on_phase: F) -> bool
+    pub(super) async fn check_oauth_bridge<F, Fut>(
+        &self,
+        foreign_token: &str,
+        on_phase: F,
+        restart: Option<RestartInputs<'_>>,
+    ) -> bool
     where
         F: Fn(String) -> Fut,
         Fut: Future<Output = ()>,
@@ -220,14 +236,12 @@ impl Server {
                 binding
             })
             .collect();
-        let signer = self.endpoint.signer.as_ref().map(|signer| {
-            json!({
-                "iss": signer.did, "aud": signer.audience, "jwk": signer.jwk,
-                "method": METHOD,
-            })
-        });
+        let signer = self.endpoint.signer.as_ref().map(FixtureSigner::config);
         let input = json!({
             "backend": self.endpoint.authority, "bindings": bindings, "foreignToken": foreign_token, "signer": signer,
+            "ownerPds": self.endpoint.signer.as_ref().map(|_| {
+                self.endpoint.sessions[0].caller.srv.base.strip_prefix("http://").unwrap()
+            }),
             "verifyBinding": self.endpoint.signer.is_some(),
             "ownerPassword": self.endpoint.signer.is_some().then_some(crate::oauth::PASSWORD),
             "bridgeToken": self.endpoint.signer.is_some().then_some(&self.endpoint.bridge_token),
@@ -241,10 +255,24 @@ impl Server {
                     assert!(self.endpoint.signer.is_some());
                     if let Some(origin) = phase.strip_prefix("issuer ") {
                         let url = reqwest::Url::parse(origin).unwrap();
-                        assert_eq!(url.scheme(), "http");
+                        assert_eq!(url.scheme(), "https");
                         assert_eq!(url.host_str(), Some("127.0.0.1"));
                         assert_eq!(url.origin().ascii_serialization(), origin);
                         self.endpoint.issuer.set(origin.to_owned()).unwrap();
+                        let bindings = self
+                            .endpoint
+                            .sessions
+                            .iter()
+                            .map(|session| (session.owner.clone(), session.binding()))
+                            .collect::<std::collections::HashMap<_, _>>();
+                        let recovery = RecoveryMount::new(origin, &self.endpoint.bridge_token, move |owner| {
+                            bindings.get(owner).cloned()
+                        })
+                        .unwrap();
+                        assert!(self.endpoint.recovery.set(recovery).is_ok());
+                    } else if phase == "restart-private-pds" {
+                        let (plc, rotation, store) = restart.unwrap();
+                        self.restart_private_pds(plc, rotation.clone(), store.clone()).await;
                     } else if phase == "unsigned-probe" {
                         self.assert_unsigned_dispatch_denied().await;
                     } else if phase == "arm-durable-revocation" {
@@ -265,7 +293,87 @@ impl Server {
         true
     }
 
+    async fn restart_private_pds(
+        &self,
+        plc: &MockPlc,
+        rotation: Arc<vlatproto::crypto::Keypair>,
+        store: Arc<object_store::memory::InMemory>,
+    ) {
+        let endpoint = &self.endpoint;
+        let first = &endpoint.sessions[0].caller.srv;
+        for id in ["race", "endorsement", "declaration", "crossowner"] {
+            self.assert_record_absent(0, id).await;
+        }
+        self.assert_record_absent(1, "crossowner").await;
+        let bob = &endpoint.sessions[1];
+        let owner = Arc::new(crate::oauth::Account {
+            did: bob.owner.clone(),
+            handle: bob.caller.handle.clone(),
+            jwt: bob.caller.session_jwt.clone(),
+        });
+        let [_, worker_grant] = self.worker_grants();
+        let sealed = Arc::new(
+            super::auth::MountedCredentials::issue_at(first, &owner, worker_grant.binding, &bob.conversation).await,
+        );
+        assert!(vlpds::server::shutdown_gracefully(&first.app, Duration::from_secs(5)).await);
+        let signer = endpoint.signer.as_ref().unwrap();
+        let issuer = endpoint.issuer.get().unwrap();
+        let server = Arc::new(OnceLock::<std::sync::Weak<crate::common::TestServer>>::new());
+        let open = {
+            let server = server.clone();
+            move |scope| {
+                let (server, sealed, owner) = (server.clone(), sealed.clone(), owner.clone());
+                async move {
+                    let server = server.get()?.upgrade()?;
+                    sealed.open(&server, &owner, scope).await
+                }
+            }
+        };
+        let mount = vlpds::xrpc::agent_dispatch_route::Mount::preview_chat(&signer.did, issuer, open).unwrap();
+        let restarted = crate::ident_link_binding::node_with_public_url(
+            plc,
+            rotation,
+            store,
+            "worker-private-restart",
+            Some(mount),
+            Some(first.app.public_url.clone()),
+        )
+        .await;
+        let restarted = Arc::new(restarted);
+        assert!(server.set(Arc::downgrade(&restarted)).is_ok());
+        assert!(endpoint.restarted.set(restarted).is_ok());
+    }
+
     async fn assert_unsigned_dispatch_denied(&self) {
+        let session = &self.endpoint.sessions[0].caller;
+        let private = format!("http://{}{}", self.endpoint.authority, RECOVERY_PATH);
+        let client = self.client(0).http;
+        let unauthenticated = client
+            .post(&private)
+            .header("x-vlpds-owner-session", format!("Bearer {}", session.session_jwt))
+            .json(&json!({"operation": "owner"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), 403);
+        let missing_owner = client
+            .post(&private)
+            .bearer_auth(&self.endpoint.bridge_token)
+            .json(&json!({"operation": "owner"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing_owner.status(), 403);
+        let public = client
+            .post(format!("{}{}", session.srv.base, RECOVERY_PATH))
+            .bearer_auth(&self.endpoint.bridge_token)
+            .header("x-vlpds-owner-session", format!("Bearer {}", session.session_jwt))
+            .json(&json!({"operation": "owner"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(public.status(), 404);
+
         let grant = self.endpoint.grants.lock()[0].clone().unwrap();
         let response = self
             .client(0)
@@ -279,6 +387,11 @@ impl Server {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    pub(super) async fn stop_restarted(&self) {
+        let pds = self.endpoint.restarted.get().unwrap();
+        assert!(vlpds::server::shutdown_gracefully(&pds.app, Duration::from_secs(5)).await);
     }
 
     pub(super) fn worker_grants(&self) -> [WorkerGrant; 2] {
@@ -361,107 +474,44 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers.get(header::AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")
 }
 
-async fn grant_consent(State(endpoint): State<Arc<Endpoint>>, headers: HeaderMap, Json(body): Json<J>) -> Response {
-    let denied = || StatusCode::FORBIDDEN.into_response();
-    if endpoint.signer.is_none()
-        || !matches_listener(&endpoint, &headers)
-        || bearer(&headers) != Some(endpoint.bridge_token.as_str())
-    {
-        return denied();
+async fn grant_consent(State(endpoint): State<Arc<Endpoint>>, request: axum::extract::Request) -> Response {
+    if !matches_listener(&endpoint, request.headers()) {
+        return StatusCode::FORBIDDEN.into_response();
     }
-    if body["operation"] == "sign-in" {
-        let (Some(handle), Some(password)) = (body["handle"].as_str(), body["password"].as_str()) else {
-            return denied();
+    let Some(mount) = endpoint.recovery.get() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let app = endpoint.restarted.get().map_or(&endpoint.sessions[0].caller.srv.app, |pds| &pds.app);
+    let observation = if endpoint.restarted.get().is_none() {
+        let (parts, body) = request.into_parts();
+        let Ok(bytes) = axum::body::to_bytes(body, 16 * 1024).await else {
+            return StatusCode::PAYLOAD_TOO_LARGE.into_response();
         };
-        let Some(session) = endpoint.sessions.iter().find(|session| session.caller.handle == handle) else {
-            return denied();
-        };
-        let srv = &session.caller.srv;
-        let url = format!("{}/xrpc/com.atproto.server.createSession", srv.base);
-        let Ok(response) = srv.http.post(url).json(&json!({"identifier": handle, "password": password})).send().await
-        else {
-            return denied();
-        };
-        if !response.status().is_success() {
-            return denied();
-        }
-        let Ok(result) = response.json::<J>().await else {
-            return denied();
-        };
-        let Some(jwt) = result["accessJwt"].as_str().filter(|_| result["did"] == session.owner) else {
-            return denied();
-        };
-        return ([(header::CACHE_CONTROL, "no-store")], Json(json!({"session": jwt}))).into_response();
-    }
-    let (Some(session_jwt), Some(first)) = (headers.get("x-fixture-owner-session"), endpoint.sessions.first()) else {
-        return denied();
-    };
-    let Ok((parts, _)) = axum::http::Request::builder()
-        .header(header::AUTHORIZATION, session_jwt)
-        .body(())
-        .map(axum::http::Request::into_parts)
-    else {
-        return denied();
-    };
-    let app = &first.caller.srv.app;
-    let Ok(credentials) = vlpds::xrpc::authn::authenticate(app, &parts).await else {
-        return denied();
-    };
-    let Ok(recovery) = Recovery::for_session(app, &credentials).await else {
-        return denied();
-    };
-    let Some((index, session)) = endpoint.sessions.iter().enumerate().find(|(_, s)| s.owner == recovery.owner()) else {
-        return denied();
-    };
-    if body["operation"] == "owner" {
-        return Json(json!({"did": recovery.owner()})).into_response();
-    }
-    let (Some(issuer), Some(operation), Some(client)) =
-        (endpoint.issuer.get(), body["approval"].as_str(), body["clientId"].as_str())
-    else {
-        return denied();
-    };
-    let resource = format!("{issuer}/mcp");
-    if body["operation"] == "begin" {
-        let mut request_digest = [0; 32];
-        if hex::decode_to_slice(operation, &mut request_digest).is_err() {
-            return denied();
-        }
-        let request = Request {
-            issuer: issuer.clone(),
-            resource,
-            client: client.into(),
-            request_digest,
-            binding: session.binding(),
-        };
-        return match recovery.begin_issuance(operation, request).await {
-            Ok(Some(correlation)) => Json(json!({"correlation": correlation})).into_response(),
-            Ok(None) => StatusCode::CONFLICT.into_response(),
-            Err(_) => denied(),
-        };
-    }
-    let (Some(id), Some(correlation)) = (body["grantId"].as_str(), body["correlation"].as_str()) else {
-        return denied();
-    };
-    let grant = Grant { issuer, resource: &resource, id, owner: &session.owner };
-    let observation = Observation { grant, client, correlation };
-    let outcome = match body["operation"].as_str() {
-        Some("approve") => match recovery.issued(operation, &observation).await {
-            Ok(true) => {
-                endpoint.grants.lock()[index] = Some(id.to_owned());
-                Ok(())
-            }
-            _ => return denied(),
-        },
-        Some("revoke") => recovery.reconcile_lost_redirect(operation, &observation).await,
-        Some("issuer-cleaned") => recovery.acknowledge(operation, id, CleanupTarget::Issuer).await,
-        _ => return StatusCode::BAD_REQUEST.into_response(),
-    };
-    if outcome.is_ok() {
-        StatusCode::NO_CONTENT.into_response()
+        let evidence = serde_json::from_slice::<J>(&bytes).ok();
+        (axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes)), evidence)
     } else {
-        denied()
+        (request, None)
+    };
+    let (request, evidence) = observation;
+    let owner_session = request.headers().get("x-vlpds-owner-session").cloned();
+    let response = mount.private_router(app.clone()).oneshot(request).await.unwrap();
+    let (StatusCode::NO_CONTENT, Some(evidence), Some(session)) = (response.status(), evidence, owner_session) else {
+        return response;
+    };
+    let Some(id) = evidence["grantId"].as_str().filter(|_| evidence["operation"] == "approve") else {
+        return response;
+    };
+    let (parts, _) =
+        axum::http::Request::builder().header(header::AUTHORIZATION, session).body(()).unwrap().into_parts();
+    let credentials =
+        vlpds::xrpc::authn::authenticate(app, &parts).await.unwrap_or_else(|error| panic!("{}", error.message));
+    let recovery = vlpds::xrpc::agent_grant_recovery::Recovery::for_session(app, &credentials)
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.message));
+    if let Some(index) = endpoint.sessions.iter().position(|candidate| candidate.owner == recovery.owner()) {
+        endpoint.grants.lock()[index] = Some(id.to_owned());
     }
+    response
 }
 
 async fn request(
@@ -474,6 +524,24 @@ async fn request(
     // Native loopback clients only. A browser Origin or a rebinding Host is refused.
     if !matches_listener(&endpoint, &headers) {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    if let Some(pds) = endpoint.restarted.get() {
+        if method != Method::POST || uri.path() != format!("/xrpc/{METHOD}") || uri.query().is_some() {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        let Some(token) = bearer(&headers) else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
+        let Ok(response) =
+            pds.xrpc.http.post(format!("{}/xrpc/{METHOD}", pds.url)).bearer_auth(token).body(body).send().await
+        else {
+            return StatusCode::BAD_GATEWAY.into_response();
+        };
+        let status = response.status();
+        let Ok(body) = response.bytes().await else {
+            return StatusCode::BAD_GATEWAY.into_response();
+        };
+        return (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
     }
     let token = bearer(&headers);
     let session = if let Some(signer) = &endpoint.signer {

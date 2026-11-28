@@ -110,6 +110,14 @@ impl DpopKey {
         DpopKey { sk: SigningKey::generate(), nonce: Default::default() }
     }
 
+    pub(crate) fn private_bytes(&self) -> zeroize::Zeroizing<Vec<u8>> {
+        zeroize::Zeroizing::new(self.sk.to_bytes().to_vec())
+    }
+
+    pub(crate) fn from_private_bytes(bytes: &[u8]) -> Self {
+        Self { sk: SigningKey::from_slice(bytes).unwrap(), nonce: Default::default() }
+    }
+
     fn jwk(&self) -> J {
         let pt = self.sk.verifying_key().to_sec1_point(false);
         json!({"kty": "EC", "crv": "P-256", "x": b64(pt.x().unwrap()), "y": b64(pt.y().unwrap())})

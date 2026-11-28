@@ -4,10 +4,10 @@
 use crate::common::spaces::SpaceClient;
 use crate::common::{Resp, TestServer, J};
 use serde_json::json;
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 use vlpds::xrpc::agent_chat::{ChatSession, ToolResult, HISTORY, SEND, START};
 
-mod auth;
+pub(crate) mod auth;
 pub(crate) mod http;
 
 const SPACE_TYPE: &str = "com.example.mcpchat";
@@ -199,21 +199,6 @@ async fn chat_session(
     http::Session::new(scoped, &owner.did, &agent.did, space, conversation)
 }
 
-pub(crate) async fn reopen_owner_session(
-    server: &TestServer,
-    owner: &crate::oauth::Account,
-    scope: vlpds::xrpc::agent_chat::SessionScope,
-) -> http::Session {
-    assert_eq!(owner.did, scope.owner());
-    let caller =
-        SpaceClient::for_account(server, &owner.did, &owner.handle, &owner.jwt, &scope.oauth_scope(THREAD, MESSAGE))
-            .await;
-    let other = format!("at:space/{}/{SPACE_TYPE}/outofscope", owner.did);
-    let denial = caller.delegation_token(&other).await;
-    assert_eq!(denial.status, 403);
-    http::Session::new(caller, &owner.did, &scope.binding().agent, &scope.binding().space, scope.conversation())
-}
-
 pub(crate) async fn owner_session(
     server: &TestServer,
     owner: &crate::oauth::Account,
@@ -231,6 +216,8 @@ pub(crate) async fn check_verified_bridge<F, Fut>(
     plc: &vlpds::plc::mock::MockPlc,
     pairs: [(&crate::oauth::Account, &crate::oauth::Account); 2],
     on_phase: F,
+    rotation: &Arc<vlatproto::crypto::Keypair>,
+    store: &Arc<object_store::memory::InMemory>,
 ) -> Option<[http::WorkerGrant; 2]>
 where
     F: Fn(String) -> Fut,
@@ -260,13 +247,9 @@ where
         .await
         .unwrap();
     assert_eq!(direct.status(), reqwest::StatusCode::FORBIDDEN);
-    assert!(mcp.check_oauth_bridge(&foreign_token.unwrap(), on_phase).await);
+    assert!(mcp.check_oauth_bridge(&foreign_token.unwrap(), on_phase, Some((plc, rotation, store))).await);
     let grants = mcp.worker_grants();
-    // A rejected send must leave no record in the owner's actual Space.
-    for id in ["race", "endorsement", "declaration", "crossowner"] {
-        mcp.assert_record_absent(0, id).await;
-    }
-    mcp.assert_record_absent(1, "crossowner").await;
+    mcp.stop_restarted().await;
     Some(grants)
 }
 
@@ -362,7 +345,7 @@ async fn spaces_mcp_chat_two_owners() {
     let denied = bob_chat.call(HISTORY, json!({"conversationId": "bobchat"})).await;
     assert_eq!(denied["structuredContent"]["messages"], json!([]));
 
-    if mcp.check_oauth_bridge(&alice.access, |_| async {}).await {
+    if mcp.check_oauth_bridge(&alice.access, |_| async {}, None).await {
         // Verify exactly which records reached the real PDS, including the
         // absence of attempted cross-owner and post-revocation writes.
         let alice_history = chat.call(HISTORY, json!({"conversationId": "alicechat"})).await;
@@ -391,3 +374,5 @@ async fn spaces_mcp_chat_two_owners() {
     .await
     .err(403, "Forbidden");
 }
+
+mod standalone;

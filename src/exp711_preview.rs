@@ -37,6 +37,7 @@ struct HttpsEnrollment {
 struct FixtureTls {
     ca_file: PathBuf,
     listener: SocketAddr,
+    plc_origin: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -112,12 +113,18 @@ impl Profile {
     }
 
     pub fn is_local_tls_fixture(&self, plc_url: &str) -> bool {
-        self.https_enrollment
-            .as_ref()
-            .and_then(|https| https.fixture_tls.as_ref())
-            .is_some_and(|tls| tls.listener.ip().is_loopback())
-            && reqwest::Url::parse(plc_url)
-                .is_ok_and(|url| url.scheme() == "http" && url.host_str() == Some("127.0.0.1") && url.port().is_some())
+        self.https_enrollment.as_ref().and_then(|https| https.fixture_tls.as_ref()).is_some_and(|tls| {
+            tls.listener.ip().is_loopback()
+                && tls.plc_origin.as_deref() == Some(plc_url)
+                && reqwest::Url::parse(plc_url).is_ok_and(|url| {
+                    url.scheme() == "http"
+                        && url.host_str() == Some("127.0.0.1")
+                        && url.port().is_some()
+                        && url.origin().ascii_serialization() == plc_url
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                })
+        })
     }
 
     pub fn store(&self) -> anyhow::Result<vlsync_store::store::S3Config> {

@@ -123,7 +123,7 @@ try {
     recoveryListen: recovery, wrappingKeyFile, issuer, serviceTokenFile, bindings: {},
     dispatchSigner: signer.iss, enrollmentRedirect: `${pdsOrigin}/exp711/spaces-callback`,
     ...(local && { httpsEnrollment: { pdsIssuer: pdsOrigin, fixtureTls: {
-      caFile: join(directory, "issuer-cert.pem"), listener: pdsTls,
+      caFile: join(directory, "issuer-cert.pem"), listener: pdsTls, plcOrigin: local.plc,
     } } }),
     storage: { endpoint: storageOrigin, bucket, accessKeyFile, secretKeyFile },
   };
@@ -144,6 +144,11 @@ try {
       { env, encoding: "utf8", timeout: 5000 });
     assert.notEqual(rejected.status, 0);
     assert.match(rejected.stderr, /requires an absolute preview-only --jwt-secret-file/);
+    const mismatchedPlc = [...args];
+    mismatchedPlc[mismatchedPlc.indexOf("--plc-url") + 1] = `http://${recovery}`;
+    const rejectedPlc = spawnSync(pdsBinary, mismatchedPlc, { env, encoding: "utf8", timeout: 5000 });
+    assert.notEqual(rejectedPlc.status, 0);
+    assert.match(rejectedPlc.stderr, /requires HTTPS PLC outside a pinned local TLS fixture/);
     for (const authority of ["ident.link", "example.com", "mcpchat.example.com"]) {
       args.push("--lexicon-authority-override", `${authority}=${signer.iss}`);
     }
